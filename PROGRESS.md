@@ -15,6 +15,20 @@
 
 ---
 
+## 2026-06-17 · feat/step-phase1-bot-auth · e9a8e2c
+- **Сделано:** старт трека **step / Phase 1 bot-auth**. Добавлен каркас
+  `app/bot/` (dispatcher, middlewares, filters, states, handlers, keyboards,
+  texts), реализованы `/start` + запрос контакта + создание `pending`-клиента,
+  dev-команды `/as`, `/as_user`, `/kill_switch`, role-based меню и wiring в
+  `app/main.py`. После мержа трека A bot-layer переведён на реальные
+  `User`/`UserRole`/репозитории из data-layer; на in-memory пока оставлено только
+  dev-state для impersonation/kill-switch. Покрыто focused-тестами на
+  start/dev/effective context.
+- **Дальше:** добрать DB-зависимые участки flow и заменить in-memory dev-state на
+  постоянное хранилище (Redis/БД), когда будет согласован final runtime-контур.
+- **Открытые вопросы:** где хранить dev-контекст и kill-switch state до появления
+  постоянного Redis/FSM-контура.
+
 ## Фаза 1 — распределение задач
 
 Два трека по границе «данные/правила» ↔ «бот/диалог»: **`alex` — данные + RBAC-ядро
