@@ -69,11 +69,11 @@ async def start_command(
         await message.answer(ask_contact_text(), reply_markup=build_contact_keyboard())
         return
 
-    if user.status is UserStatus.BLOCKED:
+    if user.status is UserStatus.blocked:
         await message.answer(blocked_text())
         return
 
-    if user.status is UserStatus.PENDING:
+    if user.status is UserStatus.pending:
         await message.answer(pending_text(user), reply_markup=build_contact_keyboard())
         return
 
@@ -103,11 +103,11 @@ async def receive_contact(
     )
     await state.clear()
 
-    if result.user.status is UserStatus.BLOCKED:
+    if result.user.status is UserStatus.blocked:
         await message.answer(blocked_text())
         return
 
-    if result.user.status is UserStatus.ACTIVE:
+    if result.user.status is UserStatus.active:
         await message.answer(
             welcome_text(result.user, result.user.role),
             reply_markup=build_role_menu(result.user.role),

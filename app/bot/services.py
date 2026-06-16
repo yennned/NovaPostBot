@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from app.bot.permissions import is_dev as permissions_is_dev
 from app.bot.types import DevSession, EffectiveContext, KillSwitchRequest, KillSwitchStop
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
@@ -126,7 +127,7 @@ class DevService:
         self.services = services
 
     def is_dev(self, telegram_id: int) -> bool:
-        return telegram_id in self.services.dev_ids
+        return permissions_is_dev(telegram_id)
 
     def get_session(self, telegram_id: int) -> DevSession:
         return self.services.dev_state.sessions.setdefault(telegram_id, DevSession())
