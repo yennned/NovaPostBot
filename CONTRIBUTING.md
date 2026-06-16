@@ -27,26 +27,23 @@
 
 ## Зоны ответственности (Фаза 1)
 
-Scope Фазы 1 разрезан на два почти независимых трека по границе
-«данные/правила» ↔ «бот/диалог» — так минимизируем конфликты файлов. Полный
-чек-лист задач — в [PROGRESS.md](PROGRESS.md).
+Scope Фазы 1 — два трека по границе «данные/правила» ↔ «бот/диалог» (минимизируем
+конфликты файлов). Трек `alex` — **одна неделимая задача** (permissions зависит от
+моделей), поэтому одна ветка и один PR. Полный чек-лист — в [PROGRESS.md](PROGRESS.md).
 
 | Разработчик | Ветка | Область кода |
 |-------------|-------|--------------|
-| **alex** | `feat/alex-phase1-db` | `app/db/` (модели + репозитории), Alembic-миграция, `app/sheets/` (скелет), тесты на репозитории |
-| **alex** | `feat/alex-phase1-rbac` | `app/bot/permissions.py` (RBAC + dev-allowlist), bootstrap владельцев, тесты на permissions |
+| **alex** | `feat/alex-phase1-db` | `app/db/` (модели + репозитории), Alembic-миграция, `app/sheets/` (скелет), `app/bot/permissions.py` (RBAC + dev-allowlist), bootstrap владельцев, тесты на permissions/репозитории |
 | **step** | `feat/step-phase1-bot-auth` | `app/bot/` (dispatcher, middlewares, states, filters, keyboards, texts), `/start`+auth, dev god-mode (`/as`, impersonation, kill-switch), `app/main.py`, тесты на middleware/`/start`/two-man rule |
 
 **Правила координации:**
-- **`feat/alex-phase1-db` — фундамент, мержится первым.** Ветки `*-rbac` и
-  `*-bot-auth` импортируют enum ролей и модель `User`: стартуют параллельно по
-  согласованному контракту, БД-зависимые места привязывают после мержа db —
-  `rebase` на свежий `main`.
-- **alex** держит `db` и `rbac` в двух своих worktree (`NovaPostBot-db`,
-  `NovaPostBot-rbac`); ветку `feat/step-*` ведёт **step** в своём клоне.
-- **Один коммиттер на ветку.** В одну ветку коммитит один человек; параллельный
-  worktree той же ветки используется для работы/превью, синхронизация через
-  push/pull — без двойных коммитов в одну ветку.
+- **Трек A (`feat/alex-phase1-db`) — фундамент, мержится первым.** Трек B
+  импортирует enum ролей и модель `User`: стартует с частей без БД, БД-зависимые
+  места привязывает после мержа A — `rebase` ветки `feat/step-*` на свежий `main`.
+- **alex** ведёт свою задачу в одном worktree (`NovaPostBot-db`); ветку
+  `feat/step-*` ведёт **step** в своём клоне.
+- **Один коммиттер на ветку.** В одну ветку коммитит один человек; синхронизация
+  через push/pull — без двойных коммитов в одну ветку.
 
 ## Коммиты
 

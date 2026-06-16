@@ -17,28 +17,24 @@
 
 ## Фаза 1 — распределение задач
 
-Разрез по границе «данные/правила» ↔ «бот/диалог», чтобы минимизировать конфликты
-файлов. **`alex` ведёт data + RBAC в двух ветках, `step` — каркас бота + auth.**
-Порядок: **db мержится первым** (фундамент), затем rbac и bot/auth ребейзятся на
-свежий `main` (импортируют enum ролей и модель `User`). **Один коммиттер на
-ветку.** Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md).
+Два трека по границе «данные/правила» ↔ «бот/диалог»: **`alex` — данные + RBAC-ядро
+(одна неделимая задача, одна ветка), `step` — каркас бота + auth.** Внутри трека A
+порядок последовательный (permissions импортирует `enums`/`User`), поэтому это
+**один worktree и один PR**, без дробления. **Трек A мержится первым** (фундамент);
+трек B импортирует `enums`/`User`, поэтому ребейзится на свежий `main` после мержа
+A. **Один коммиттер на ветку.** Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### Трек A1 — `alex`: слой данных · `feat/alex-phase1-db`
+### Трек A — `alex`: данные + RBAC-ядро · `feat/alex-phase1-db`
 - [ ] `app/db/models/` — `enums` (роли `client<manager<owner`, статусы), `user`
       (role, status, phone, permissions JSONB), `sender_profile` (ФОП,
       `np_api_key` Fernet), `audit`.
 - [ ] `app/db/repositories/` — `user`, `sender_profile`, `audit`.
 - [ ] Alembic — начальная миграция схемы (`migrations/versions/`).
 - [ ] `app/sheets/client.py` — read-only скелет клиента Sheets (каркас).
-- [ ] `tests/` — репозитории.
-
-### Трек A2 — `alex`: RBAC-ядро · `feat/alex-phase1-rbac`
 - [ ] `app/bot/permissions.py` — иерархия ролей, `can_manage(actor, target)`,
       per-flag `has_permission(user, flag)`, dev-allowlist проверяется первой.
 - [ ] bootstrap владельцев из `OWNER_TELEGRAM_IDS`.
-- [ ] `tests/` — permissions (иерархия, флаги, dev-allowlist).
-- [ ] зависит от `enums`/`user` из A1 → старт по согласованному контракту,
-      финальная привязка после мержа A1.
+- [ ] `tests/` — permissions (иерархия, флаги, dev-allowlist), репозитории.
 
 ### Трек B — `step`: каркас бота + auth + меню + dev god-mode · `feat/step-phase1-bot-auth`
 - [ ] `app/bot/dispatcher.py`, `middlewares.py` (inject session/user +
