@@ -15,7 +15,7 @@
 
 ---
 
-## 2026-06-14 · feat/alex-phase0-infra · (init)
+## 2026-06-14 · feat/alex-phase0-infra · fff41ff
 - **Сделано:** старт **Фазы 0**. `git init` (main). Каркас инфраструктуры:
   `.gitignore`, `.dockerignore`, `.env.example`, `CONTRIBUTING.md`, этот журнал;
   тулинг (`pyproject.toml` — ruff+pytest, `.pre-commit-config.yaml`,
