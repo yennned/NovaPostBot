@@ -1,0 +1,31 @@
+[project]
+name = "novapostbot"
+version = "0.0.0"
+description = "Telegram-бот личного кабинета фулфилмента Новой Почты"
+requires-python = ">=3.12"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "C4", "SIM", "RUF"]
+ignore = [
+    "S101",     # assert в тестах — ок
+    "RUF001",   # неоднозначные unicode-символы в строках — у нас русский текст
+    "RUF002",   # то же в докстроках
+    "RUF003",   # то же в комментариях
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
+"migrations/**" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
