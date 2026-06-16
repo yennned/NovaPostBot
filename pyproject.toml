@@ -12,7 +12,10 @@ src = ["app", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "C4", "SIM", "RUF"]
 ignore = [
-    "S101",  # assert в тестах — ок
+    "S101",     # assert в тестах — ок
+    "RUF001",   # неоднозначные unicode-символы в строках — у нас русский текст
+    "RUF002",   # то же в докстроках
+    "RUF003",   # то же в комментариях
 ]
 
 [tool.ruff.lint.per-file-ignores]

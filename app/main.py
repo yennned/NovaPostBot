@@ -19,8 +19,7 @@ async def main() -> None:
     log.info("bot.start", timezone=settings.timezone)
 
     # TODO (Фаза 1): Bot/Dispatcher, middlewares, роутеры, start_polling.
-    while True:
-        await asyncio.sleep(3600)
+    await asyncio.Event().wait()  # держим процесс живым (каркас)
 
 
 if __name__ == "__main__":

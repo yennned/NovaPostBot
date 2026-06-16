@@ -19,8 +19,7 @@ async def main() -> None:
     log.info("worker.start", timezone=settings.timezone)
 
     # TODO (Фаза 5): APScheduler — опрос трекинга НП, SLA, low-stock.
-    while True:
-        await asyncio.sleep(3600)
+    await asyncio.Event().wait()  # держим процесс живым (каркас)
 
 
 if __name__ == "__main__":
