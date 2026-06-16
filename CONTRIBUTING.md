@@ -80,8 +80,23 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
-CI (GitHub Actions, `.github/workflows/ci.yml`) гоняет `ruff` + `pytest` и
-является гейтом для merge в `main`.
+**Тесты требуют Postgres** (часть тестов гоняет репозитории/миграции на живой БД,
+а не на моках). Локально:
+
+```bash
+docker compose --profile dev up -d postgres   # postgres:16 на localhost:5432
+cp .env.example .env                           # выставить DATABASE_URL(_DIRECT)
+                                               # на localhost и FERNET_KEY
+pytest -q
+```
+
+`DATABASE_URL`/`DATABASE_URL_DIRECT` для локальной БД:
+`postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot`. `FERNET_KEY`
+сгенерировать: `python -c "from app.utils.crypto import generate_key; print(generate_key())"`.
+В CI Postgres поднимается автоматически (service-container в `ci.yml`).
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) гоняет `ruff` + `pytest`
+(с Postgres-сервисом) и является гейтом для merge в `main`.
 
 ## Документация
 
