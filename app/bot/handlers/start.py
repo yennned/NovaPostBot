@@ -69,7 +69,7 @@ async def start_command(
         await message.answer(ask_contact_text(), reply_markup=build_contact_keyboard())
         return
 
-    if user.status is UserStatus.blocked:
+    if user.status in {UserStatus.blocked, UserStatus.archived}:
         await message.answer(blocked_text())
         return
 
@@ -82,13 +82,15 @@ async def start_command(
 
 
 @router.message(StartStates.waiting_for_contact, F.contact)
-@router.message(F.contact)
 async def receive_contact(
     message: Message,
     state: FSMContext,
     start_service: StartService,
 ) -> None:
     if message.from_user is None or message.contact is None:
+        return
+
+    if await state.get_state() != StartStates.waiting_for_contact.state:
         return
 
     if message.contact.user_id != message.from_user.id:

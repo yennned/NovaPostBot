@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from app.bot.handlers.start import receive_contact, start_command
 from app.bot.services import StartResult
+from app.bot.states import StartStates
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 
@@ -12,6 +13,9 @@ from app.db.models.user import User
 class FakeState:
     state: object | None = None
     cleared: bool = False
+
+    async def get_state(self) -> object | None:
+        return self.state
 
     async def set_state(self, value: object) -> None:
         self.state = value
@@ -71,13 +75,30 @@ async def test_start_command_handles_blocked_user_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_command_handles_archived_user_status() -> None:
+    message = FakeMessage(SimpleNamespace(id=123, full_name="Step User"))
+    state = FakeState()
+    context = SimpleNamespace(
+        is_dev=False,
+        effective_role=None,
+        effective_user=None,
+        actor_user=make_user(status=UserStatus.archived),
+    )
+
+    await start_command(message, state, context)
+
+    assert message.answers
+    assert "заблоковано" in str(message.answers[0]["text"])
+
+
+@pytest.mark.asyncio
 async def test_receive_contact_handles_active_user_status() -> None:
     active_user = make_user(status=UserStatus.active, role=UserRole.manager)
     message = FakeMessage(
         SimpleNamespace(id=123, full_name="Step User"),
         contact=SimpleNamespace(user_id=123, phone_number="+380501112233"),
     )
-    state = FakeState()
+    state = FakeState(state=StartStates.waiting_for_contact.state)
     service = FakeStartService(StartResult(user=active_user, created=False))
 
     await receive_contact(message, state, service)
@@ -85,3 +106,19 @@ async def test_receive_contact_handles_active_user_status() -> None:
     assert state.cleared is True
     assert message.answers
     assert "Вітаю" in str(message.answers[0]["text"])
+
+
+@pytest.mark.asyncio
+async def test_receive_contact_ignores_contact_outside_waiting_state() -> None:
+    active_user = make_user(status=UserStatus.active, role=UserRole.manager)
+    message = FakeMessage(
+        SimpleNamespace(id=123, full_name="Step User"),
+        contact=SimpleNamespace(user_id=123, phone_number="+380501112233"),
+    )
+    state = FakeState(state=None)
+    service = FakeStartService(StartResult(user=active_user, created=False))
+
+    await receive_contact(message, state, service)
+
+    assert state.cleared is False
+    assert message.answers == []
