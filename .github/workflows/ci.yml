@@ -9,6 +9,22 @@ on:
 jobs:
   lint-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: novapost
+          POSTGRES_PASSWORD: novapost
+          POSTGRES_DB: novapostbot_test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U novapost -d novapostbot_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
+      DATABASE_URL_DIRECT: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
+      FERNET_KEY: 8LriREApni0MjqknuIDohQH6rnNVIOknKJ6Kl4tuVQ4=
     steps:
       - uses: actions/checkout@v4
 

@@ -28,4 +28,8 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Единый event loop на всю сессию — чтобы session-scoped engine и
+# function-scoped db_session работали в одном цикле (pytest-asyncio 1.x).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 addopts = "-q"

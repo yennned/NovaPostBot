@@ -17,28 +17,24 @@
 
 ## Фаза 1 — распределение задач
 
-Разрез по границе «данные/правила» ↔ «бот/диалог», чтобы минимизировать конфликты
-файлов. **`alex` ведёт data + RBAC в двух ветках, `step` — каркас бота + auth.**
-Порядок: **db мержится первым** (фундамент), затем rbac и bot/auth ребейзятся на
-свежий `main` (импортируют enum ролей и модель `User`). **Один коммиттер на
-ветку.** Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md).
+Два трека по границе «данные/правила» ↔ «бот/диалог»: **`alex` — данные + RBAC-ядро
+(одна неделимая задача, одна ветка), `step` — каркас бота + auth.** Внутри трека A
+порядок последовательный (permissions импортирует `enums`/`User`), поэтому это
+**один worktree и один PR**, без дробления. **Трек A мержится первым** (фундамент);
+трек B импортирует `enums`/`User`, поэтому ребейзится на свежий `main` после мержа
+A. **Один коммиттер на ветку.** Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### Трек A1 — `alex`: слой данных · `feat/alex-phase1-db`
-- [ ] `app/db/models/` — `enums` (роли `client<manager<owner`, статусы), `user`
+### Трек A — `alex`: данные + RBAC-ядро · `feat/alex-phase1-db`
+- [x] `app/db/models/` — `enums` (роли `client<manager<owner`, статусы), `user`
       (role, status, phone, permissions JSONB), `sender_profile` (ФОП,
       `np_api_key` Fernet), `audit`.
-- [ ] `app/db/repositories/` — `user`, `sender_profile`, `audit`.
-- [ ] Alembic — начальная миграция схемы (`migrations/versions/`).
-- [ ] `app/sheets/client.py` — read-only скелет клиента Sheets (каркас).
-- [ ] `tests/` — репозитории.
-
-### Трек A2 — `alex`: RBAC-ядро · `feat/alex-phase1-rbac`
-- [ ] `app/bot/permissions.py` — иерархия ролей, `can_manage(actor, target)`,
+- [x] `app/db/repositories/` — `user`, `sender_profile`, `audit`.
+- [x] Alembic — начальная миграция схемы (`migrations/versions/`).
+- [x] `app/sheets/client.py` — read-only скелет клиента Sheets (каркас).
+- [x] `app/bot/permissions.py` — иерархия ролей, `can_manage(actor, target)`,
       per-flag `has_permission(user, flag)`, dev-allowlist проверяется первой.
-- [ ] bootstrap владельцев из `OWNER_TELEGRAM_IDS`.
-- [ ] `tests/` — permissions (иерархия, флаги, dev-allowlist).
-- [ ] зависит от `enums`/`user` из A1 → старт по согласованному контракту,
-      финальная привязка после мержа A1.
+- [x] bootstrap владельцев из `OWNER_TELEGRAM_IDS` (`app/services/bootstrap.py`).
+- [x] `tests/` — репозитории + crypto + permissions + bootstrap (на реальном Postgres).
 
 ### Трек B — `step`: каркас бота + auth + меню + dev god-mode · `feat/step-phase1-bot-auth`
 - [ ] `app/bot/dispatcher.py`, `middlewares.py` (inject session/user +
@@ -52,6 +48,35 @@
 - [ ] `tests/` — middleware/эффективная роль, логика `/start`, two-man rule.
 
 ---
+
+## 2026-06-17 · feat/alex-phase1-db · a8847c3 (RBAC-часть трека A)
+- **Сделано:** **RBAC-ядро Фазы 1**. `app/bot/permissions.py` (чистая логика, без
+  aiogram/БД — переиспользуемо для WebApp): `role_at_least`, `can_manage`
+  (строго сверху вниз; менеджеры друг другом не управляют; собой нельзя),
+  `has_permission` (per-flag, по умолчанию включено, owner/dev — всё),
+  dev-allowlist (`DEV_TELEGRAM_IDS`) проверяется **первым**. Bootstrap владельцев
+  `app/services/bootstrap.ensure_owners` (создаёт/повышает/активирует из
+  `OWNER_TELEGRAM_IDS`, пишет в `audit_logs`, идемпотентно). Тесты permissions +
+  bootstrap — всего 23 passed, ruff чист. **Трек A закрыт целиком (данные + RBAC).**
+- **Дальше:** PR трека A в `main`; затем `step` ребейзится и стартует трек B.
+- **Открытые вопросы:** нет.
+
+## 2026-06-17 · feat/alex-phase1-db · 0e0e98f (DB-часть трека A)
+- **Сделано:** **слой данных Фазы 1**. База: `Base.metadata` с naming_convention,
+  `app/db/mixins.py` (UUID PK через `uuid4`, таймстемпы), `app/utils/crypto.py`
+  (Fernet поверх `FERNET_KEY`), `app/db/types.EncryptedString` (прозрачный шифр
+  ключа НП). Модели: `enums` (`UserRole`/`UserStatus`/`OrgType` — `StrEnum`,
+  нативные PG-enum), `User`, `SenderProfile`, `AuditLog`. Репозитории:
+  `user`/`sender_profile`/`audit` (тонкий слой над `AsyncSession`,
+  эксклюзивный `set_default`). Начальная Alembic-миграция (проверены
+  upgrade→downgrade→upgrade и `alembic check`; явный DROP TYPE для enum в
+  downgrade). Read-only скелет `app/sheets/client.py`. Тесты на **реальном
+  Postgres** (`conftest` с per-test rollback) + crypto — 11 passed, ruff чист.
+  CI: postgres-service; docker-compose: профиль `dev` с локальным postgres.
+- **Дальше:** RBAC-часть трека A — `app/bot/permissions.py` (иерархия,
+  `can_manage`, per-flag права, dev-allowlist первым), bootstrap владельцев из
+  `OWNER_TELEGRAM_IDS`, тесты permissions. Затем PR трека A в `main`.
+- **Открытые вопросы:** нет.
 
 ## 2026-06-14 · feat/alex-phase0-infra · 776f15b
 - **Сделано:** старт **Фазы 0**. `git init` (main). Каркас инфраструктуры:
