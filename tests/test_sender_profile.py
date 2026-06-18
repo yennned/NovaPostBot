@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
+import httpx
 import pytest
+from app.config import Settings
 from app.db.models.enums import OrgType, UserRole, UserStatus
 from app.db.repositories import UserRepository
+from app.novaposhta.client import NovaPoshtaClient
 from app.services import sender_profile as sp
-from app.services.exceptions import PermissionDenied, SenderProfileNotFound
+from app.services.exceptions import (
+    PermissionDenied,
+    SenderProfileKeyInvalid,
+    SenderProfileNotFound,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -16,6 +24,31 @@ async def _user(session: AsyncSession, telegram_id: int, role=UserRole.client):
     return await UserRepository(session).create(
         telegram_id=telegram_id, role=role, status=UserStatus.active
     )
+
+
+def _np_client(routes: dict[tuple[str, str], object], **settings_over) -> NovaPoshtaClient:
+    """NovaPoshtaClient на MockTransport, диспатчащий по (modelName, calledMethod)."""
+    settings = Settings(_env_file=None)
+    settings.np_retry_backoff = 0.0
+    for key, value in settings_over.items():
+        setattr(settings, key, value)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        result = routes[(body["modelName"], body["calledMethod"])]
+        if isinstance(result, httpx.Response):
+            return result
+        return httpx.Response(
+            200, json={"success": True, "data": result, "errors": [], "errorCodes": []}
+        )
+
+    return NovaPoshtaClient(settings=settings, transport=httpx.MockTransport(handler))
+
+
+_VALID_KEY_ROUTES = {
+    ("Counterparty", "getCounterparties"): [{"Ref": "sender-cp"}],
+    ("Counterparty", "getCounterpartyContactPersons"): [{"Ref": "sender-contact"}],
+}
 
 
 async def test_create_first_profile_is_default(db_session: AsyncSession):
@@ -88,3 +121,111 @@ async def test_profile_not_found(db_session: AsyncSession):
     client = await _user(db_session, 106)
     with pytest.raises(SenderProfileNotFound):
         await sp.get_profile(db_session, actor=client, profile_id=uuid.uuid4())
+
+
+async def test_create_with_np_client_validates_and_fills_refs(db_session: AsyncSession):
+    client = await _user(db_session, 107)
+    settings = Settings(_env_file=None)
+    settings.np_sender_warehouse_ref = "wh-ref"
+    view = await sp.create_profile(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="good-key",
+        np_client=_np_client(_VALID_KEY_ROUTES),
+        settings=settings,
+    )
+    assert view.is_np_validated is True
+    # Ref'ы отправителя осели в БД
+    profiles = await sp.SenderProfileRepository(db_session).list_for_client(client.id)
+    assert profiles[0].np_sender_ref == "sender-cp"
+    assert profiles[0].np_contact_ref == "sender-contact"
+    assert profiles[0].np_sender_warehouse == "wh-ref"  # из конфига
+
+
+async def test_create_with_invalid_key_raises_and_creates_no_row(db_session: AsyncSession):
+    client = await _user(db_session, 108)
+    bad = _np_client(
+        {
+            ("Counterparty", "getCounterparties"): httpx.Response(
+                200,
+                json={"success": False, "data": [], "errors": [], "errorCodes": ["20000200068"]},
+            )
+        }
+    )
+    with pytest.raises(SenderProfileKeyInvalid):
+        await sp.create_profile(
+            db_session,
+            actor=client,
+            client_id=client.id,
+            name="ФОП",
+            np_api_key="bad-key",
+            np_client=bad,
+        )
+    # профиль не создан (валидация до записи)
+    assert await sp.list_profiles(db_session, actor=client, client_id=client.id) == []
+
+
+async def test_create_without_np_client_skips_validation(db_session: AsyncSession):
+    client = await _user(db_session, 109)
+    view = await sp.create_profile(
+        db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+    )
+    assert view.is_np_validated is False  # ключ не валидировали — Ref'ов нет
+
+
+async def test_update_key_revalidates_and_updates_refs(db_session: AsyncSession):
+    client = await _user(db_session, 110)
+    created = await sp.create_profile(
+        db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+    )
+    assert created.is_np_validated is False
+    updated = await sp.update_profile(
+        db_session,
+        actor=client,
+        profile_id=created.id,
+        np_client=_np_client(_VALID_KEY_ROUTES),
+        np_api_key="new-good-key",
+    )
+    assert updated.is_np_validated is True
+    profiles = await sp.SenderProfileRepository(db_session).list_for_client(client.id)
+    assert profiles[0].np_sender_ref == "sender-cp"
+
+
+async def test_key_only_update_keeps_existing_warehouse(db_session: AsyncSession):
+    client = await _user(db_session, 111)
+    with_wh = Settings(_env_file=None)
+    with_wh.np_sender_warehouse_ref = "wh-ref"
+    created = await sp.create_profile(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k1",
+        np_client=_np_client(_VALID_KEY_ROUTES),
+        settings=with_wh,
+    )
+    repo = sp.SenderProfileRepository(db_session)
+    assert (await repo.get_by_id(created.id)).np_sender_warehouse == "wh-ref"
+
+    # ротация ключа без склада в конфиге не должна обнулить склад
+    no_wh = Settings(_env_file=None)  # np_sender_warehouse_ref = ""
+    await sp.update_profile(
+        db_session,
+        actor=client,
+        profile_id=created.id,
+        np_client=_np_client(_VALID_KEY_ROUTES),
+        settings=no_wh,
+        np_api_key="k2",
+    )
+    assert (await repo.get_by_id(created.id)).np_sender_warehouse == "wh-ref"  # сохранён
+
+
+async def test_update_empty_key_rejected(db_session: AsyncSession):
+    client = await _user(db_session, 112)
+    created = await sp.create_profile(
+        db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+    )
+    with pytest.raises(SenderProfileKeyInvalid):
+        await sp.update_profile(db_session, actor=client, profile_id=created.id, np_api_key="  ")

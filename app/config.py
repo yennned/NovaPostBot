@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # чаще — 6 часов).
     np_cities_ttl_seconds: int = Field(default=86_400, alias="NP_CITIES_TTL_SECONDS")
     np_warehouses_ttl_seconds: int = Field(default=21_600, alias="NP_WAREHOUSES_TTL_SECONDS")
+    # Наш склад-отправитель (физически один на фулфилмент) — Ref города и
+    # відділення НП. Подставляются как отправитель при создании ТТН.
+    np_sender_city_ref: str = Field(default="", alias="NP_SENDER_CITY_REF")
+    np_sender_warehouse_ref: str = Field(default="", alias="NP_SENDER_WAREHOUSE_REF")
 
     # Роли (сырые строки из env; распарсенные — в свойствах ниже)
     owner_telegram_ids_raw: str = Field(default="", alias="OWNER_TELEGRAM_IDS")

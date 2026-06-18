@@ -15,6 +15,30 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-sender-validation · валидация ключа ФОП (Фаза 4, PR 4)
+- **Сделано:** PR 4 Фазы 4 — первый сервисный PR. `services/sender_profile`:
+  `create_profile`/`update_profile` приняли `np_client`; при заданном клиенте ключ
+  ФОП валидируется в НП (`methods.validate_key_and_get_sender`) **до** записи —
+  плохой ключ/нет контрагента → `SenderProfileKeyInvalid` (новое исключение),
+  профиль не сохраняется; успех подтягивает `np_sender_ref`/`np_contact_ref` в
+  профиль, склад-отправитель — из конфига (`NP_SENDER_WAREHOUSE_REF`). Транзитный
+  `NovaPoshtaUnavailable` не клеймит ключ — пробрасывается. `SenderProfileView`
+  получил `is_np_validated`. `repo.create` принял ref-поля (миграции не нужно —
+  колонки есть с Фазы 1). Конфиг: `NP_SENDER_CITY_REF`/`NP_SENDER_WAREHOUSE_REF`.
+  Без `np_client` (часть тестов) валидация пропускается — профиль
+  «непровалидирован», создание ТТН его не пропустит (PR 6). **Правки по
+  `/code-review`:** склад в refs кладём только если задан в конфиге (правка одного
+  ключа не обнуляет ранее сохранённый склад); пустой `np_api_key` при update →
+  `SenderProfileKeyInvalid` (ФОП без ключа бесполезен). Тесты: фейковый NP-клиент
+  на `MockTransport` (валидный ключ/плохой ключ/без клиента/ротация/сохранение
+  склада/пустой ключ). Полный сьют (132) зелёный, ruff + гейт границы слоёв чисты
+  (`services` импортирует `novaposhta` — это абстракция, не aiogram).
+- **Дальше:** PR 5 — миграция `shipments.size_preset` + `weight` (единственный
+  schema-PR) + расширение модели/`repo.create`.
+- **Открытые вопросы:** точный набор полей отправителя в `save` (CitySender/
+  SenderAddress vs counterparty-address) — сверить с боевым НП; пока склад/город из
+  конфига.
+
 ## 2026-06-19 · feat/alex-phase4-np-cache · Redis cache справочников НП (Фаза 4, PR 3)
 - **Сделано:** PR 3 Фазы 4 — `app/novaposhta/cache.py` `NPReferenceCache`:
   cache-aside поверх `redis.asyncio` для `Address.*` (города/відділення). На miss
