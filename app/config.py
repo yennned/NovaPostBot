@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -61,5 +63,13 @@ class Settings(BaseSettings):
         return parse_ids(self.dev_telegram_ids_raw)
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """Кешированный синглтон настроек.
+
+    Без кеша каждый вызов конструировал бы новый `Settings()` (чтение `.env` с
+    диска + повторный парс списков ID), а вызывается это в горячем пути —
+    `is_dev`/`can_manage`/`has_permission` на каждый апдейт Telegram. В тестах
+    кеш сбрасывается autouse-фикстурой (`get_settings.cache_clear()`).
+    """
     return Settings()

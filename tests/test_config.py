@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.config import Settings, parse_ids
+from app.config import Settings, get_settings, parse_ids
 
 
 def test_parse_ids_variants():
@@ -28,3 +28,8 @@ def test_settings_defaults(monkeypatch):
     assert settings.timezone == "Europe/Kyiv"
     assert settings.owner_telegram_ids == []
     assert settings.redis_url.startswith("redis://")
+
+
+def test_get_settings_is_cached():
+    # Горячий путь (permissions/middleware) не должен пересоздавать Settings.
+    assert get_settings() is get_settings()

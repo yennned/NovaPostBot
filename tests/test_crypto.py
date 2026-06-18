@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from app.utils import crypto
 
 
@@ -27,3 +28,9 @@ def test_generate_key_is_valid_fernet_key():
     key = crypto.generate_key()
     # Не бросает → ключ валиден.
     Fernet(key.encode())
+
+
+def test_decrypt_invalid_token_raises_decryption_error():
+    # Битый/несовместимый токен → доменное DecryptionError, а не сырой InvalidToken.
+    with pytest.raises(crypto.DecryptionError):
+        crypto.decrypt("not-a-valid-fernet-token")
