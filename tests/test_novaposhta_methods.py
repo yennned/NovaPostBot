@@ -212,3 +212,36 @@ async def test_validate_key_no_sender_counterparty_raises_validation():
     handler, _ = _router({("Counterparty", "getCounterparties"): []})
     with pytest.raises(NovaPoshtaValidationError):
         await methods.validate_key_and_get_sender(_client(handler), api_key="K")
+
+
+async def test_ensure_recipient_returns_refs():
+    handler, captured = _router(
+        {
+            ("Counterparty", "save"): [
+                {"Ref": "rcpt-cp", "ContactPerson": {"data": [{"Ref": "rcpt-ct"}]}}
+            ]
+        }
+    )
+    cp_ref, contact_ref = await methods.ensure_recipient(
+        _client(handler), api_key="K", kind="person", name="Петренко Іван", phone="380671234567"
+    )
+    assert (cp_ref, contact_ref) == ("rcpt-cp", "rcpt-ct")
+    assert captured["body"]["methodProperties"]["LastName"] == "Петренко"
+
+
+async def test_ensure_recipient_missing_ref_raises_validation():
+    # success-строка без Ref → доменная ошибка, не KeyError
+    handler, _ = _router({("Counterparty", "save"): [{"Description": "no ref"}]})
+    with pytest.raises(NovaPoshtaValidationError):
+        await methods.ensure_recipient(
+            _client(handler), api_key="K", kind="person", name="Іван", phone="380"
+        )
+
+
+async def test_ensure_recipient_no_contact_returns_none():
+    handler, _ = _router({("Counterparty", "save"): [{"Ref": "rcpt-cp"}]})
+    cp_ref, contact_ref = await methods.ensure_recipient(
+        _client(handler), api_key="K", kind="organization", name="ТОВ", phone="380", edrpou="123"
+    )
+    assert cp_ref == "rcpt-cp"
+    assert contact_ref is None

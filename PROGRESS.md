@@ -15,6 +15,33 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-create-shipment · write-сервис создания ТТН (Фаза 4, PR 6)
+- **Сделано:** PR 6 Фазы 4 — **ядро домена**. `services/shipment.py` `create_shipment`
+  (NP-first): гард активного клиента → резолв ФОП (нет → `SenderProfileNotConfigured`,
+  не валидирован → `SenderProfileNotValidated`) → пред-проверка остатков
+  (`qty ≤ available`, агрегируя дубли строк по sku → `InsufficientStock`) → НП
+  `ensure_recipient` (контрагент-получатель) + `save_ttn` → при успехе
+  `repo.create(status=created, ttn_number, np_ref, items, size_preset, weight)` —
+  **резерв включается сам** (выводимый из статуса) → аудит → best-effort пуш
+  персоналу «Створені». Любая ошибка НП → `TtnCreationFailed`, в БД ничего (резерва
+  нет). `methods.ensure_recipient` (`Counterparty.save` фіз/юр) + `mapping`
+  (`split_full_name`, `to_recipient_counterparty_props`) — стандарт НП v2.0,
+  изолировано, под табличными тестами (контракт получателя в доках отсутствует —
+  **требует боевой сверки**). `notifications.notify_shipment_created` +
+  общий `_staff_recipient_ids`. Новые исключения: NotConfigured/NotValidated/
+  InsufficientStock/TtnCreationFailed/TtnCancelFailed. **Правки по `/code-review`:**
+  агрегация дублей sku (анти-oversell); пуш в try/except (сбой пуша не откатывает
+  записанную ТТН); COD без суммы → доменная ошибка (анти-«тихий сброс COD»);
+  `ensure_recipient`/`save_ttn`/`validate_key` достают `Ref` через гард (не KeyError
+  мимо обработчика); юр-получатель — `CompanyName`. Тесты на Postgres (happy+резерв/
+  NP-fail/over-reserve/дубли-sku/COD-без-суммы/нет-ФОП/не-валидирован/сбой-получателя)
+  + methods. Полный сьют (148) зелёный, ruff + гейт границы слоёв чисты.
+- **Дальше:** PR 7 — address-search сервис (города/відділення поверх `NPReferenceCache`).
+- **Открытые вопросы:** контракт `Counterparty.save` получателя (имена полей,
+  разбиение ПІБ, юрособа) — сверить с боевым НП; шов NP-save↔commit (известный
+  остаточный риск — НП не переиспользует номера, single-flight в FSM PR 9);
+  NP-aware `cancel` (NP delete) — в PR 9d при проводке кнопки «Скасувати».
+
 ## 2026-06-19 · feat/alex-phase4-shipment-cols · миграция size_preset + weight (Фаза 4, PR 5)
 - **Сделано:** PR 5 Фазы 4 — единственный schema-PR. В `shipments` добавлены
   `size_preset VARCHAR(32)` и `weight NUMERIC(8,3)` (оба nullable): пресет НП и

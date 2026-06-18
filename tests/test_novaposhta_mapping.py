@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.novaposhta.mapping import PAYMENT_METHOD, money, to_price_props, to_save_props
+from app.novaposhta.mapping import (
+    PAYMENT_METHOD,
+    money,
+    split_full_name,
+    to_price_props,
+    to_recipient_counterparty_props,
+    to_save_props,
+)
 from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
 
 _SENDER = SenderIdentity(
@@ -121,6 +128,36 @@ def test_price_props_without_cod():
         "CargoType": "Cargo",
         "SeatsAmount": "1",
     }
+
+
+def test_split_full_name_ukrainian_order():
+    assert split_full_name("Петренко Іван Богданович") == ("Петренко", "Іван", "Богданович")
+    assert split_full_name("Петренко Іван") == ("Петренко", "Іван", "")
+    assert split_full_name("Петренко") == ("Петренко", "", "")
+    assert split_full_name("  ") == ("", "", "")
+
+
+def test_recipient_counterparty_props_person():
+    props = to_recipient_counterparty_props(
+        kind="person", name="Петренко Іван", phone="380671234567"
+    )
+    assert props == {
+        "CounterpartyType": "PrivatePerson",
+        "CounterpartyProperty": "Recipient",
+        "FirstName": "Іван",
+        "MiddleName": "",
+        "LastName": "Петренко",
+        "Phone": "380671234567",
+    }
+
+
+def test_recipient_counterparty_props_organization():
+    props = to_recipient_counterparty_props(
+        kind="organization", name="ТОВ Ромашка", phone="380441112233", edrpou="12345678"
+    )
+    assert props["CounterpartyType"] == "Organization"
+    assert props["CounterpartyProperty"] == "Recipient"
+    assert props["EDRPOU"] == "12345678"
 
 
 def test_price_props_with_cod_adds_redelivery():
