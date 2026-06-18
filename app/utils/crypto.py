@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import get_settings
+
+
+class DecryptionError(RuntimeError):
+    """Не удалось расшифровать токен: битые данные или сменился `FERNET_KEY`."""
 
 
 def generate_key() -> str:
@@ -36,5 +40,15 @@ def encrypt(plaintext: str) -> str:
 
 
 def decrypt(token: str) -> str:
-    """Расшифровать токен → исходная строка."""
-    return _fernet().decrypt(token.encode()).decode()
+    """Расшифровать токен → исходная строка.
+
+    При битом/несовместимом токене (повреждение или ротация `FERNET_KEY`) бросает
+    `DecryptionError` вместо «сырого» `InvalidToken` — чтобы загрузка ORM падала
+    предсказуемо и ловилась вызывающим кодом.
+    """
+    try:
+        return _fernet().decrypt(token.encode()).decode()
+    except InvalidToken as exc:
+        raise DecryptionError(
+            "не удалось расшифровать ключ НП: повреждённый токен или сменён FERNET_KEY"
+        ) from exc

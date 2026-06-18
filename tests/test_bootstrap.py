@@ -34,6 +34,13 @@ async def test_ensure_owners_creates_missing(db_session: AsyncSession, owner_set
     assert owner.status is UserStatus.active
     assert await _audit_count(db_session) == 1
 
+    # bootstrap — системное действие: актора нет (user_id IS NULL).
+    entry = await db_session.scalar(
+        select(AuditLog).where(AuditLog.action == "owner_bootstrapped")
+    )
+    assert entry.user_id is None
+    assert entry.affected_entity == f"user:{owner.id}"
+
 
 async def test_ensure_owners_promotes_existing(db_session: AsyncSession, owner_settings):
     users = UserRepository(db_session)

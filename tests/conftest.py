@@ -10,9 +10,20 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import app.db.models  # noqa: F401 — регистрирует таблицы в Base.metadata
+import pytest
 import pytest_asyncio
+from app.config import get_settings
 from app.db.base import Base, make_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings_cache():
+    """`get_settings` кеширован — сбрасываем кеш вокруг каждого теста, чтобы
+    фикстуры с `monkeypatch.setenv` видели свежие значения окружения."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

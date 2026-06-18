@@ -34,7 +34,7 @@ async def ensure_owners(session: AsyncSession, settings: Settings | None = None)
             )
             await audit.log(
                 "owner_bootstrapped",
-                user_id=user.id,
+                user_id=None,  # системное действие на старте — актора нет
                 affected_entity=f"user:{user.id}",
                 after={"role": UserRole.owner, "status": UserStatus.active},
                 notes="создан владелец из OWNER_TELEGRAM_IDS",
@@ -53,7 +53,7 @@ async def ensure_owners(session: AsyncSession, settings: Settings | None = None)
         if changed:
             await audit.log(
                 "owner_bootstrapped",
-                user_id=user.id,
+                user_id=None,  # системное действие на старте — актора нет
                 affected_entity=f"user:{user.id}",
                 before=before,
                 after={"role": user.role, "status": user.status},
