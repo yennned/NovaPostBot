@@ -15,6 +15,19 @@
 
 ---
 
+## 2026-06-18 · docs/alex-distribution-sync · синхронизация доков распределения
+- **Сделано:** привёл все forward-looking доки к модели **sequential-by-phase**
+  (чтобы не путать со старым layer-split). `docs/ROADMAP.md` — раздел распределения
+  переписан: sequential как основная модель + таблица владельцев фаз + «scope
+  каждой фазы» (оба слоя на владельца), layer-split явно помечен фолбэком.
+  `docs/phase2-stepan-brief.md` → **`docs/phase3-stepan-brief.md`** (Степан ведёт
+  всю Фазу 3 целиком от свежего main; убрано контракт-потребление/cherry-pick).
+  `CLAUDE.md` — «Текущий статус» обновлён (Фазы 0–2 в main, модель sequential).
+  `CONTRIBUTING.md` уже консистентен (sequential основной, layer-split фолбэк).
+  Грепом подтверждено: WT1/WT2/«делится на 2 worktree» в forward-looking доках нет.
+- **Дальше:** доделать UI правки профиля клиента — закрыть Фазу 2 полностью.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-18 · feat/alex-phase2-fixes · фиксы code-review (10 находок)
 - **Сделано:** правки по итогам /code-review Фазы 2.
   (1) `_require_staff`/`_require_can_manage` проверяют **статус актёра** — блок/архив
