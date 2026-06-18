@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,17 +56,18 @@ async def notify_new_client_registered(
     конкретный `Notifier` отвечает за «тихую» обработку сбоев отправки.
     """
     users = UserRepository(session)
-    recipients: dict[int, User] = {}
+    recipient_ids: set[int] = set()
     for owner in await users.list_by_role(UserRole.owner):
         if owner.status is UserStatus.active:
-            recipients[owner.telegram_id] = owner
+            recipient_ids.add(owner.telegram_id)
     for manager in await users.list_by_role(UserRole.manager):
         if manager.status is UserStatus.active and manager.on_duty:
-            recipients[manager.telegram_id] = manager
+            recipient_ids.add(manager.telegram_id)
 
     text = new_client_text(client)
-    for telegram_id in recipients:
-        await notifier.send_message(telegram_id, text)
+    # Шлём параллельно: один медленный получатель не тормозит остальных и ответ
+    # клиенту. Сбои доставки глотает `Notifier`, поэтому gather не упадёт.
+    await asyncio.gather(*(notifier.send_message(tid, text) for tid in recipient_ids))
 
 
 async def notify_client_approved(notifier: Notifier, *, client: User) -> None:

@@ -13,6 +13,7 @@ from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
     PermissionDenied,
+    PhoneAlreadyTaken,
     TransitionForbidden,
 )
 from sqlalchemy import func, select
@@ -85,8 +86,10 @@ async def test_archive_then_restore(db_session: AsyncSession):
     archived = await clients.archive_client(db_session, actor=actor, client_id=client.id)
     assert archived.status is UserStatus.archived
 
+    # restore возвращает в pending (повторное подтверждение), не сразу в active —
+    # чтобы заблокированный-и-заархивированный не «разблокировался» молча.
     restored = await clients.restore_client(db_session, actor=actor, client_id=client.id)
-    assert restored.status is UserStatus.active
+    assert restored.status is UserStatus.pending
 
 
 async def test_unblock_non_blocked_forbidden(db_session: AsyncSession):
@@ -94,6 +97,27 @@ async def test_unblock_non_blocked_forbidden(db_session: AsyncSession):
     client = await _client(db_session, status=UserStatus.pending)
     with pytest.raises(TransitionForbidden):
         await clients.unblock_client(db_session, actor=actor, client_id=client.id)
+
+
+async def test_blocked_manager_cannot_manage(db_session: AsyncSession):
+    # Менеджер, которого заблокировали, не должен управлять клиентами (по «залипшим»
+    # reply-кнопкам), хотя роль осталась manager.
+    actor = await _manager(db_session)
+    actor.status = UserStatus.blocked
+    await db_session.flush()
+    client = await _client(db_session)
+    with pytest.raises(PermissionDenied):
+        await clients.approve_client(db_session, actor=actor, client_id=client.id)
+    with pytest.raises(PermissionDenied):
+        await clients.list_clients(db_session, actor=actor)
+
+
+async def test_update_profile_phone_collision(db_session: AsyncSession):
+    actor = await _manager(db_session)
+    a = await _client(db_session, telegram_id=400)
+    b = await _client(db_session, telegram_id=401)
+    with pytest.raises(PhoneAlreadyTaken):
+        await clients.update_client_profile(db_session, actor=actor, client_id=a.id, phone=b.phone)
 
 
 async def test_permission_denied_for_client_actor(db_session: AsyncSession):

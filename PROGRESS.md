@@ -15,6 +15,26 @@
 
 ---
 
+## 2026-06-18 · feat/alex-phase2-fixes · фиксы code-review (10 находок)
+- **Сделано:** правки по итогам /code-review Фазы 2.
+  (1) `_require_staff`/`_require_can_manage` проверяют **статус актёра** — блок/архив
+  менеджер больше не управляет клиентами по «залипшим» reply-кнопкам.
+  (2) Пуши шлём **после commit** (`start.receive_contact`, `cb_action` approve) —
+  сбой коммита не оставит ложное уведомление; conftest переведён на
+  `join_transaction_mode="create_savepoint"` (commit в тестах не ломает изоляцию).
+  (3) callback-хендлеры ловят битый `callback.data` (split/uuid/int) → «кнопка
+  застаріла». (4) Гард `callback.message is None` (старое сообщение).
+  (5) `update_client_profile` проверяет занятость телефона → доменное
+  `PhoneAlreadyTaken` вместо сырого IntegrityError. (6) Поиск исключает команды
+  (`~startswith("/")`) и не ищет по кнопке «Клієнти». (7) `restore` → `pending`
+  (повторное подтверждение, блок не теряется). (8) `created_at` в карточке →
+  Europe/Kyiv. (9) Уведомления персоналу шлём `asyncio.gather` (параллельно).
+  (10) `_card` без лишнего `get_default_for_client` (дефолт из уже загруженного
+  списка). Новые тесты (блок-актёр, коллизия телефона) + правка restore-теста.
+  **64 теста зелёные**, ruff + гейт границы чисты.
+- **Дальше:** правка профиля клиента (UI) — остаток Фазы 2; затем Степан → Фаза 3.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-18 · chore/alex-ci-boundary · усиления council
 - **Сделано:** CI-гейт «`app/services` и `app/db` не импортируют aiogram»
   (grep-шаг в `ci.yml`) — держит сервисный слой API-first/переиспользуемым даже

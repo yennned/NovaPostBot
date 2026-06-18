@@ -111,7 +111,10 @@ async def receive_contact(
     await state.clear()
 
     # Новый клиент → пуш владельцам/дежурным менеджерам на подтверждение.
+    # Коммитим ДО пуша: иначе сбой коммита оставит уведомление о несуществующем
+    # клиенте. expire_on_commit=False → result.user остаётся пригодным.
     if result.created:
+        await db_session.commit()
         await notifications.notify_new_client_registered(
             db_session, BotNotifier(bot), client=result.user
         )

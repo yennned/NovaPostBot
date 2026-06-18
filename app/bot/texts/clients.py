@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
 from app.db.models.enums import UserStatus
 from app.services.clients import ClientCard, ClientListItem
 from app.services.exceptions import (
@@ -9,8 +11,12 @@ from app.services.exceptions import (
     ClientNotFound,
     ClientServiceError,
     PermissionDenied,
+    PhoneAlreadyTaken,
     TransitionForbidden,
 )
+
+# Часовой пояс отображения — Europe/Kyiv (см. CLAUDE.md «Базовые правила»).
+_KYIV = ZoneInfo("Europe/Kyiv")
 
 STATUS_LABELS: dict[UserStatus, str] = {
     UserStatus.pending: "Очікують",
@@ -48,7 +54,7 @@ def client_card_text(card: ClientCard) -> str:
         f"Статус: {STATUS_LABELS[card.status]}\n"
         f"ФОП: {card.sender_profiles_count}"
         + (f" (дефолт: {card.default_sender_name})" if card.default_sender_name else "")
-        + f"\nЗареєстровано: {card.created_at:%Y-%m-%d %H:%M}"
+        + f"\nЗареєстровано: {card.created_at.astimezone(_KYIV):%Y-%m-%d %H:%M}"
     )
 
 
@@ -78,4 +84,6 @@ def client_error_text(exc: ClientServiceError) -> str:
         return "Цю дію не можна виконати з поточного статусу."
     if isinstance(exc, PermissionDenied):
         return "Недостатньо прав для цієї дії."
+    if isinstance(exc, PhoneAlreadyTaken):
+        return "Цей телефон уже зайнятий іншим клієнтом."
     return "Не вдалося виконати дію."

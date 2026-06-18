@@ -25,6 +25,10 @@ class PermissionDenied(ClientServiceError):
     """У актёра нет прав на действие (иерархия `can_manage` или per-flag)."""
 
 
+class PhoneAlreadyTaken(ClientServiceError):
+    """Телефон уже занят другим пользователем (нарушит UNIQUE)."""
+
+
 class TransitionForbidden(ClientServiceError):
     """Переход статуса недопустим (напр. блокировать архивного)."""
 
