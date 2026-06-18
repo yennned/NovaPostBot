@@ -42,7 +42,12 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     conn = await engine.connect()
     trans = await conn.begin()
-    session = AsyncSession(bind=conn, expire_on_commit=False)
+    # join_transaction_mode="create_savepoint": session.commit() внутри теста
+    # освобождает savepoint, а не внешнюю транзакцию — изоляция сохраняется,
+    # хотя хендлеры коммитят (commit-before-notify).
+    session = AsyncSession(
+        bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+    )
     try:
         yield session
     finally:

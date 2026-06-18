@@ -23,6 +23,7 @@ from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
     PermissionDenied,
+    PhoneAlreadyTaken,
     TransitionForbidden,
 )
 
@@ -64,15 +65,27 @@ class ClientCard:
 
 
 def _require_staff(actor: User, settings: Settings | None) -> None:
-    """Чтение списка/карточки — только персонал (manager+) или dev."""
+    """Чтение списка/карточки — только активный персонал (manager+) или dev."""
     if permissions.is_dev(actor.telegram_id, settings):
         return
+    if actor.status is not UserStatus.active:
+        raise PermissionDenied("учётная запись неактивна")
     if not permissions.role_at_least(actor.role, UserRole.manager):
         raise PermissionDenied("требуется роль менеджера или выше")
 
 
 def _require_can_manage(actor: User, target: User, flag: str, settings: Settings | None) -> None:
-    """Мутация клиента: иерархия `can_manage` + per-flag право."""
+    """Мутация клиента: актёр активен + иерархия `can_manage` + per-flag право.
+
+    Статус актёра проверяем здесь, т.к. `/start` гейтит вход, но reply-клавиатуры в
+    Telegram сохраняются — заблокированный/архивный менеджер не должен управлять
+    клиентами по «залипшим» кнопкам (dev обходит проверку).
+    """
+    if (
+        not permissions.is_dev(actor.telegram_id, settings)
+        and actor.status is not UserStatus.active
+    ):
+        raise PermissionDenied("учётная запись неактивна")
     if not permissions.can_manage(actor, target, settings):
         raise PermissionDenied("нет прав управлять этим пользователем")
     if not permissions.has_permission(actor, flag, settings):
@@ -89,7 +102,8 @@ async def _get_client(users: UserRepository, client_id: uuid.UUID) -> User:
 async def _card(session: AsyncSession, user: User) -> ClientCard:
     profiles = SenderProfileRepository(session)
     items = await profiles.list_for_client(user.id)
-    default = await profiles.get_default_for_client(user.id)
+    # Дефолт уже среди items — отдельный запрос не нужен.
+    default = next((p for p in items if p.is_default), None)
     return ClientCard(
         id=user.id,
         telegram_id=user.telegram_id,
@@ -250,11 +264,13 @@ async def archive_client(
 async def restore_client(
     session: AsyncSession, *, actor: User, client_id: uuid.UUID, settings: Settings | None = None
 ) -> ClientCard:
+    # Архивный клиент мог быть заархивирован из blocked — возвращаем в pending
+    # (повторное подтверждение), а не сразу в active, чтобы не «снять» блок молча.
     return await _transition(
         session,
         actor=actor,
         client_id=client_id,
-        to=UserStatus.active,
+        to=UserStatus.pending,
         allowed_from={UserStatus.archived},
         action="client_restored",
         settings=settings,
@@ -280,6 +296,11 @@ async def update_client_profile(
         user.full_name = full_name
         changed = True
     if phone is not None and phone != user.phone:
+        # Телефон — UNIQUE: проверяем коллизию заранее, чтобы вернуть доменную
+        # ошибку, а не «сырой» IntegrityError на flush (бот ловит ClientServiceError).
+        clash = await users.get_by_phone(phone)
+        if clash is not None and clash.id != user.id:
+            raise PhoneAlreadyTaken(phone)
         user.phone = phone
         changed = True
     if changed:
