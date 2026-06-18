@@ -15,6 +15,30 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-np-methods · NP methods + mapping (Фаза 4, PR 2)
+- **Сделано:** PR 2 Фазы 4 — обёртки методов НП и **чистый маппинг полей**.
+  `mapping.py` (без I/O): `to_save_props` (черновик ТТН → `InternetDocument.save`:
+  `PayerType` выбор клиента, `PaymentMethod=Cash` константой, `Cost`=страховая,
+  COD→`BackwardDeliveryData`, передоплата→поле не шлём, `VolumeGeneral`/`SeatsAmount`
+  опц.), `to_price_props` (`getDocumentPrice`, COD→`RedeliveryCalculate`),
+  `money`/`weight` (Decimal→строка). `methods.py` (поверх `client.call`):
+  `get_cities`/`get_warehouses` (справочники), `get_price`, `get_status_documents`
+  (батч), `save_ttn`/`delete_ttn`, `validate_key_and_get_sender` (Counterparty
+  Sender Ref + контакт). `schemas.py` — доменные frozen-структуры
+  (`City`/`Warehouse`/`SenderIdentity`/`SenderValidation`/`RecipientSpec`/
+  `ParcelSpec`/`TTNDraft`/`TTNResult`/`PriceQuote`/`TrackingStatus`). Контракт НП
+  v2.0: `ServiceType=WarehouseWarehouse`, стороны по Ref'ам контрагентов; вся
+  рисковая логика изолирована в `mapping.py` (открытый вопрос Фазы 0 — правка одним
+  файлом). **Правки по `/code-review`:** `money`/`weight` через `Decimal(str(...))`
+  (не тащим float-шум вроде `199.99…0094`); `get_price` при отсутствии `Cost` бросает
+  `NovaPoshtaValidationError` (не выдаём «0 грн» за доставку). Тесты: табличные на
+  `mapping` + `methods` через `MockTransport` (без сети/ключей). Полный сьют (117)
+  зелёный, ruff + гейт границы слоёв чисты.
+- **Дальше:** PR 3 — `cache.py` (Redis cache-aside для `Address.*`) + `fakeredis` в
+  dev-deps; затем PR 4 — валидация ключа ФОП в `sender_profile`.
+- **Открытые вопросы:** точный набор обязательных полей `save`/форма COD — пинятся
+  табличными тестами `mapping`; сверить с боевым НП при наличии ключа.
+
 ## 2026-06-19 · feat/alex-phase4-np-core · NP transport core (Фаза 4, PR 1)
 - **Сделано:** старт **Фазы 4** (интеграция НП + создание ТТН). PR 1 — транспортное
   ядро `app/novaposhta/`: `client.NovaPoshtaClient` (async поверх `httpx`, единый
