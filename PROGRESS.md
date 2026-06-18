@@ -15,6 +15,19 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-address-search · address-search сервис (Фаза 4, PR 7)
+- **Сделано:** PR 7 Фазы 4 — `services/address.py` (`search_cities`/`search_warehouses`)
+  для FSM создания ТТН. Резолвит ключ ФОП клиента (явный/дефолтный; нет →
+  `SenderProfileNotConfigured`) и ходит в справочники НП через `NPReferenceCache`
+  (cache-aside; loader → `methods.get_cities`/`get_warehouses`). `Address.*` требует
+  валидный ключ, но **не** провалидированный ФОП (Ref отправителя тут не нужен) —
+  берём ключ профиля как есть. Тесты: Postgres + `fakeredis` + фейковый NP
+  (`MockTransport`): города возвращаются и кэшируются (loader 1 раз), відділення,
+  отсутствие ФОП → ошибка. Полный сьют (151) зелёный, ruff + гейт границы чисты.
+- **Дальше:** PR 8 — composition root (`app/main.py`): один `NovaPoshtaClient` + один
+  `redis.asyncio` + `NPReferenceCache`, проброс в deps/handlers.
+- **Открытые вопросы:** нет (тонкая обёртка).
+
 ## 2026-06-19 · feat/alex-phase4-create-shipment · write-сервис создания ТТН (Фаза 4, PR 6)
 - **Сделано:** PR 6 Фазы 4 — **ядро домена**. `services/shipment.py` `create_shipment`
   (NP-first): гард активного клиента → резолв ФОП (нет → `SenderProfileNotConfigured`,
