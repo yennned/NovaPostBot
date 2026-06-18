@@ -15,6 +15,37 @@
 
 ---
 
+## 2026-06-18 · feat/alex-clients · смена модели работы
+- **Решение:** перешли на **sequential-by-phase** (последовательно по фазам, не
+  параллельно по слоям). Один владелец на фазу (backend+UI), второй ждёт мержа.
+  **Phase 2 → alex целиком, Phase 3 → step целиком.** Причина: активный писатель
+  сейчас один (Степан разгоняется) → throughput-издержка ≈ 0, плюсы (всегда
+  рабочий `main`, нет дрейфа контракта, WIP=1) перевешивают. Принято после council
+  (3/4 за гибрид, но выбран sequential осознанно). Триггер возврата к layer-split —
+  второй одновременный писатель / дедлайн на 2×. Зафиксировано в
+  [CONTRIBUTING.md](CONTRIBUTING.md) и [docs/ROADMAP.md](docs/ROADMAP.md). Контракт
+  Фазы 2 (ниже) = backend-половина, alex доводит фазу до UI и мержит.
+- **Открытые вопросы:** нет.
+
+## 2026-06-18 · feat/alex-clients · 60d8956
+- **Сделано:** **контракт Фазы 2** (слой alex, контракт-первый). `services/clients.py`
+  — доменный API управления клиентами (list/card/approve/block/unblock/archive/
+  restore/update_profile), frozen-структуры `ClientListItem`/`ClientPage`/
+  `ClientCard`, карта переходов статусов, проверки `can_manage` + per-flag
+  (`can_manage_clients`/`can_edit_clients`), аудит. `services/exceptions.py`
+  (`ClientServiceError` → NotFound/PermissionDenied/TransitionForbidden/
+  AlreadyInStatus). `services/notifications.py` — `Notifier`-протокол +
+  `notify_new_client_registered` (владельцам+дежурным) / `notify_client_approved`,
+  uk-тексты backend-owned. `repositories/user.py`: `list_by_status`
+  (фильтр/поиск/пагинация) + `count_by_status`. Бриф Степану —
+  `docs/phase2-stepan-brief.md`. Тесты на Postgres + mock Notifier — полный сьют
+  зелёный, ruff чист.
+- **Дальше:** контракт-PR в `main` первым; Степан ветвится от `main` и пишет
+  bot-layer Фазы 2 по брифу. Параллельно `feat/alex-senders` — sender_profile
+  backend-ready.
+- **Открытые вопросы:** мусорные дубликаты « 2.py» в worktree (артефакт
+  файл-синка) — почистить, в git не коммитим.
+
 ## 2026-06-17 · main · c3e3fb0
 - **Сделано:** смержен **Track B / step / Phase 1 bot-auth** через PR
   [#5](https://github.com/yennned/NovaPostBot/pull/5). В `main` вошли bot-layer
