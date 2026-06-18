@@ -15,6 +15,23 @@
 
 ---
 
+## 2026-06-18 · feat/alex-phase2 · bot/UI управления клиентами
+- **Сделано:** UI раздела «Клієнти» (Фаза 2) поверх контракта. `handlers/
+  clients_manage.py` — вход по кнопке меню, список со статус-вкладками
+  (pending/active/blocked/archived/всі) + пагинация + поиск (FSM
+  `ClientManageState.waiting_for_search`), карточка клиента, действия над статусом
+  (підтвердити/блок/розблок/архів/відновити) через `services.clients`. `keyboards/
+  clients.py` (inline), `texts/clients.py` (uk + маппинг `ClientServiceError` →
+  сообщения). `notify.BotNotifier` (Notifier поверх aiogram `Bot`, HTML, глотает
+  сбои доставки). Wiring: пуш владельцам/дежурным при регистрации
+  (`start.receive_contact`, `result.created`) и клиенту при подтверждении. Роутер
+  включён в dispatcher. Тесты bot-слоя (открытие/доступ/карточка/approve+пуш/
+  запрещённый переход) + обновлены start-тесты. Полный сьют (62) зелёный, ruff чист.
+- **Дальше:** правка профиля клиента (ПІБ/телефон) отдельным мелким PR; затем
+  фаза собирается end-to-end и мержится. После полного мержа Фазы 2 — Степан
+  стартует Фазу 3.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-18 · feat/alex-phase2 · sender_profile (backend-ready)
 - **Сделано:** `services/sender_profile.py` — create/list/get/update/set_default
   поверх готового репозитория; `SenderProfileView` (ключ НП наружу не отдаётся,

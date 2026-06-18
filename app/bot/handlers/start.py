@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards import build_contact_keyboard, build_role_menu
+from app.bot.notify import BotNotifier
 from app.bot.services import StartService
 from app.bot.states import StartStates
 from app.bot.texts import (
@@ -22,6 +24,7 @@ from app.bot.texts import (
 )
 from app.bot.types import EffectiveContext
 from app.db.models.enums import UserStatus
+from app.services import notifications
 
 router = Router(name="start")
 
@@ -86,6 +89,8 @@ async def receive_contact(
     message: Message,
     state: FSMContext,
     start_service: StartService,
+    db_session: AsyncSession,
+    bot: Bot,
 ) -> None:
     if message.from_user is None or message.contact is None:
         return
@@ -104,6 +109,12 @@ async def receive_contact(
         full_name=full_name,
     )
     await state.clear()
+
+    # Новый клиент → пуш владельцам/дежурным менеджерам на подтверждение.
+    if result.created:
+        await notifications.notify_new_client_registered(
+            db_session, BotNotifier(bot), client=result.user
+        )
 
     if result.user.status is UserStatus.blocked:
         await message.answer(blocked_text())
