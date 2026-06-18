@@ -58,6 +58,10 @@ def client_card_text(card: ClientCard) -> str:
     )
 
 
+# Редактируемые поля профиля клиента (ключ колонки → uk-ярлык).
+EDIT_FIELD_LABELS: dict[str, str] = {"full_name": "Ім'я", "phone": "Телефон"}
+
+
 def search_prompt_text() -> str:
     return "Введіть ПІБ або телефон для пошуку:"
 

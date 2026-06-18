@@ -8,17 +8,36 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.bot.handlers.clients_manage import cb_action, cb_card, open_clients
+from app.bot.handlers.clients_manage import (
+    cb_action,
+    cb_card,
+    cb_edit_field,
+    open_clients,
+    receive_edit,
+)
+from app.bot.states import ClientManageState
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import UserRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class FakeState:
-    cleared = False
+    def __init__(self, data: dict | None = None) -> None:
+        self.cleared = False
+        self.state = None
+        self._data = data or {}
 
     async def clear(self) -> None:
         self.cleared = True
+
+    async def set_state(self, value) -> None:
+        self.state = value
+
+    async def update_data(self, **kw) -> None:
+        self._data.update(kw)
+
+    async def get_data(self) -> dict:
+        return self._data
 
 
 class FakeMessage:
@@ -108,6 +127,39 @@ async def test_cb_action_approve_changes_status_and_notifies(db_session: AsyncSe
     assert refreshed.status is UserStatus.active
     assert any(tid == client.telegram_id for tid, _ in bot.sent)  # клиент оповещён
     assert cb.message.edits  # карточка перерисована
+
+
+async def test_cb_edit_field_sets_state(db_session: AsyncSession):
+    client = await _pending(db_session)
+    state = FakeState()
+    cb = FakeCallback(data=f"cl:editf:full_name:pending:{client.id}")
+    await cb_edit_field(cb, state)
+    assert state.state == ClientManageState.waiting_for_edit
+    assert state._data["field"] == "full_name"
+    assert state._data["client_id"] == str(client.id)
+
+
+async def test_receive_edit_updates_name(db_session: AsyncSession):
+    manager = await _manager(db_session)
+    client = await _pending(db_session)
+    state = FakeState({"client_id": str(client.id), "field": "full_name", "token": "pending"})
+    msg = FakeMessage()
+    msg.text = "Оновлене Імʼя"
+    await receive_edit(msg, state, SimpleNamespace(actor_user=manager), db_session)
+    refreshed = await UserRepository(db_session).get_by_id(client.id)
+    assert refreshed.full_name == "Оновлене Імʼя"
+    assert any("оновлено" in str(a["text"]).lower() for a in msg.answers)
+
+
+async def test_receive_edit_phone_collision(db_session: AsyncSession):
+    manager = await _manager(db_session)
+    a = await _pending(db_session, telegram_id=500)
+    b = await _pending(db_session, telegram_id=501)
+    state = FakeState({"client_id": str(a.id), "field": "phone", "token": "pending"})
+    msg = FakeMessage()
+    msg.text = b.phone
+    await receive_edit(msg, state, SimpleNamespace(actor_user=manager), db_session)
+    assert any("зайнят" in str(x["text"]) for x in msg.answers)
 
 
 async def test_cb_action_forbidden_transition_alerts(db_session: AsyncSession):

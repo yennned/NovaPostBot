@@ -21,17 +21,21 @@ from app.bot.keyboards.clients import (
     PAGE_SIZE,
     build_client_card_kb,
     build_clients_list_kb,
+    build_edit_fields_kb,
     parse_status_token,
     status_token,
 )
 from app.bot.notify import BotNotifier
 from app.bot.states import ClientManageState
 from app.bot.texts.clients import (
+    EDIT_FIELD_LABELS,
     action_done_text,
     client_card_text,
     client_error_text,
     clients_header,
+    edit_prompt_text,
     empty_list_text,
+    profile_updated_text,
     search_prompt_text,
 )
 from app.bot.types import EffectiveContext
@@ -234,3 +238,70 @@ async def receive_search(
         await message.answer("Недостатньо прав для розділу «Клієнти».")
         return
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("cl:edit:"))
+async def cb_edit(callback: CallbackQuery) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        _, _, token, client_raw = callback.data.split(":")
+        client_id = uuid.UUID(client_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await _edit_or_ignore(callback.message, "Що змінити?", build_edit_fields_kb(token, client_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cl:editf:"))
+async def cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        _, _, field, token, client_raw = callback.data.split(":")
+        uuid.UUID(client_raw)  # валидация
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if field not in EDIT_FIELD_LABELS:
+        await callback.answer()
+        return
+    await state.set_state(ClientManageState.waiting_for_edit)
+    await state.update_data(client_id=client_raw, field=field, token=token)
+    await callback.message.answer(edit_prompt_text(EDIT_FIELD_LABELS[field]))
+    await callback.answer()
+
+
+@router.message(ClientManageState.waiting_for_edit, F.text, ~F.text.startswith("/"))
+async def receive_edit(
+    message: Message,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    data = await state.get_data()
+    await state.clear()
+    actor = effective_context.actor_user
+    if actor is None:
+        await message.answer("Спочатку авторизуйтесь через /start.")
+        return
+    field = data.get("field")
+    if field not in EDIT_FIELD_LABELS or "client_id" not in data:
+        await message.answer(_STALE_BUTTON)
+        return
+    token = data.get("token", "all")
+    client_id = uuid.UUID(data["client_id"])
+    try:
+        card = await clients.update_client_profile(
+            db_session, actor=actor, client_id=client_id, **{field: message.text.strip()}
+        )
+    except ClientServiceError as exc:
+        await message.answer(client_error_text(exc))
+        return
+    await message.answer(profile_updated_text())
+    await message.answer(
+        client_card_text(card), reply_markup=build_client_card_kb(card, token), parse_mode="HTML"
+    )
