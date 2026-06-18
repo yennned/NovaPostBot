@@ -4,3 +4,4 @@ ruff>=0.6
 pytest>=8.2
 pytest-asyncio>=0.23
 pre-commit>=3.7
+fakeredis>=2.23  # in-memory Redis для тестов кэша НП-справочников

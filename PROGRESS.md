@@ -15,6 +15,26 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-np-cache · Redis cache справочников НП (Фаза 4, PR 3)
+- **Сделано:** PR 3 Фазы 4 — `app/novaposhta/cache.py` `NPReferenceCache`:
+  cache-aside поверх `redis.asyncio` для `Address.*` (города/відділення). На miss
+  зовётся инъектируемый `loader` (обращение к НП), результат кладётся в Redis с TTL;
+  на hit — из кэша. Ключи общие (справочники от ключа ФОП не зависят), нормализация
+  query (регистр/пробелы). Первое использование Redis в проекте — клиент живёт в
+  `novaposhta/` (как gspread в `sheets/`), сервисы видят только `NPReferenceCache`.
+  Конфиг: `np_cities_ttl_seconds` (24ч), `np_warehouses_ttl_seconds` (6ч).
+  `fakeredis` в `requirements-dev.txt`. **Правки по `/code-review`:** пустой
+  результат **не** кэшируем (НП мог отдать `[]` на блипе — иначе «не знайдено»
+  залипло бы на TTL); `ttl ≤ 0` (выключенный кэш) — пропускаем `set`, иначе Redis
+  бросил бы `invalid expire time` после успешного loader. Тесты (9) на `fakeredis`:
+  miss→hit (loader once), нормализация ключа, раздельные записи, TTL из конфига,
+  ошибка loader не кэшируется, пусто не кэшируется, `ttl=0` не падает. Полный сьют
+  (126) зелёный, ruff + гейт границы слоёв чисты.
+- **Дальше:** PR 4 — валидация ключа ФОП в `services/sender_profile` (первый PR,
+  трогающий существующий сервис + его тесты).
+- **Открытые вопросы:** CI Redis-сервиса нет — тесты кэша на `fakeredis` (реальный
+  Redis не нужен); боевую сверку справочников — при наличии ключа НП.
+
 ## 2026-06-19 · feat/alex-phase4-np-methods · NP methods + mapping (Фаза 4, PR 2)
 - **Сделано:** PR 2 Фазы 4 — обёртки методов НП и **чистый маппинг полей**.
   `mapping.py` (без I/O): `to_save_props` (черновик ТТН → `InternetDocument.save`:
