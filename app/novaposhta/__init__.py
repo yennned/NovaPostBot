@@ -5,6 +5,7 @@
 """
 
 from app.novaposhta import mapping, methods
+from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import (
     NovaPoshtaAuthError,
@@ -30,6 +31,7 @@ from app.novaposhta.schemas import (
 __all__ = [
     "City",
     "NPEnvelope",
+    "NPReferenceCache",
     "NovaPoshtaAuthError",
     "NovaPoshtaClient",
     "NovaPoshtaError",

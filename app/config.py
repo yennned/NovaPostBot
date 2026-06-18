@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # Базовый множитель экспоненциального бэкоффа ретраев (сек). 0 — без пауз
     # (используется в тестах, чтобы ретраи не спали по-настоящему).
     np_retry_backoff: float = Field(default=0.5, alias="NP_RETRY_BACKOFF")
+    # TTL кэша справочников НП в Redis (города меняются редко — сутки; відділення
+    # чаще — 6 часов).
+    np_cities_ttl_seconds: int = Field(default=86_400, alias="NP_CITIES_TTL_SECONDS")
+    np_warehouses_ttl_seconds: int = Field(default=21_600, alias="NP_WAREHOUSES_TTL_SECONDS")
 
     # Роли (сырые строки из env; распарсенные — в свойствах ниже)
     owner_telegram_ids_raw: str = Field(default="", alias="OWNER_TELEGRAM_IDS")
