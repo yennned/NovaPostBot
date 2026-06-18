@@ -10,3 +10,10 @@ class StartStates(StatesGroup):
 class ClientManageState(StatesGroup):
     waiting_for_search = State()  # ждём строку поиска (в data: status-токен)
     waiting_for_edit = State()  # ждём новое значение (в data: client_id, field, token)
+
+
+class ClientCabinetState(StatesGroup):
+    waiting_for_product_search = State()
+    waiting_for_shipment_search = State()
+    waiting_for_settings_profile = State()
+    waiting_for_sender_profile_edit = State()

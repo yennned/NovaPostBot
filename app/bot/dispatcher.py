@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.bot.handlers import clients_router, dev_router, start_router
+from app.bot.handlers import client_cabinet_router, clients_router, dev_router, start_router
 from app.bot.middlewares import EffectiveContextMiddleware, ServicesMiddleware
 from app.bot.services import InMemoryDevState
 from app.config import Settings
@@ -28,4 +28,5 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     dp.include_router(start_router)
     dp.include_router(dev_router)
     dp.include_router(clients_router)
+    dp.include_router(client_cabinet_router)
     return dp

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from app.db.models.enums import UserStatus
+from app.db.models.enums import ShipmentStatus, UserStatus
 
 
 class ClientServiceError(Exception):
@@ -19,6 +19,23 @@ class ClientNotFound(ClientServiceError):
 
 class SenderProfileNotFound(ClientServiceError):
     """ФОП-профиль с таким id не найден."""
+
+
+class ShipmentNotFound(ClientServiceError):
+    """Отправление с таким id/ТТН не найдено."""
+
+
+class ShipmentActionForbidden(ClientServiceError):
+    """Действие с отправлением недопустимо в текущем статусе."""
+
+    def __init__(self, action: str, status: ShipmentStatus) -> None:
+        self.action = action
+        self.status = status
+        super().__init__(f"дія {action} недоступна для статусу {status}")
+
+
+class InvalidNotificationSetting(ClientServiceError):
+    """Запрошен неизвестный ключ настройки уведомлений."""
 
 
 class PermissionDenied(ClientServiceError):
