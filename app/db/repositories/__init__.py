@@ -8,6 +8,13 @@
 
 from app.db.repositories.audit import AuditRepository
 from app.db.repositories.sender_profile import SenderProfileRepository
+from app.db.repositories.shipment import ShipmentItemDraft, ShipmentRepository
 from app.db.repositories.user import UserRepository
 
-__all__ = ["AuditRepository", "SenderProfileRepository", "UserRepository"]
+__all__ = [
+    "AuditRepository",
+    "SenderProfileRepository",
+    "ShipmentItemDraft",
+    "ShipmentRepository",
+    "UserRepository",
+]

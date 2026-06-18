@@ -1,0 +1,123 @@
+"""Сервис чтения клиентских остатков (Фаза 3)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models.enums import UserRole, UserStatus
+from app.db.models.user import User
+from app.db.repositories import ShipmentRepository
+from app.services.exceptions import PermissionDenied
+from app.sheets import InventorySheetReader, StockRow
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryItem:
+    sku: str
+    name: str
+    category: str | None
+    stock: int
+    reserved: int
+    available: int
+    price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryPage:
+    items: list[InventoryItem]
+    total: int
+    limit: int
+    offset: int
+    categories: list[str]
+
+
+def _require_active_client(client: User) -> None:
+    if client.role is not UserRole.client:
+        raise PermissionDenied("кабінет доступний тільки клієнту")
+    if client.status is not UserStatus.active:
+        raise PermissionDenied("кабінет клієнта доступний після підтвердження")
+
+
+def stock_sheet_key(client: User) -> str:
+    """Ключ листа склада.
+
+    Пока используем имя клиента как основной идентификатор листа; если ПІБ ещё
+    нет, fallback — Telegram ID. Этого достаточно до появления отдельного mapping
+    слоя CRM/WMS в поздних фазах.
+    """
+
+    return client.full_name or str(client.telegram_id)
+
+
+def _build_items(rows: list[StockRow], reserved: dict[str, int]) -> list[InventoryItem]:
+    items: list[InventoryItem] = []
+    for row in rows:
+        reserved_qty = reserved.get(row.sku, 0)
+        items.append(
+            InventoryItem(
+                sku=row.sku,
+                name=row.name,
+                category=row.category,
+                stock=row.quantity,
+                reserved=reserved_qty,
+                available=max(row.quantity - reserved_qty, 0),
+                price=row.price,
+            )
+        )
+    return items
+
+
+async def get_inventory_snapshot(
+    session: AsyncSession,
+    *,
+    client: User,
+    reader: InventorySheetReader | None = None,
+) -> list[InventoryItem]:
+    _require_active_client(client)
+    rows = (reader or InventorySheetReader()).read_stock(stock_sheet_key(client))
+    reserved = await ShipmentRepository(session).reserved_by_sku(client.id)
+    items = _build_items(rows, reserved)
+    items.sort(
+        key=lambda item: (
+            (item.category or "").lower(),
+            item.name.lower(),
+            item.sku.lower(),
+        )
+    )
+    return items
+
+
+async def list_inventory(
+    session: AsyncSession,
+    *,
+    client: User,
+    query: str | None = None,
+    category: str | None = None,
+    limit: int = 8,
+    offset: int = 0,
+    reader: InventorySheetReader | None = None,
+) -> InventoryPage:
+    items = await get_inventory_snapshot(session, client=client, reader=reader)
+    categories = sorted({item.category for item in items if item.category})
+    if query:
+        needle = query.strip().lower()
+        items = [
+            item
+            for item in items
+            if needle in item.sku.lower()
+            or needle in item.name.lower()
+            or needle in (item.category or "").lower()
+        ]
+    if category:
+        items = [item for item in items if (item.category or "").lower() == category.lower()]
+    total = len(items)
+    return InventoryPage(
+        items=items[offset : offset + limit],
+        total=total,
+        limit=limit,
+        offset=offset,
+        categories=categories,
+    )
