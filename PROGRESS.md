@@ -15,6 +15,20 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-shipment-cols · миграция size_preset + weight (Фаза 4, PR 5)
+- **Сделано:** PR 5 Фазы 4 — единственный schema-PR. В `shipments` добавлены
+  `size_preset VARCHAR(32)` и `weight NUMERIC(8,3)` (оба nullable): пресет НП и
+  фактический вес (полезен для карточки и синка перевзвешивания НП в Фазе 5).
+  Габариты «Власних розмірів» — транзитом в НП, не персистим. Модель `Shipment`
+  расширена, `ShipmentRepository.create` принял `size_preset`/`weight`. Миграция
+  `3f9a2b7c1d8e` (head = phase3 `2c1d4e8f1a6b`). Проверено: `alembic upgrade head →
+  downgrade -1 → upgrade head` (колонки появляются/исчезают), `alembic check` — «No
+  new upgrade operations detected» (модель совпадает с миграциями). Round-trip тест
+  репозитория. Полный сьют (133) зелёный, ruff чист.
+- **Дальше:** PR 6 — write-сервис `services/shipment.py` (`create_shipment` NP-first
+  + резерв, `cancel_shipment` с NP delete). Ядро домена.
+- **Открытые вопросы:** нет (миграция изолирована).
+
 ## 2026-06-19 · feat/alex-phase4-sender-validation · валидация ключа ФОП (Фаза 4, PR 4)
 - **Сделано:** PR 4 Фазы 4 — первый сервисный PR. `services/sender_profile`:
   `create_profile`/`update_profile` приняли `np_client`; при заданном клиенте ключ

@@ -58,6 +58,8 @@ class ShipmentRepository(BaseRepository):
         payment_method: str | None = None,
         cod_amount: Decimal | None = None,
         insured_amount: Decimal | None = None,
+        size_preset: str | None = None,
+        weight: Decimal | None = None,
         status: ShipmentStatus = ShipmentStatus.created,
         description: str | None = None,
         created_at: datetime | None = None,
@@ -77,6 +79,8 @@ class ShipmentRepository(BaseRepository):
             payment_method=payment_method,
             cod_amount=cod_amount,
             insured_amount=insured_amount,
+            size_preset=size_preset,
+            weight=weight,
             status=status,
             description=description,
         )
