@@ -46,6 +46,14 @@ class FakeStartService:
         return self.result
 
 
+class FakeBot:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, telegram_id: int, text: str, parse_mode=None) -> None:
+        self.sent.append((telegram_id, text))
+
+
 def make_user(*, status: UserStatus, role: UserRole = UserRole.client) -> User:
     return User(
         telegram_id=123,
@@ -101,7 +109,7 @@ async def test_receive_contact_handles_active_user_status() -> None:
     state = FakeState(state=StartStates.waiting_for_contact.state)
     service = FakeStartService(StartResult(user=active_user, created=False))
 
-    await receive_contact(message, state, service)
+    await receive_contact(message, state, service, None, FakeBot())
 
     assert state.cleared is True
     assert message.answers
@@ -118,7 +126,7 @@ async def test_receive_contact_ignores_contact_outside_waiting_state() -> None:
     state = FakeState(state=None)
     service = FakeStartService(StartResult(user=active_user, created=False))
 
-    await receive_contact(message, state, service)
+    await receive_contact(message, state, service, None, FakeBot())
 
     assert state.cleared is False
     assert message.answers == []
