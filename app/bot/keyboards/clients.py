@@ -1,11 +1,12 @@
 """Inline-клавиатуры раздела «Клієнти» (Фаза 2).
 
-callback_data:
-- `cl:list:<status|all>:<offset>` — показать список (фильтр+страница)
-- `cl:card:<uuid>` — карточка клиента
+callback_data (token = `<status|all>`):
+- `cl:list:<token>:<offset>` — показать список (фильтр+страница)
+- `cl:card:<token>:<uuid>` — карточка клиента
 - `cl:act:<action>:<uuid>` — действие (approve/block/unblock/archive/restore)
-- `cl:edit:<uuid>` — начать правку профиля
-- `cl:search:<status|all>` — запрос строки поиска
+- `cl:edit:<token>:<uuid>` — выбор поля для правки профиля
+- `cl:editf:<field>:<token>:<uuid>` — правка поля (full_name/phone)
+- `cl:search:<token>` — запрос строки поиска
 """
 
 from __future__ import annotations
@@ -93,5 +94,27 @@ def build_client_card_kb(card: ClientCard, token: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=label, callback_data=f"cl:act:{action}:{card.id}")]
         for action, label in actions
     ]
+    rows.append(
+        [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"cl:edit:{token}:{card.id}")]
+    )
     rows.append([InlineKeyboardButton(text="⬅️ До списку", callback_data=f"cl:list:{token}:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_edit_fields_kb(token: str, client_id) -> InlineKeyboardMarkup:
+    """Выбор редактируемого поля карточки клиента."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Ім'я", callback_data=f"cl:editf:full_name:{token}:{client_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Телефон", callback_data=f"cl:editf:phone:{token}:{client_id}"
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cl:card:{token}:{client_id}")],
+        ]
+    )

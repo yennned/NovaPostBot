@@ -9,3 +9,4 @@ class StartStates(StatesGroup):
 
 class ClientManageState(StatesGroup):
     waiting_for_search = State()  # ждём строку поиска (в data: status-токен)
+    waiting_for_edit = State()  # ждём новое значение (в data: client_id, field, token)
