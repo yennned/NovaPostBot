@@ -96,6 +96,94 @@
   (сервисы/репозитории отделены от хендлеров — [02-architecture.md](02-architecture.md)),
   Mini App переиспользует ту же логику.
 
+## Распределение задач по фазам (alex / step)
+
+**Принцип изоляции (один на все фазы):**
+
+- **Граница потоков:** `step` — бот/диалог (всё под `app/bot/*`: хендлеры,
+  клавиатуры, тексты, FSM-состояния), плюс **владеет общей инфраструктурой**
+  (`dispatcher.py`, `middlewares.py`, `states.py`, `filters.py`, `permissions.py`,
+  `main.py`). `alex` — данные/правила: pure-логика без aiogram (`services/`,
+  `repositories/`, `novaposhta/`, `sheets/`, `worker.py`, `jobs.py`, `utils/`).
+- **`alex` никогда не редактирует `app/bot/*`** → нулевой конфликт с веткой Степана.
+- **Моя задача каждой фазы делится на 2 изолированных worktree** (две IDE) по
+  непересекающимся доменам файлов. Связь между worktree и с ботом — через
+  **инъекцию интерфейсов** (`Protocol`), сигнатуру согласуем заранее, реализуем
+  независимо. Wiring (подключение сервисов к хендлерам) — отдельная интеграционная
+  задача после мержа.
+- Ветки: `feat/<owner>-<short>`, один коммиттер на ветку, PR в защищённый `main`,
+  `PROGRESS.md` после каждого коммита. Worktree: `git worktree add ../<dir> <branch> main`.
+
+> Трек B Фазы 1 (каркас бота) — фундамент на критическом пути, мержится первым;
+> мои pure-логические треки от него на этапе реализации не зависят
+> (тестируются юнитами), wiring — после.
+
+### Фаза 1B — Степан (фундамент)
+- **step** `feat/step-phase1-bot-auth`: `dispatcher`/`middlewares`/`states`/`filters`,
+  `handlers/start` (`/start`→контакт→гейтинг), `handlers/dev` (`/as`, impersonation,
+  kill-switch two-man rule), `keyboards/`+`texts/` (uk), `main.py`.
+- **alex**: на этой фазе пишет pure-логику Фазы 3 (см. ниже) параллельно.
+
+### Фаза 2 — Регистрация/подтверждение + клиенты
+- **step**: `handlers/clients_manage` (список/карточка/подтверждение/блок/архив),
+  `keyboards/manager`+`owner`, тексты; `states.ClientManageState`.
+- **alex WT1 «клиенты-данные»**: `repositories/user` (`get_by_status`,
+  `update_status`, `soft_delete`, `update_profile`), `services/clients`
+  (правила подтверждения/блокировки/архивации + аудит).
+- **alex WT2 «ФОП + уведомления»**: `repositories/sender_profile` (CRUD),
+  `services/sender_profile` (encrypt/store/выбор дефолта),
+  `services/notifications` (скелет: push владельцу при регистрации, клиенту при
+  подтверждении; дедуп; отправитель инъекцией).
+
+### Фаза 3 — Кабинет клиента (чтение) + остатки
+- **step**: `handlers/client_cabinet`, `keyboards/client`, тексты;
+  `states.ClientCabinetState`.
+- **alex WT1 «склад→доступно»**: `sheets/inventory` (read-only книга «Склад»),
+  `services/inventory` (`available = stock − reserved`; `reserved` инъекцией).
+- **alex WT2 «отправления+статистика»**: `repositories/shipment`
+  (`get_by_client_and_status`, `reserved_by_sku`), `services/stats` (окна
+  today/week/month в Europe/Kyiv, net = відправлено − повернення − втрати).
+
+### Фаза 4 — Интеграция НП + создание ТТН
+- **step**: `handlers/ttn` (FSM пресеты/фіз-юр/платник/COD/страховка),
+  `handlers/shipment` (відправлення client/manager), `keyboards/ttn`+`shipment`,
+  `texts/ttn`; `states.TtnForm`.
+- **alex WT1 «НП-клиент»**: `novaposhta/{client,methods,schemas,tracking,exceptions}`
+  — async-клиент API, справочники городов/відділень (кэш Redis), расчёт цены,
+  валидация ключа.
+- **alex WT2 «ТТН-сервис + резерв»**: `services/shipment` (NP-first → Shipment +
+  резерв в PG, отмена → возврат резерва), `repositories/shipment`, NP-валидация
+  ключа в `services/sender_profile`. Контракт с WT1 — `Protocol` NP-клиента.
+
+### Фаза 5 — Уведомления, трекинг, возвраты (воркер)
+- **step**: `handlers/returns` («Повернення замовлення»), `handlers/shipment`
+  (SLA-индикатор), `keyboards/returns`, `texts/notifications`, UI настроек
+  уведомлений; `states.ReturnForm`.
+- **alex WT1 «трекинг-воркер»**: `worker.py` + `jobs.py` (APScheduler-поллинг НП
+  статусов, low-stock), `utils/sla` (30 раб. минут, Europe/Kyiv), `services/tracking`
+  (списание в «Склад» при «відправлено», SLA-флаги).
+- **alex WT2 «уведомления+возвраты»**: `services/notifications` (матрица пушей по
+  ролям/статусам), `services/returns` (returned/lost/damaged → движения остатка),
+  `repositories/stock_movement` + `repositories/notification_settings`.
+
+### Фаза 6 — Поддержка/дежурство + персонал/аналитика
+- **step**: `handlers/{support,manager,staff,analytics}`,
+  `keyboards/{support,staff,analytics}`, тексты;
+  `states.{SupportForm,StaffForm,AnalyticsForm}`; per-flag-гейтинг в хендлерах.
+- **alex WT1 «поддержка+дежурство»**: `services/support` (маршрутизация дежурному,
+  очередь без дежурного → владельцу, лог переписок, авто-снятие),
+  `repositories/support`, `models/support` (доп. поля), `utils/work_schedule`
+  (ротация/смена менеджера).
+- **alex WT2 «аналитика+персонал»**: `services/reports` (fee-формула, список
+  опоздавших ТТН, сводки), `repositories/reports`, `services/staff` (управление
+  per-flag правами + аудит).
+
+### Фаза 7 — Задел CRM/WMS (одна задача, без дробления)
+- **alex** (один worktree): абстракция `app/sheets/` → `Protocol StockSource` +
+  `GoogleSheetsStockSource` + заглушка `CrmStockSource`; переключатель
+  `INVENTORY_SOURCE` в `config`. Хендлеры/сервисы уже через интерфейс — не меняются.
+- **step**: изменений нет (бот работает через сервисный слой).
+
 ## Проверка (end-to-end)
 
 - **Локально (Docker):** `docker compose up -d --build` → `bot`, `worker`, `redis`;
