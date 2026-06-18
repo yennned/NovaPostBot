@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     sheets_stock_book_id: str = Field(default="", alias="SHEETS_STOCK_BOOK_ID")
     sheets_intake_book_id: str = Field(default="", alias="SHEETS_INTAKE_BOOK_ID")
 
+    # Нова Пошта (ключ — per-ФОП, шифруется в БД; здесь только транспорт).
+    # Тарифы/мин-стоимость не храним — НП валидирует онлайн.
+    np_api_url: str = Field(default="https://api.novaposhta.ua/v2.0/json/", alias="NP_API_URL")
+    np_timeout_seconds: float = Field(default=15.0, alias="NP_TIMEOUT_SECONDS")
+    np_max_retries: int = Field(default=3, alias="NP_MAX_RETRIES")
+    # Базовый множитель экспоненциального бэкоффа ретраев (сек). 0 — без пауз
+    # (используется в тестах, чтобы ретраи не спали по-настоящему).
+    np_retry_backoff: float = Field(default=0.5, alias="NP_RETRY_BACKOFF")
+
     # Роли (сырые строки из env; распарсенные — в свойствах ниже)
     owner_telegram_ids_raw: str = Field(default="", alias="OWNER_TELEGRAM_IDS")
     dev_telegram_ids_raw: str = Field(default="", alias="DEV_TELEGRAM_IDS")

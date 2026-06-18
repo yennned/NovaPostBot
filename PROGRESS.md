@@ -15,6 +15,31 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-np-core · NP transport core (Фаза 4, PR 1)
+- **Сделано:** старт **Фазы 4** (интеграция НП + создание ТТН). PR 1 — транспортное
+  ядро `app/novaposhta/`: `client.NovaPoshtaClient` (async поверх `httpx`, единый
+  POST-эндпоинт НП, `apiKey` передаётся **на вызов** — он per-ФОП; инъектируемый
+  `transport` для тестов; tenacity-ретраи только для временных сбоев
+  `NovaPoshtaUnavailable` (сеть/таймаут/5xx), бизнес-ошибки НП не ретраятся),
+  `schemas.NPEnvelope` (разбор конверта `{success,data,errors,errorCodes}`),
+  `exceptions` (`NovaPoshtaError` → `Unavailable`/`AuthError`/`ValidationError`/
+  `NotFound`). Конфиг: `np_api_url`/`np_timeout_seconds`/`np_max_retries`/
+  `np_retry_backoff`. **Правки по `/code-review`:** классификация сначала по
+  `errorCodes` (auth-код `20000200068` → `AuthError`, важно для валидации ключа в
+  PR 4), затем текстовый фолбэк (убран слишком широкий хинт «ключ»); `_as_str_list`
+  терпим к dict-форме поля НП; ретраи в тестах без реальных пауз
+  (`np_retry_backoff=0`); тест-настройки герметичны (`_env_file=None`). Тесты (12)
+  на `httpx.MockTransport` — без сети и ключей: декод конверта, payload,
+  классификация (текст + код), ретраи 5xx/сеть, recover-after-transient,
+  бизнес-ошибка без ретрая, 404/не-JSON/не-dict тело. Полный сьют (97) зелёный
+  локально (Postgres-контейнер), ruff + гейт границы слоёв чисты (`app/novaposhta/`
+  вне гейта — httpx/redis живут там, сервисы видят абстракции).
+- **Дальше:** PR 2 — `methods.py` (save/delete/price/tracking/cities/warehouses/
+  validate_key) + `mapping.py` (чистый `to_save_props`: PayerType/COD/фіз-юр/Cost).
+- **Открытые вопросы:** точный набор обязательных полей `InternetDocument.save` и
+  форма `BackwardDeliveryData` для COD — изолированы в `mapping.py` (PR 2), правка
+  одним файлом с табличными тестами. Полагаемся на стандартный контракт НП v2.0.
+
 ## 2026-06-18 · feat/step-phase3 · 18aa2cd
 - **Сделано:** **Фаза 3 закрыта полностью.** Реализован кабинет клиента end-to-end:
   `app/db/models/shipment.py`, `app/db/repositories/shipment.py`,
