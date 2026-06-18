@@ -1,0 +1,215 @@
+"""Write-сервис отправлений (Фаза 4) — создание ТТН. Без aiogram.
+
+Порядок **NP-first**: сначала заводим контрагента-получателя и сохраняем ТТН в
+НП, и только при успехе пишем `Shipment` в БД. Резерв — **выводимый**: строка со
+статусом `created` уже учитывается `reserved_by_sku`, отдельного шага не нужно.
+При любой ошибке НП в БД ничего не пишется → ничего не резервируется.
+
+Read-side (список/карточка/отмена) остаётся в `services/shipments.py`; карточку и
+гарды переиспользуем оттуда.
+"""
+
+from __future__ import annotations
+
+import uuid
+from decimal import Decimal
+
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import Settings, get_settings
+from app.db.models.enums import ShipmentStatus
+from app.db.models.user import User
+from app.db.repositories import (
+    AuditRepository,
+    SenderProfileRepository,
+    ShipmentItemDraft,
+    ShipmentRepository,
+)
+from app.novaposhta import methods
+from app.novaposhta.client import NovaPoshtaClient
+from app.novaposhta.exceptions import NovaPoshtaError
+from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
+from app.services import inventory, notifications, shipments
+from app.services.exceptions import (
+    InsufficientStock,
+    SenderProfileNotConfigured,
+    SenderProfileNotValidated,
+    TtnCreationFailed,
+)
+from app.services.notifications import Notifier
+from app.sheets import InventorySheetReader
+
+logger = structlog.get_logger(__name__)
+
+
+async def _resolve_sender(session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None):
+    """Найти ФОП клиента (явный или дефолтный) и убедиться, что он провалидирован."""
+    repo = SenderProfileRepository(session)
+    if sender_profile_id is not None:
+        profile = await repo.get_by_id(sender_profile_id)
+        if profile is None or profile.client_id != client.id:
+            raise SenderProfileNotConfigured("ФОП не знайдено")
+    else:
+        profile = await repo.get_default_for_client(client.id)
+        if profile is None:
+            raise SenderProfileNotConfigured("ФОП ще не налаштований, зверніться до менеджера")
+    if not profile.np_sender_ref:
+        raise SenderProfileNotValidated("ключ ФОП не підтверджено в НП")
+    return profile
+
+
+async def _resolve_items(
+    session: AsyncSession,
+    client: User,
+    items: list[tuple[str, int]],
+    reader: InventorySheetReader | None,
+) -> list[ShipmentItemDraft]:
+    """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой."""
+    snapshot = await inventory.get_inventory_snapshot(session, client=client, reader=reader)
+    by_sku = {item.sku: item for item in snapshot}
+    # Агрегируем дубли строк корзины по sku — иначе две строки по 6 при остатке 10
+    # обе прошли бы проверку (6≤10) и зарезервировали 12 (oversell).
+    requested: dict[str, int] = {}
+    for sku, qty in items:
+        requested[sku] = requested.get(sku, 0) + qty
+    drafts: list[ShipmentItemDraft] = []
+    for sku, qty in requested.items():
+        inv = by_sku.get(sku)
+        available = inv.available if inv else 0
+        if qty <= 0 or qty > available:
+            raise InsufficientStock(sku, qty, available)
+        drafts.append(
+            ShipmentItemDraft(
+                sku=sku, name=inv.name, quantity=qty, category=inv.category, unit_price=inv.price
+            )
+        )
+    if not drafts:
+        raise InsufficientStock("—", 0, 0)  # пустая корзина — нечего создавать
+    return drafts
+
+
+async def create_shipment(
+    session: AsyncSession,
+    *,
+    client: User,
+    items: list[tuple[str, int]],
+    recipient_kind: str,
+    recipient_name: str,
+    recipient_phone: str,
+    recipient_city_ref: str,
+    recipient_city_name: str,
+    recipient_warehouse_ref: str,
+    recipient_warehouse_name: str,
+    weight: Decimal,
+    size_preset: str,
+    description: str,
+    insured_amount: Decimal,
+    np_client: NovaPoshtaClient,
+    payer_type: str = "Recipient",
+    payment_method: str = "prepay",
+    cod_amount: Decimal | None = None,
+    recipient_edrpou: str | None = None,
+    sender_profile_id: uuid.UUID | None = None,
+    seats_amount: int = 1,
+    notifier: Notifier | None = None,
+    reader: InventorySheetReader | None = None,
+    settings: Settings | None = None,
+) -> shipments.ShipmentCard:
+    """Создать ТТН (NP-first) и записать `Shipment` + резерв.
+
+    Предусловие: при `payment_method == "cod"` передаётся `cod_amount` (валидирует
+    FSM на шаге накладеного платежу).
+    """
+    shipments._require_active_client(client)
+    settings = settings or get_settings()
+    profile = await _resolve_sender(session, client, sender_profile_id)
+    drafts = await _resolve_items(session, client, items, reader)
+
+    is_cod = payment_method == "cod"
+    if is_cod and (cod_amount is None or cod_amount <= 0):
+        # Защита от «тихого» сброса COD: ТТН с payment_method=cod без суммы создала
+        # бы обычную (предоплатную) посылку — деньги бы не собрали.
+        raise TtnCreationFailed("сума накладеного платежу обовʼязкова для накладеного платежу")
+    effective_cod = cod_amount if is_cod else None
+    api_key = profile.np_api_key  # EncryptedString расшифровывает при чтении
+
+    # NP-first: контрагент-получатель → сохранение ТТН. Любой сбой НП → ничего в БД.
+    try:
+        recipient_ref, contact_ref = await methods.ensure_recipient(
+            np_client,
+            api_key=api_key,
+            kind=recipient_kind,
+            name=recipient_name,
+            phone=recipient_phone,
+            edrpou=recipient_edrpou,
+        )
+        draft = TTNDraft(
+            sender=SenderIdentity(
+                counterparty_ref=profile.np_sender_ref,
+                contact_ref=profile.np_contact_ref or "",
+                city_ref=settings.np_sender_city_ref,
+                warehouse_ref=profile.np_sender_warehouse or settings.np_sender_warehouse_ref,
+                phone=profile.sender_phone or "",
+            ),
+            recipient=RecipientSpec(
+                kind=recipient_kind,
+                name=recipient_name,
+                phone=recipient_phone,
+                city_ref=recipient_city_ref,
+                warehouse_ref=recipient_warehouse_ref,
+                counterparty_ref=recipient_ref,
+                contact_ref=contact_ref or "",
+                edrpou=recipient_edrpou,
+            ),
+            parcel=ParcelSpec(weight=weight, seats_amount=seats_amount),
+            description=description,
+            cost=insured_amount,
+            payer_type=payer_type,
+            cod_amount=effective_cod,
+        )
+        result = await methods.save_ttn(np_client, api_key=api_key, draft=draft)
+    except NovaPoshtaError as exc:
+        raise TtnCreationFailed(str(exc)) from exc
+
+    # Успех НП → запись в БД (последний awaited-шаг). status=created → резерв активен.
+    repo = ShipmentRepository(session)
+    shipment = await repo.create(
+        client_id=client.id,
+        sender_profile_id=profile.id,
+        recipient_name=recipient_name,
+        recipient_phone=recipient_phone,
+        recipient_city=recipient_city_name,
+        recipient_warehouse=recipient_warehouse_name,
+        recipient_kind=recipient_kind,
+        payer_type=payer_type,
+        payment_method=payment_method,
+        cod_amount=effective_cod,
+        insured_amount=insured_amount,
+        size_preset=size_preset,
+        weight=weight,
+        status=ShipmentStatus.created,
+        description=description,
+        ttn_number=result.int_doc_number,
+        np_ref=result.ref,
+        items=drafts,
+    )
+    await AuditRepository(session).log(
+        "shipment_created",
+        user_id=client.id,
+        affected_entity=f"shipment:{shipment.id}",
+        after={"ttn_number": result.int_doc_number, "items": len(drafts)},
+    )
+    if notifier is not None:
+        # Пуш персоналу — best-effort: ТТН в НП уже существует, поэтому сбой пуша
+        # НЕ должен ронять create_shipment (иначе откат транзакции осиротит ТТН).
+        try:
+            await notifications.notify_shipment_created(
+                session, notifier, client=client, ttn_number=result.int_doc_number
+            )
+        except Exception:
+            logger.warning("shipment_push_failed", shipment_id=str(shipment.id))
+    # Перечитываем с joinedload(items) — иначе `_to_card` ленивой загрузкой
+    # коллекции упадёт в async (MissingGreenlet).
+    fresh = await repo.get_by_id(shipment.id)
+    return shipments._to_card(fresh)

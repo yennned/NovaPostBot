@@ -33,6 +33,32 @@ class ShipmentNotFound(ClientServiceError):
     """Отправление с таким id/ТТН не найдено."""
 
 
+class SenderProfileNotConfigured(ClientServiceError):
+    """У клиента нет ФОП (или дефолтного) для создания ТТН."""
+
+
+class SenderProfileNotValidated(ClientServiceError):
+    """ФОП есть, но ключ не валидирован в НП (нет `np_sender_ref`) — ТТН нельзя."""
+
+
+class InsufficientStock(ClientServiceError):
+    """Запрошено больше, чем доступно (`available`) по позиции."""
+
+    def __init__(self, sku: str, requested: int, available: int) -> None:
+        self.sku = sku
+        self.requested = requested
+        self.available = available
+        super().__init__(f"{sku}: запрошено {requested}, доступно {available}")
+
+
+class TtnCreationFailed(ClientServiceError):
+    """НП отклонила создание ТТН (или временно недоступна) — ничего не зарезервировано."""
+
+
+class TtnCancelFailed(ClientServiceError):
+    """НП отклонила удаление ТТН — статус не меняем, резерв не трогаем."""
+
+
 class ShipmentActionForbidden(ClientServiceError):
     """Действие с отправлением недопустимо в текущем статусе."""
 

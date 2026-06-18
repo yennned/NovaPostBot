@@ -79,6 +79,49 @@ def to_save_props(draft: TTNDraft) -> dict[str, Any]:
     return props
 
 
+def split_full_name(name: str) -> tuple[str, str, str]:
+    """Разбить ПІБ на (Прізвище, Ім'я, По-батькові) — укр. порядок.
+
+    НП для PrivatePerson ждёт LastName/FirstName/MiddleName раздельно. Эвристика
+    по позициям токенов: 1 токен → только прізвище; 2 → прізвище+ім'я; 3+ →
+    остаток в по-батькові. Изолировано и под табличными тестами — открытый
+    контракт-вопрос НП (точные требования к ПІБ получателя).
+    """
+    parts = name.split()
+    if not parts:
+        return "", "", ""
+    last = parts[0]
+    first = parts[1] if len(parts) > 1 else ""
+    middle = " ".join(parts[2:]) if len(parts) > 2 else ""
+    return last, first, middle
+
+
+def to_recipient_counterparty_props(
+    *, kind: str, name: str, phone: str, edrpou: str | None = None
+) -> dict[str, Any]:
+    """`methodProperties` для `Counterparty.save` получателя (фіз/юр).
+
+    Контрагента-получателя создаём перед `InternetDocument.save` (НП требует Ref
+    получателя). Поля по стандарту НП v2.0 — **требуют боевой сверки**.
+    """
+    if kind == "organization":
+        return {
+            "CounterpartyType": "Organization",
+            "CounterpartyProperty": "Recipient",
+            "CompanyName": name,
+            "EDRPOU": edrpou or "",
+        }
+    last, first, middle = split_full_name(name)
+    return {
+        "CounterpartyType": "PrivatePerson",
+        "CounterpartyProperty": "Recipient",
+        "FirstName": first,
+        "MiddleName": middle,
+        "LastName": last,
+        "Phone": phone,
+    }
+
+
 def to_price_props(
     *,
     city_sender_ref: str,

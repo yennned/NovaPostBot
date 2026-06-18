@@ -12,7 +12,7 @@ from decimal import Decimal
 
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaValidationError
-from app.novaposhta.mapping import to_price_props, to_save_props
+from app.novaposhta.mapping import to_price_props, to_recipient_counterparty_props, to_save_props
 from app.novaposhta.schemas import (
     City,
     PriceQuote,
@@ -29,6 +29,18 @@ def _first(rows: list[dict], what: str) -> dict:
     if not rows:
         raise NovaPoshtaValidationError(f"НП повернула порожній результат: {what}")
     return rows[0]
+
+
+def _ref(row: dict, what: str) -> str:
+    """Достать обязательный `Ref` из строки ответа или доменная ошибка.
+
+    Прямой `row["Ref"]` бросил бы `KeyError` (не `NovaPoshtaError`) и проскочил бы
+    мимо обработчиков сбоя НП — поэтому проверяем явно.
+    """
+    ref = row.get("Ref")
+    if not ref:
+        raise NovaPoshtaValidationError(f"НП не повернула Ref: {what}")
+    return str(ref)
 
 
 def _decimal(value: object) -> Decimal | None:
@@ -162,7 +174,7 @@ async def save_ttn(client: NovaPoshtaClient, *, api_key: str, draft: TTNDraft) -
     )
     row = _first(rows, "save")
     return TTNResult(
-        ref=row["Ref"],
+        ref=_ref(row, "InternetDocument.save"),
         int_doc_number=str(row.get("IntDocNumber", "")),
         cost=_decimal(row.get("CostOnSite")),
         estimated_delivery_date=row.get("EstimatedDeliveryDate") or None,
@@ -177,6 +189,41 @@ async def delete_ttn(client: NovaPoshtaClient, *, api_key: str, doc_ref: str) ->
         method="delete",
         props={"DocumentRefs": doc_ref},
     )
+
+
+def _extract_contact_ref(row: dict) -> str | None:
+    """Достать Ref контактного лица из ответа `Counterparty.save` (вложенный объект)."""
+    contact = row.get("ContactPerson")
+    if isinstance(contact, dict):
+        data = contact.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0].get("Ref")
+    return None
+
+
+async def ensure_recipient(
+    client: NovaPoshtaClient,
+    *,
+    api_key: str,
+    kind: str,
+    name: str,
+    phone: str,
+    edrpou: str | None = None,
+) -> tuple[str, str | None]:
+    """Завести контрагента-получателя в НП → (Ref контрагента, Ref контакта).
+
+    Нужно перед `InternetDocument.save` (НП принимает только Ref получателя, не
+    инлайн-данные). Поля — стандарт НП v2.0 (см. `mapping`), **требуют боевой
+    сверки**. Контакт может отсутствовать (юрособа) → `None`.
+    """
+    rows = await client.call(
+        api_key=api_key,
+        model="Counterparty",
+        method="save",
+        props=to_recipient_counterparty_props(kind=kind, name=name, phone=phone, edrpou=edrpou),
+    )
+    row = _first(rows, "Counterparty.save(Recipient)")
+    return _ref(row, "Counterparty.save(Recipient)"), _extract_contact_ref(row)
 
 
 # --- Валидация ключа ФОП -----------------------------------------------------
@@ -198,7 +245,7 @@ async def validate_key_and_get_sender(
         props={"CounterpartyProperty": "Sender", "Page": "1"},
     )
     sender = _first(senders, "getCounterparties(Sender)")
-    sender_ref = sender["Ref"]
+    sender_ref = _ref(sender, "getCounterparties(Sender)")
 
     contacts = await client.call(
         api_key=api_key,
