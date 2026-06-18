@@ -15,6 +15,26 @@
 
 ---
 
+## 2026-06-18 · feat/step-phase3 · 18aa2cd
+- **Сделано:** **Фаза 3 закрыта полностью.** Реализован кабинет клиента end-to-end:
+  `app/db/models/shipment.py`, `app/db/repositories/shipment.py`,
+  `app/services/{inventory,shipments,stats,client_settings}.py`,
+  `app/sheets/inventory.py`, миграция
+  `2c1d4e8f1a6b_phase3_shipments_and_items`, bot/UI
+  `handlers/client_cabinet.py`, `keyboards/client.py`, `texts/client_cabinet.py`,
+  `states.ClientCabinetState`. Работают товары (поиск/категории/пагинация),
+  відправлення (группы/поиск/карточка/скасування), статистика
+  today/week/month + выбор дня, настройки клиента, self-edit профиля и просмотр/
+  правка ФОП-профилей. Дополнительно устранён циклический импорт в `app/bot`,
+  укорочены `callback_data` под лимит Telegram. Тесты расширены
+  (`test_inventory`, `test_shipments`, `test_client_settings`, bot-тесты и
+  клавиатуры). Локально: **85 passed**, `ruff` зелёный. Создан PR
+  [#16](https://github.com/yennned/NovaPostBot/pull/16), CI зелёный.
+- **Дальше:** после мержа PR #16 alex стартует **Фазу 4** от свежего `main`
+  (интеграция НП + создание ТТН).
+- **Открытые вопросы:** неблокирующий GitHub annotation про Node.js 20 в
+  `actions/checkout@v4` и `actions/setup-python@v5`; сам CI проходит успешно.
+
 ## 2026-06-18 · feat/alex-phase2-profile · правка профиля клиента (Фаза 2 закрыта)
 - **Сделано:** UI правки профиля клиента — последний кусок Фазы 2. `cb_edit`
   (выбор поля Ім'я/Телефон), `cb_edit_field` (FSM `ClientManageState.waiting_for_edit`),
