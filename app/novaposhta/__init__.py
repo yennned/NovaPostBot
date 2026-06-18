@@ -4,6 +4,7 @@
 видят только эти абстракции, поэтому API-first граница сохраняется.
 """
 
+from app.novaposhta import mapping, methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import (
     NovaPoshtaAuthError,
@@ -12,9 +13,22 @@ from app.novaposhta.exceptions import (
     NovaPoshtaUnavailable,
     NovaPoshtaValidationError,
 )
-from app.novaposhta.schemas import NPEnvelope
+from app.novaposhta.schemas import (
+    City,
+    NPEnvelope,
+    ParcelSpec,
+    PriceQuote,
+    RecipientSpec,
+    SenderIdentity,
+    SenderValidation,
+    TrackingStatus,
+    TTNDraft,
+    TTNResult,
+    Warehouse,
+)
 
 __all__ = [
+    "City",
     "NPEnvelope",
     "NovaPoshtaAuthError",
     "NovaPoshtaClient",
@@ -22,4 +36,15 @@ __all__ = [
     "NovaPoshtaNotFound",
     "NovaPoshtaUnavailable",
     "NovaPoshtaValidationError",
+    "ParcelSpec",
+    "PriceQuote",
+    "RecipientSpec",
+    "SenderIdentity",
+    "SenderValidation",
+    "TTNDraft",
+    "TTNResult",
+    "TrackingStatus",
+    "Warehouse",
+    "mapping",
+    "methods",
 ]
