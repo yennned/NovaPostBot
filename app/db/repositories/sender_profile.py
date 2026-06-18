@@ -41,6 +41,9 @@ class SenderProfileRepository(BaseRepository):
         org_type: OrgType = OrgType.fop,
         edrpou: str | None = None,
         is_default: bool = False,
+        np_sender_ref: str | None = None,
+        np_contact_ref: str | None = None,
+        np_sender_warehouse: str | None = None,
     ) -> SenderProfile:
         profile = SenderProfile(
             client_id=client_id,
@@ -51,6 +54,9 @@ class SenderProfileRepository(BaseRepository):
             org_type=org_type,
             edrpou=edrpou,
             is_default=is_default,
+            np_sender_ref=np_sender_ref,
+            np_contact_ref=np_contact_ref,
+            np_sender_warehouse=np_sender_warehouse,
         )
         await self._add(profile)
         if is_default:

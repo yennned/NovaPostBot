@@ -21,6 +21,14 @@ class SenderProfileNotFound(ClientServiceError):
     """ФОП-профиль с таким id не найден."""
 
 
+class SenderProfileKeyInvalid(ClientServiceError):
+    """Ключ ФОП отклонён Новой Поштой (невалидный/нет контрагента-отправителя).
+
+    Транзитный сбой НП (`NovaPoshtaUnavailable`) сюда НЕ относится — он
+    пробрасывается, чтобы не клеймить рабочий ключ невалидным.
+    """
+
+
 class ShipmentNotFound(ClientServiceError):
     """Отправление с таким id/ТТН не найдено."""
 

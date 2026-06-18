@@ -66,6 +66,7 @@ def test_sender_profile_callbacks_fit_telegram_limit():
         sender_phone="+380001",
         is_default=False,
         has_api_key=True,
+        is_np_validated=False,
         created_at=datetime.now(UTC),
     )
 
