@@ -39,6 +39,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Layer boundary (no aiogram in services/db)
+        run: |
+          if grep -rnE "^(import aiogram|from aiogram)" app/services app/db; then
+            echo "::error::app/services и app/db не должны импортировать aiogram (API-first слой)"
+            exit 1
+          fi
+
       - name: Ruff lint
         run: ruff check .
 

@@ -48,3 +48,6 @@ backups/
 
 # --- Claude Code (локальные настройки) ---
 .claude/settings.local.json
+
+# --- Дубликаты файл-синка (iCloud/Dropbox: "dispatcher 2.py") ---
+* [0-9].*
