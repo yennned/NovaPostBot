@@ -1,0 +1,27 @@
+# Единые переводы строк во всём репо — снимает CRLF/LF-сюрпризы между macOS/Windows.
+* text=auto eol=lf
+
+# Явно текстовые (на всякий случай, чтобы diff/merge были построчными).
+*.py     text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.toml   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.ini    text eol=lf
+*.cfg    text eol=lf
+*.sh     text eol=lf
+.env.example text eol=lf
+Dockerfile text eol=lf
+
+# Бинарники — не трогать переводы строк, не пытаться мержить.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.dump  binary
+*.sqlite3 binary
