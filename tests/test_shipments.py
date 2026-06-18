@@ -24,6 +24,22 @@ async def _active_client(session: AsyncSession, telegram_id: int = 100):
     )
 
 
+async def test_shipment_persists_size_preset_and_weight(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=140)
+    repo = ShipmentRepository(db_session)
+    created = await repo.create(
+        client_id=client.id,
+        recipient_name="Іван",
+        ttn_number="TTN-W",
+        size_preset="mala",
+        weight=Decimal("2.5"),
+        items=[ShipmentItemDraft(sku="SKU-1", name="Товар", quantity=1)],
+    )
+    fetched = await repo.get_by_id(created.id)
+    assert fetched.size_preset == "mala"
+    assert fetched.weight == Decimal("2.500")  # Numeric(8,3)
+
+
 async def test_shipment_repository_reserves_only_open_shipments(db_session: AsyncSession):
     client = await _active_client(db_session)
     repo = ShipmentRepository(db_session)

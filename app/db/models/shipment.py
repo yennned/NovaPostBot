@@ -48,6 +48,12 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     cod_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     insured_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
+    # Габариты посылки. Пресет НП (документи/мала/...) и фактический вес (кг).
+    # «Власні розміри» (Д×Ш×В) — транзитом в НП, не персистим. Вес полезен для
+    # карточки и синка перевзвешивания НП в Фазе 5.
+    size_preset: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    weight: Mapped[Decimal | None] = mapped_column(Numeric(8, 3), nullable=True)
+
     status: Mapped[ShipmentStatus] = mapped_column(
         Enum(ShipmentStatus, name="shipment_status"),
         default=ShipmentStatus.created,
