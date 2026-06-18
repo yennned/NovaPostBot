@@ -15,6 +15,18 @@
 
 ---
 
+## 2026-06-18 · feat/alex-phase2 · sender_profile (backend-ready)
+- **Сделано:** `services/sender_profile.py` — create/list/get/update/set_default
+  поверх готового репозитория; `SenderProfileView` (ключ НП наружу не отдаётся,
+  только `has_api_key`); первый профиль клиента авто-дефолтный; права (свой клиент
+  / manager+/dev); аудит (ключ в аудите маскируется `***`). **NP-валидация НЕ
+  делается — Фаза 4.** `exceptions.SenderProfileNotFound`. Тесты на Postgres
+  (6) — зелёные, ruff чист.
+- **Дальше:** bot/UI Фазы 2 (handlers/clients_manage, клавиатуры, тексты,
+  ClientManageState, wiring, BotNotifier, триггеры пушей) — доводим фазу до
+  end-to-end и мержим.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-18 · feat/alex-clients · смена модели работы
 - **Решение:** перешли на **sequential-by-phase** (последовательно по фазам, не
   параллельно по слоям). Один владелец на фазу (backend+UI), второй ждёт мержа.

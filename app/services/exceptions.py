@@ -17,6 +17,10 @@ class ClientNotFound(ClientServiceError):
     """Клиент с таким id не найден."""
 
 
+class SenderProfileNotFound(ClientServiceError):
+    """ФОП-профиль с таким id не найден."""
+
+
 class PermissionDenied(ClientServiceError):
     """У актёра нет прав на действие (иерархия `can_manage` или per-flag)."""
 
