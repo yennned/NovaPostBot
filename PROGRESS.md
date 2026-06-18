@@ -15,6 +15,25 @@
 
 ---
 
+## 2026-06-18 · feat/alex-clients · 60d8956
+- **Сделано:** **контракт Фазы 2** (слой alex, контракт-первый). `services/clients.py`
+  — доменный API управления клиентами (list/card/approve/block/unblock/archive/
+  restore/update_profile), frozen-структуры `ClientListItem`/`ClientPage`/
+  `ClientCard`, карта переходов статусов, проверки `can_manage` + per-flag
+  (`can_manage_clients`/`can_edit_clients`), аудит. `services/exceptions.py`
+  (`ClientServiceError` → NotFound/PermissionDenied/TransitionForbidden/
+  AlreadyInStatus). `services/notifications.py` — `Notifier`-протокол +
+  `notify_new_client_registered` (владельцам+дежурным) / `notify_client_approved`,
+  uk-тексты backend-owned. `repositories/user.py`: `list_by_status`
+  (фильтр/поиск/пагинация) + `count_by_status`. Бриф Степану —
+  `docs/phase2-stepan-brief.md`. Тесты на Postgres + mock Notifier — полный сьют
+  зелёный, ruff чист.
+- **Дальше:** контракт-PR в `main` первым; Степан ветвится от `main` и пишет
+  bot-layer Фазы 2 по брифу. Параллельно `feat/alex-senders` — sender_profile
+  backend-ready.
+- **Открытые вопросы:** мусорные дубликаты « 2.py» в worktree (артефакт
+  файл-синка) — почистить, в git не коммитим.
+
 ## 2026-06-17 · main · c3e3fb0
 - **Сделано:** смержен **Track B / step / Phase 1 bot-auth** через PR
   [#5](https://github.com/yennned/NovaPostBot/pull/5). В `main` вошли bot-layer
