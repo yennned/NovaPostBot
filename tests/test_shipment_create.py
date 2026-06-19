@@ -8,14 +8,16 @@ from decimal import Decimal
 import httpx
 import pytest
 from app.config import Settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.repositories import SenderProfileRepository, ShipmentRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
+from app.novaposhta.exceptions import NovaPoshtaNotFound
 from app.services import shipment
 from app.services.exceptions import (
     InsufficientStock,
     SenderProfileNotConfigured,
     SenderProfileNotValidated,
+    TtnCancelFailed,
     TtnCreationFailed,
 )
 from app.sheets.inventory import StockRow
@@ -207,3 +209,54 @@ async def test_create_shipment_recipient_failure_writes_nothing(db_session: Asyn
     with pytest.raises(TtnCreationFailed):
         await _create(db_session, client, _np_client(routes))
     assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
+
+
+# --------------------------------------------------- NP-aware відміна (PR 9d follow-up)
+
+
+async def _created_for_cancel(session, telegram_id):
+    client = await _active_client(session, telegram_id=telegram_id)
+    await _validated_profile(session, client)
+    card = await _create(session, client, _np_client(_OK_ROUTES))  # np_ref=doc-ref, резерв COF-1:3
+    return client, card
+
+
+async def test_cancel_np_delete_and_release(db_session: AsyncSession):
+    client, card = await _created_for_cancel(db_session, 520)
+    cancelled = await shipment.cancel_shipment(
+        db_session,
+        client=client,
+        shipment_id=card.id,
+        np_client=_np_client({("InternetDocument", "delete"): [{"Ref": "doc-ref"}]}),
+    )
+    assert cancelled.status == ShipmentStatus.cancelled
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}  # резерв снят
+
+
+async def test_cancel_np_error_keeps_reserve(db_session: AsyncSession):
+    client, card = await _created_for_cancel(db_session, 521)
+    fail = httpx.Response(
+        200, json={"success": False, "data": [], "errors": ["НП недоступна"], "errorCodes": []}
+    )
+    with pytest.raises(TtnCancelFailed):
+        await shipment.cancel_shipment(
+            db_session,
+            client=client,
+            shipment_id=card.id,
+            np_client=_np_client({("InternetDocument", "delete"): fail}),
+        )
+    # NP-first: при сбое НП статус не трогаем → резерв держится (нет oversell).
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {"COF-1": 3}
+
+
+async def test_cancel_already_deleted_idempotent(db_session: AsyncSession, monkeypatch):
+    client, card = await _created_for_cancel(db_session, 522)
+
+    async def _raise_not_found(*args, **kwargs):
+        raise NovaPoshtaNotFound("вже видалено")
+
+    monkeypatch.setattr(shipment.methods, "delete_ttn", _raise_not_found)
+    cancelled = await shipment.cancel_shipment(
+        db_session, client=client, shipment_id=card.id, np_client=_np_client(_OK_ROUTES)
+    )
+    assert cancelled.status == ShipmentStatus.cancelled  # «уже удалено» = успех

@@ -28,13 +28,15 @@ from app.db.repositories import (
 )
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
-from app.novaposhta.exceptions import NovaPoshtaError
+from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
 from app.services import inventory, notifications, shipments
 from app.services.exceptions import (
     InsufficientStock,
     SenderProfileNotConfigured,
     SenderProfileNotValidated,
+    ShipmentNotFound,
+    TtnCancelFailed,
     TtnCreationFailed,
 )
 from app.services.notifications import Notifier
@@ -213,3 +215,44 @@ async def create_shipment(
     # коллекции упадёт в async (MissingGreenlet).
     fresh = await repo.get_by_id(shipment.id)
     return shipments._to_card(fresh)
+
+
+async def _cancel_api_key(session: AsyncSession, shipment) -> str:
+    """Ключ НП ФОП отправления (для `InternetDocument.delete`)."""
+    profile = await SenderProfileRepository(session).get_by_id(shipment.sender_profile_id)
+    if profile is None:
+        raise TtnCancelFailed("ФОП відправлення не знайдено")
+    return profile.np_api_key  # EncryptedString расшифровывает при чтении
+
+
+async def cancel_shipment(
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    np_client: NovaPoshtaClient,
+) -> shipments.ShipmentCard:
+    """Отменить ТТН **NP-first**: сначала `InternetDocument.delete` в НП, и только
+    при успехе снимаем статус в БД (резерв выводится из статуса → освободится).
+
+    Иначе (сними мы резерв до удаления в НП) при сбое НП получили бы «живую» ТТН в
+    НП с освобождённым резервом → риск oversell. «Уже удалено» в НП
+    (`NovaPoshtaNotFound`) — идемпотентный успех. Прочие ошибки НП → `TtnCancelFailed`
+    (статус не трогаем, отмену можно повторить).
+    """
+    shipments._require_active_client(client)
+    shipment = await ShipmentRepository(session).get_by_id(shipment_id)
+    if shipment is None or shipment.client_id != client.id:
+        raise ShipmentNotFound(str(shipment_id))
+    # Удаляем в НП только для отменяемых статусов с реальным np_ref; статус-гейт
+    # (ShipmentActionForbidden для dispatched и далее) отдаём делегату ниже.
+    if shipment.np_ref and shipment.status in shipments.CANCELABLE_STATUSES:
+        api_key = await _cancel_api_key(session, shipment)
+        try:
+            await methods.delete_ttn(np_client, api_key=api_key, doc_ref=shipment.np_ref)
+        except NovaPoshtaNotFound:
+            logger.info("ttn_already_deleted_in_np", shipment_id=str(shipment.id))
+        except NovaPoshtaError as exc:
+            raise TtnCancelFailed(str(exc)) from exc
+    # БД-часть (гарды/статус-чек/аудит/карточка) переиспользуем из read-side сервиса.
+    return await shipments.cancel_shipment(session, client=client, shipment_id=shipment_id)

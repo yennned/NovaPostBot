@@ -228,7 +228,7 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
     shipment_id = uuid4()
     cb = FakeCallback(data=f"cab:cancel:created:0:{shipment_id}")
 
-    async def fake_cancel_shipment(session, *, client, shipment_id):
+    async def fake_cancel_shipment(session, *, client, shipment_id, np_client):
         return ShipmentCard(
             id=shipment_id,
             ttn_number="TTN-888",
@@ -260,6 +260,7 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
         cb,
         SimpleNamespace(actor_user=client, effective_user=client),
         db_session,
+        object(),  # np_client (фейк — реальная отмена замокана)
     )
 
     assert cb.message.edits
