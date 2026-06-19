@@ -15,6 +15,20 @@
 
 ---
 
+## 2026-06-19 · feat/phase4-decrypt-error-backstop · backstop непрочитаного ключа ФОП (Фаза 4, follow-up)
+- **Сделано:** закрыт последний не-блокер из журнала. `np_api_key` расшифровывается на чтении строки
+  ORM (`EncryptedString`); при ротации/потере `FERNET_KEY` любая загрузка `SenderProfile` бросала
+  `DecryptionError`, а профили читаются во многих местах (создание/цена/адреса/отмена/кабинет/клиенты)
+  — пользователь получал опаковую ошибку. Так как ключ глобальный (ломается «всё разом»), ловим не
+  точечно в 8 сервисах, а **одним dispatcher-level backstop'ом**: новый `app/bot/handlers/errors.py`
+  (`errors_router` с `ExceptionTypeFilter(DecryptionError)`) — громкий лог `fernet_decrypt_failed` для
+  ops + понятный uk-текст пользователю (в ответ на message/callback). Зарегистрирован в `dispatcher.py`;
+  транзакция к этому моменту уже откатана `ServicesMiddleware`. Докстринг `crypto.decrypt` уточнён.
+  Тесты (+3): ответ в message / через callback / без цели (не падаем). Полный сьют **238** зелёный,
+  ruff (lint+format) + гейт слоёв чисты.
+- **Дальше:** **Фаза 5** (трекинг НП/SLA/low-stock в воркере), владелец по sequential-by-phase — step.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-19 · feat/phase4-sender-redis-hardening · гейт даних відправника + стійкість Redis (Фаза 4, follow-up)
 - **Сделано:** закрыты два реальных бага боевого пути, которые маскировали моки.
   **Issue A (неполный отправитель):** гейт создания ТТН проверял только `np_sender_ref`, а
