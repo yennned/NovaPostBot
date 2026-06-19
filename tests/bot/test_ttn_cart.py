@@ -1,0 +1,317 @@
+"""Тесты потока создания ТТН — каркас + кошик (Фаза 4, PR 9a).
+
+ФОП-гейт входа идёт на реальном Postgres (через `sender_profile.list_profiles`);
+набор корзины/степпер/параметри — чистые (инвентарь замокан, БД не нужна).
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from types import SimpleNamespace
+
+from app.bot.handlers import ttn as h
+from app.bot.states import CreateTtnState
+from app.db.models.enums import UserRole, UserStatus
+from app.db.repositories import SenderProfileRepository, UserRepository
+from app.services.inventory import InventoryItem, InventoryPage
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+class FakeState:
+    def __init__(self, **data) -> None:
+        self.cleared = False
+        self.state = None
+        self._data = dict(data)
+
+    async def clear(self) -> None:
+        self.cleared = True
+        self.state = None
+        self._data = {}
+
+    async def set_state(self, value) -> None:
+        self.state = value
+
+    async def update_data(self, **kw) -> None:
+        self._data.update(kw)
+
+    async def get_data(self) -> dict:
+        return self._data
+
+
+class FakeMessage:
+    def __init__(self, text: str | None = None) -> None:
+        self.text = text
+        self.answers: list[dict] = []
+        self.edits: list[dict] = []
+
+    async def answer(self, text, reply_markup=None, parse_mode=None) -> None:
+        self.answers.append({"text": text, "reply_markup": reply_markup})
+
+    async def edit_text(self, text, reply_markup=None, parse_mode=None) -> None:
+        self.edits.append({"text": text, "reply_markup": reply_markup})
+
+
+class FakeCallback:
+    def __init__(self, data: str) -> None:
+        self.data = data
+        self.message = FakeMessage()
+        self.acks: list[dict] = []
+
+    async def answer(self, text=None, show_alert=False) -> None:
+        self.acks.append({"text": text, "show_alert": show_alert})
+
+
+def _item(sku: str, name: str, available: int, price: str | None = "100") -> InventoryItem:
+    return InventoryItem(
+        sku=sku,
+        name=name,
+        category=None,
+        stock=available,
+        reserved=0,
+        available=available,
+        price=Decimal(price) if price is not None else None,
+    )
+
+
+def _page(
+    items: list[InventoryItem], *, offset: int = 0, total: int | None = None
+) -> InventoryPage:
+    return InventoryPage(
+        items=items,
+        total=total if total is not None else len(items),
+        limit=h.TTN_PAGE_SIZE,
+        offset=offset,
+        categories=[],
+    )
+
+
+def _patch_inventory(monkeypatch, page: InventoryPage) -> None:
+    async def fake_list_inventory(
+        session, *, client, query=None, category=None, limit=8, offset=0, reader=None
+    ):
+        return page
+
+    monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+
+
+def _ctx(client):
+    return SimpleNamespace(effective_user=client, actor_user=client)
+
+
+_CLIENT = SimpleNamespace(id="cid", telegram_id=900)
+
+
+# --------------------------------------------------------------- ФОП-гейт (Postgres)
+
+
+async def _active_client(session: AsyncSession, telegram_id: int):
+    return await UserRepository(session).create(
+        telegram_id=telegram_id, full_name="Клієнт", role=UserRole.client, status=UserStatus.active
+    )
+
+
+async def test_entry_no_profile(db_session: AsyncSession):
+    client = await _active_client(db_session, 901)
+    msg = FakeMessage()
+    state = FakeState()
+    await h.start_create_ttn(msg, state, _ctx(client), db_session)
+    assert "ФОП ще не налаштований" in msg.answers[-1]["text"]
+    assert state.state is None  # в поток не вошли
+
+
+async def test_entry_profile_not_validated(db_session: AsyncSession):
+    client = await _active_client(db_session, 902)
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id, name="ФОП", np_api_key="k", is_default=True
+    )  # без np_sender_ref → не провалидирован
+    msg = FakeMessage()
+    state = FakeState()
+    await h.start_create_ttn(msg, state, _ctx(client), db_session)
+    assert "не підтверджено" in msg.answers[-1]["text"]
+    assert state.state is None
+
+
+async def test_entry_ok_shows_picker(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 903)
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id, name="ФОП", np_api_key="k", is_default=True, np_sender_ref="cp-1"
+    )
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
+    msg = FakeMessage()
+    state = FakeState()
+    await h.start_create_ttn(msg, state, _ctx(client), db_session)
+    assert state.state == CreateTtnState.picking_items
+    assert state._data["sender_profile_id"]
+    assert state._data["cart"] == {}
+    assert state._data["nonce"]
+    assert "Створення ТТН" in msg.answers[-1]["text"]
+
+
+# ----------------------------------------------------------------- кошик (чистые)
+
+
+async def test_pick_opens_stepper(monkeypatch):
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 24)]))
+    state = FakeState(cart_offset=0, cart={})
+    cb = FakeCallback("cab:ttn:pick:0")
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+    assert state._data["pending"]["sku"] == "SKU1"
+    assert state._data["pending"]["qty"] == 1
+    assert cb.message.edits  # степпер отрисован
+
+
+async def test_pick_zero_available_blocked(monkeypatch):
+    _patch_inventory(monkeypatch, _page([_item("SKU0", "Немає", 0)]))
+    state = FakeState(cart_offset=0, cart={})
+    cb = FakeCallback("cab:ttn:pick:0")
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+    assert "pending" not in state._data
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_qty_delta_clamps_to_available():
+    state = FakeState(pending={"sku": "S", "name": "X", "available": 3, "price": "100", "qty": 1})
+    cb = FakeCallback("cab:ttn:qd:10")
+    await h.cb_qty_delta(cb, state)
+    assert state._data["pending"]["qty"] == 3  # +10, но остаток 3
+
+
+async def test_qty_delta_floor_one():
+    state = FakeState(pending={"sku": "S", "name": "X", "available": 5, "price": "100", "qty": 1})
+    cb = FakeCallback("cab:ttn:qd:-1")
+    await h.cb_qty_delta(cb, state)
+    assert state._data["pending"]["qty"] == 1  # не опускается ниже 1
+
+
+async def test_qty_max():
+    state = FakeState(pending={"sku": "S", "name": "X", "available": 7, "price": "100", "qty": 2})
+    cb = FakeCallback("cab:ttn:qmax")
+    await h.cb_qty_max(cb, state)
+    assert state._data["pending"]["qty"] == 7
+
+
+async def test_qty_ok_adds_to_cart(monkeypatch):
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 10)]))
+    state = FakeState(
+        cart_offset=0,
+        cart={},
+        pending={"sku": "SKU1", "name": "Кава", "available": 10, "price": "100", "qty": 4},
+    )
+    cb = FakeCallback("cab:ttn:qok")
+    await h.cb_qty_ok(cb, _ctx(_CLIENT), None, state)
+    assert state._data["cart"]["SKU1"]["qty"] == 4
+    assert state._data["pending"] is None
+
+
+async def test_qty_ok_aggregates_capped(monkeypatch):
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 10)]))
+    state = FakeState(
+        cart_offset=0,
+        cart={"SKU1": {"qty": 8, "name": "Кава", "price": "100"}},
+        pending={"sku": "SKU1", "name": "Кава", "available": 10, "price": "100", "qty": 6},
+    )
+    cb = FakeCallback("cab:ttn:qok")
+    await h.cb_qty_ok(cb, _ctx(_CLIENT), None, state)
+    assert state._data["cart"]["SKU1"]["qty"] == 10  # 8+6=14 → capped на остаток 10
+
+
+async def test_receive_qty_validates_range():
+    state = FakeState(pending={"sku": "S", "name": "X", "available": 5, "price": "100", "qty": 1})
+    await state.set_state(CreateTtnState.entering_qty)
+    msg = FakeMessage(text="99")
+    await h.receive_qty(msg, state)
+    assert "1–5" in msg.answers[-1]["text"]  # отклонено
+    assert state.state == CreateTtnState.entering_qty
+
+
+async def test_receive_qty_accepts():
+    state = FakeState(pending={"sku": "S", "name": "X", "available": 5, "price": "100", "qty": 1})
+    await state.set_state(CreateTtnState.entering_qty)
+    msg = FakeMessage(text="3")
+    await h.receive_qty(msg, state)
+    assert state._data["pending"]["qty"] == 3
+    assert state.state == CreateTtnState.picking_items
+
+
+async def test_cart_remove(monkeypatch):
+    state = FakeState(
+        cart={
+            "A": {"qty": 1, "name": "A", "price": "10"},
+            "B": {"qty": 2, "name": "B", "price": "20"},
+        }
+    )
+    cb = FakeCallback("cab:ttn:crm:0")
+    await h.cb_cart_remove(cb, state)
+    assert list(state._data["cart"].keys()) == ["B"]
+
+
+# --------------------------------------------------------- параметри посилки
+
+
+async def test_next_requires_nonempty_cart():
+    state = FakeState(cart={})
+    cb = FakeCallback("cab:ttn:next")
+    await h.cb_next_to_parcel(cb, state)
+    assert cb.acks[-1]["show_alert"] is True
+    assert state.state is None
+
+
+async def test_next_to_parcel():
+    state = FakeState(cart={"A": {"qty": 1, "name": "A", "price": "10"}}, size_token="s")
+    cb = FakeCallback("cab:ttn:next")
+    await h.cb_next_to_parcel(cb, state)
+    assert state.state == CreateTtnState.picking_parcel
+    assert cb.message.edits
+
+
+async def test_size_select():
+    state = FakeState(size_token="s", weight="1.0")
+    cb = FakeCallback("cab:ttn:sz:l")
+    await h.cb_size(cb, state)
+    assert state._data["size_token"] == "l"
+
+
+async def test_receive_weight_invalid():
+    state = FakeState(size_token="s")
+    await state.set_state(CreateTtnState.entering_weight)
+    msg = FakeMessage(text="abc")
+    await h.receive_weight(msg, state)
+    assert "Невірна вага" in msg.answers[-1]["text"]
+    assert "weight" not in state._data
+    assert state.state == CreateTtnState.entering_weight
+
+
+async def test_receive_weight_accepts_comma():
+    state = FakeState(size_token="s")
+    await state.set_state(CreateTtnState.entering_weight)
+    msg = FakeMessage(text="2,5")
+    await h.receive_weight(msg, state)
+    assert state._data["weight"] == "2.5"
+    assert state.state == CreateTtnState.picking_parcel
+
+
+async def test_to_recipient_requires_weight():
+    state = FakeState(size_token="s")  # без weight
+    cb = FakeCallback("cab:ttn:torcpt")
+    await h.cb_to_recipient(cb, state)
+    assert cb.acks[-1]["show_alert"] is True
+    assert state.state is None
+
+
+async def test_to_recipient_ok_and_kind_stored():
+    state = FakeState(size_token="s", weight="1.0")
+    cb = FakeCallback("cab:ttn:torcpt")
+    await h.cb_to_recipient(cb, state)
+    assert state.state == CreateTtnState.picking_recipient_kind
+
+    cb2 = FakeCallback("cab:ttn:rk:o")
+    await h.cb_recipient_kind(cb2, state)
+    assert state._data["recipient_kind"] == "organization"
+
+
+async def test_cancel_clears_state():
+    state = FakeState(cart={"A": {"qty": 1, "name": "A", "price": "10"}})
+    cb = FakeCallback("cab:ttn:cancel")
+    await h.cb_cancel(cb, state)
+    assert state.cleared is True
+    assert "скасовано" in cb.message.edits[-1]["text"]

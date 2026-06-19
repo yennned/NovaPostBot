@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING
 from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.bot.handlers import client_cabinet_router, clients_router, dev_router, start_router
+from app.bot.handlers import (
+    client_cabinet_router,
+    clients_router,
+    dev_router,
+    start_router,
+    ttn_router,
+)
 from app.bot.middlewares import EffectiveContextMiddleware, ServicesMiddleware
 from app.bot.services import InMemoryDevState
 from app.config import Settings
@@ -44,4 +50,5 @@ def build_dispatcher(
     dp.include_router(dev_router)
     dp.include_router(clients_router)
     dp.include_router(client_cabinet_router)
+    dp.include_router(ttn_router)
     return dp
