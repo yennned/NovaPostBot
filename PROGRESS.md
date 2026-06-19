@@ -15,6 +15,17 @@
 
 ---
 
+## 2026-06-19 · chore/alex-phase4-env-9e-stub · плейсхолдеры env + стаб 9e (Фаза 4)
+- **Сделано:** без изменения логики. В `.env.example` добавлен блок «Нова Пошта» с пустыми
+  `NP_SENDER_CITY_REF`/`NP_SENDER_WAREHOUSE_REF` (Ref нашего склада — заполнить перед боевым
+  запуском; транспорт/TTL имеют дефолты в `config.py`). PR 9e (история получателей) **отложен** —
+  точка подключения помечена `TODO (PR 9e)` в `keyboards/ttn.build_recipient_kind_kb` (подставляет
+  только name/phone/kind/edrpou — в БД нет ref міста/відділення). Заметки в `docs/ROADMAP.md`
+  (Фаза 4: реализовано / отложено 9e / что задать перед запуском). Сьют **225** зелёный, ruff чист.
+- **Дальше:** по Фазе 4 — точка (опц. 9e позже). Следующая — **Фаза 5** (трекинг НП/SLA/low-stock
+  в воркере), владелец по sequential-by-phase — step.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-19 · feat/alex-phase4-ttn-cancel · NP-aware «Скасувати» (Фаза 4, follow-up 9d)
 - **Сделано:** закрыт orphan-шов на **отмене**. Новый write-`shipment.cancel_shipment(np_client)`:
   **NP-first** — сначала `InternetDocument.delete` в НП, и только при успехе снимаем статус в БД

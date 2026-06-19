@@ -123,7 +123,13 @@ def build_parcel_kb(*, size_token: str, weight_set: bool) -> InlineKeyboardMarku
 
 
 def build_recipient_kind_kb() -> InlineKeyboardMarkup:
-    """Розвилка типу отримувача (керує наявністю кроку ЄДРПОУ)."""
+    """Розвилка типу отримувача (керує наявністю кроку ЄДРПОУ).
+
+    TODO (PR 9e, опц. — отложено): сюда добавить блок «Останні отримувачі» —
+    `shipments.last_recipients(client)` → кнопки `cab:ttn:rcpt:<idx>`. Тап
+    подставляет ТОЛЬКО name/phone/kind/edrpou (НЕ місто/відділення — в БД нет
+    ref-колонок) и пропускает шаги ПІБ/ЄДРПОУ/телефон, ведя сразу к выбору міста.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👤 Приватна особа", callback_data="cab:ttn:rk:p")],
