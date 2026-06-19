@@ -1,13 +1,13 @@
-"""Поток создания ТТН — каркас + кошик (Фаза 4, PR 9a). Namespace `cab:ttn:*`.
+"""Поток создания ТТН (Фаза 4, Express-картка). Namespace `cab:ttn:*`.
 
-Express-картка: короткий happy-path кошик → параметри → отримувач → … → картка.
-PR 9a покрывает вход (ранний резолв ФОП с разведёнными uk-текстами), набор корзины
-(степпер + ввод числа), экран «Параметри посилки» (вага+габарити) и розвилку типа
-отримувача. Шаги получателя/адреса/карточки добавят PR 9b–9d.
+Happy-path: 🚚 кнопка меню → кошик → параметри (вага+габарити) → отримувач
+(тип/ПІБ/ЄДРПОУ/телефон) → місто → відділення → картка-зведення з ціною НП →
+✅ Відправити (`create_shipment`, NP-first + резерв). Карточка редактируема (✏️ по
+полям, COD, перерасчёт цены). Анти-дабл-тап на «Відправити» — `_SUBMITTING`.
 
-Длинные значения (sku) в callback_data не кладём — резолвим по индексу страницы из
-`list_inventory` (re-fetch на каждый тап), корзину держим в FSM-data. 🚚-кнопку
-меню к `start_create_ttn` привяжет PR 9d (пока поток не самодостаточен для юзера).
+Длинные значения (sku/ref) в callback_data не кладём — резолвим по индексу из
+FSM-data (лимит 64 байта). FSM-состояние — `MemoryStorage` (теряется при рестарте
+бота; для разовой операции приемлемо).
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ import re
 import uuid
 from decimal import Decimal, InvalidOperation
 
-from aiogram import F, Router
+import structlog
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.types.base import TelegramObject
@@ -39,8 +41,10 @@ from app.bot.keyboards.ttn import (
     build_recipient_kind_kb,
     build_size_edit_kb,
     build_stepper_kb,
+    build_success_kb,
     build_warehouse_results_kb,
 )
+from app.bot.notify import BotNotifier
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as texts
 from app.bot.types import EffectiveContext
@@ -48,10 +52,23 @@ from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
 from app.services import address, pricing, sender_profile
-from app.services.exceptions import ClientServiceError, PermissionDenied
+from app.services.exceptions import (
+    ClientServiceError,
+    InsufficientStock,
+    PermissionDenied,
+    SenderProfileNotConfigured,
+    SenderProfileNotValidated,
+    TtnCreationFailed,
+)
 from app.services.inventory import InventoryItem, list_inventory
+from app.services.shipment import create_shipment
 
 router = Router(name="create_ttn")
+logger = structlog.get_logger(__name__)
+
+# Анти-дабл-тап «Відправити»: id клиентов с ТТН «в полёте». Проверка `in` + `add`
+# без await между ними атомарна в однопоточном asyncio → надёжный single-flight.
+_SUBMITTING: set[int] = set()
 
 _STALE = "Кнопка застаріла, почніть створення ТТН заново."
 _MAX_WEIGHT = Decimal("1000")
@@ -1264,6 +1281,132 @@ async def cb_cod_equal(
         effective_context=effective_context,
     ):
         await callback.answer("Суму COD прирівняно до вартості.")
+
+
+# ----------------------------------------------------------------- відправлення ТТН
+
+
+def _submit_error_text(exc: ClientServiceError, cart: dict) -> str:
+    """Доменную ошибку create_shipment → понятный uk-текст для клиента."""
+    if isinstance(exc, InsufficientStock):
+        name = cart.get(exc.sku, {}).get("name", exc.sku)
+        return f"❌ На залишку лише {exc.available} од. «{name}». Оновіть кошик і спробуйте ще раз."
+    if isinstance(exc, SenderProfileNotValidated):
+        return "❌ Ключ ФОП не підтверджено в НП. Зверніться до менеджера."
+    if isinstance(exc, SenderProfileNotConfigured):
+        return "❌ ФОП не налаштований. Зверніться до менеджера."
+    if isinstance(exc, TtnCreationFailed):
+        return f"❌ Не вдалося створити ТТН: {exc}"
+    return f"❌ Помилка: {exc}"
+
+
+async def _show_success(message: Message, ttn_number: str | None) -> None:
+    """Показать экран успеха — best-effort. ТТН уже создан в НП и пишется в БД
+    (коммит у middleware ПОСЛЕ хендлера), поэтому сбой показа НЕ должен поднять
+    исключение — иначе middleware откатит транзакцию и осиротит NP-ТТН."""
+    text = texts.success_text(ttn_number)
+    kb = build_success_kb()
+    try:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramAPIError:
+        try:
+            await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        except TelegramAPIError:
+            logger.warning("ttn_success_render_failed", ttn_number=ttn_number)
+
+
+async def _do_create(
+    session: AsyncSession, client, data: dict, np_client: NovaPoshtaClient, bot: Bot
+):
+    cart = data["cart"]
+    cod = data.get("cod_amount")
+    return await create_shipment(
+        session,
+        client=client,
+        items=[(sku, entry["qty"]) for sku, entry in cart.items()],
+        recipient_kind=data["recipient_kind"],
+        recipient_name=data["recipient_name"],
+        recipient_phone=data["recipient_phone"],
+        recipient_city_ref=data["recipient_city_ref"],
+        recipient_city_name=data["recipient_city_name"],
+        recipient_warehouse_ref=data["recipient_warehouse_ref"],
+        recipient_warehouse_name=data["recipient_warehouse_name"],
+        weight=Decimal(data["weight"]),
+        size_preset=SIZE_PRESETS.get(data.get("size_token", "s"), "—"),
+        description=data["description"],
+        insured_amount=Decimal(data["insured_amount"]),
+        np_client=np_client,
+        payer_type=data.get("payer_type", "Recipient"),
+        payment_method=data.get("payment_method", "prepay"),
+        cod_amount=Decimal(cod) if cod else None,
+        recipient_edrpou=data.get("recipient_edrpou"),
+        sender_profile_id=_profile_uuid(data),
+        notifier=BotNotifier(bot),
+    )
+
+
+@router.callback_query(F.data == "cab:ttn:send")
+async def cb_submit(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    bot: Bot,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not (data.get("recipient_warehouse_ref") and data.get("cart")):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    uid = client.telegram_id
+    if uid in _SUBMITTING:  # single-flight: check+add без await между ними
+        await callback.answer("ТТН вже відправляється, зачекайте…", show_alert=True)
+        return
+    _SUBMITTING.add(uid)
+    await callback.answer("Створюємо ТТН…")
+    try:
+        try:
+            card = await _do_create(db_session, client, data, np_client, bot)
+        except ClientServiceError as exc:
+            # NP-first: при ошибке в БД ничего нет — повтор безопасен, карточка остаётся.
+            await callback.message.answer(_submit_error_text(exc, data.get("cart", {})))
+            return
+        await state.clear()
+        await _show_success(callback.message, card.ttn_number)
+    finally:
+        _SUBMITTING.discard(uid)
+
+
+@router.callback_query(F.data == "cab:ttn:again")
+async def cb_again(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await callback.answer()
+    await start_create_ttn(callback.message, state, effective_context, db_session)
+
+
+@router.message(F.text == "🚚 Створити ТТН")
+async def open_create_ttn(
+    message: Message,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    """Reply-кнопка меню клиента → вход в поток создания ТТН."""
+    await start_create_ttn(message, state, effective_context, db_session)
 
 
 # --------------------------------------------------------------------- скасування

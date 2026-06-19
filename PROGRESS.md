@@ -15,6 +15,25 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-ttn-send · FSM ТТН: відправлення + 🚚 (Фаза 4, PR 9d)
+- **Сделано:** поток создания ТТН **ожил для клиента**. Кнопка «✅ Відправити ТТН» на карточке →
+  `cb_submit` → `create_shipment` (NP-first + резерв) → экран успеха з № ТТН + «🚚 Створити ще одну».
+  Reply-кнопка меню **🚚 Створити ТТН** привязана к входу (`open_create_ttn` → `start_create_ttn`).
+  **Single-flight**: модульный set `_SUBMITTING` по `telegram_id` (атомарная проверка `in`+`add` без
+  await между ними) — двойной тап не создаёт две ТТН. Доменные ошибки → uk: `InsufficientStock` →
+  «на залишку лише N …» (имя из кошика), `SenderProfileNotValidated/NotConfigured`, `TtnCreationFailed`
+  → конкретный текст; при ошибке карточка остаётся (NP-first → повтор безопасен). Пуш менеджеру
+  «Створені» — через `BotNotifier` (best-effort внутри сервиса). **Focused-review (критичный money-path)**:
+  найден реальный баг шва — если показ успеха (`edit_text`) падал, исключение откатывало транзакцию
+  middleware и осиротил бы NP-ТТН; пофикшено `_show_success` (глотает `TelegramAPIError`, успех — не
+  блокирует коммит). Тесты (7): успех, single-flight, InsufficientStock-uk, missing-fields, привязка
+  🚚/again, success-render-failure. Полный сьют **222** зелёный, ruff + гейт слоёв чисты.
+- **Дальше:** NP-aware «Скасувати» (отдельный мелкий PR): write-`cancel_shipment` с `np_client`
+  (`InternetDocument.delete`, NP-first) + переключить бот-хендлер `cab:cancel`. Опц. PR 9e — история
+  получателей. Профильный E2E к НП — при наличии реального ключа.
+- **Открытые вопросы:** `NP_SENDER_CITY_REF` нужен в окружении для расчёта/отправки; габарити «Власні»
+  (ДхШхВ) домен пока не несёт (метка-пресет).
+
 ## 2026-06-19 · feat/alex-phase4-ttn-card-edit · FSM ТТН: правка картки + COD (Фаза 4, PR 9c-2)
 - **Сделано:** карточка стала редактируемой. ✏️ на каждом поле: текст (ПІБ/тел/ЄДРПОУ/вага/
   опис/вартість) → state `editing_field` + `edit_field`-токен → `receive_edit` (валидация per

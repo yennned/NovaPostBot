@@ -503,6 +503,8 @@ def _card_state(**over):
         "recipient_phone": "380671234567",
         "recipient_city_ref": "c1",
         "recipient_city_name": "Київ",
+        "recipient_warehouse_ref": "w1",
+        "recipient_warehouse_name": "№5: Хрещатик",
         "warehouses": [{"ref": "w1", "number": "5", "description": "Хрещатик"}],
         "weight": "2.5",
         "size_token": "s",
@@ -710,6 +712,126 @@ async def test_back_to_card(monkeypatch):
     await h.cb_card(cb, _ctx(_CLIENT), None, object(), state)
     assert state.state == CreateTtnState.summary
     assert cb.message.edits
+
+
+# ===================== PR 9d: відправлення + single-flight + wiring =====================
+
+
+def _ready_state(**over):
+    """Состояние карточки ПОСЛЕ рендера (дефолты проставлены) — для тестов отправки."""
+    base = {
+        "description": "Кава",
+        "insured_amount": "300",
+        "payment_method": "prepay",
+        "payer_type": "Recipient",
+    }
+    base.update(over)
+    return _card_state(**base)
+
+
+def _patch_create(monkeypatch, *, ttn="59000123", raise_exc=None, calls=None):
+    async def fake(session, **kw):
+        if calls is not None:
+            calls["n"] = calls.get("n", 0) + 1
+        if raise_exc is not None:
+            raise raise_exc
+        return SimpleNamespace(ttn_number=ttn)
+
+    monkeypatch.setattr(h, "create_shipment", fake)
+
+
+async def test_submit_success(monkeypatch):
+    h._SUBMITTING.discard(_CLIENT.telegram_id)
+    _patch_create(monkeypatch, ttn="59000999")
+    state = _ready_state()
+    cb = FakeCallback("cab:ttn:send")
+    await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert state.cleared is True
+    assert "59000999" in cb.message.edits[-1]["text"]
+    assert _CLIENT.telegram_id not in h._SUBMITTING  # флаг снят
+
+
+async def test_submit_single_flight(monkeypatch):
+    calls: dict = {}
+    _patch_create(monkeypatch, calls=calls)
+    state = _card_state(recipient_warehouse_ref="w1")
+    h._SUBMITTING.add(_CLIENT.telegram_id)  # уже отправляется
+    try:
+        cb = FakeCallback("cab:ttn:send")
+        await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)
+        assert cb.acks[-1]["show_alert"] is True
+        assert calls.get("n", 0) == 0  # create_shipment не вызывали
+    finally:
+        h._SUBMITTING.discard(_CLIENT.telegram_id)
+
+
+async def test_submit_insufficient_stock_uk(monkeypatch):
+    from app.services.exceptions import InsufficientStock
+
+    h._SUBMITTING.discard(_CLIENT.telegram_id)
+    _patch_create(monkeypatch, raise_exc=InsufficientStock("SKU1", 5, 2))
+    state = _ready_state()
+    cb = FakeCallback("cab:ttn:send")
+    await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert state.cleared is False  # карточка осталась — можно повторить
+    assert "лише 2" in cb.message.answers[-1]["text"]  # имя из корзины + остаток
+    assert _CLIENT.telegram_id not in h._SUBMITTING
+
+
+async def test_submit_missing_fields_stale(monkeypatch):
+    h._SUBMITTING.discard(_CLIENT.telegram_id)
+    _patch_create(monkeypatch)
+    state = FakeState(cart={})  # нет warehouse/cart
+    cb = FakeCallback("cab:ttn:send")
+    await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_ttn_button_forwards_to_entry(monkeypatch):
+    spy: dict = {}
+
+    async def fake_start(message, state, ctx, session):
+        spy["called"] = True
+
+    monkeypatch.setattr(h, "start_create_ttn", fake_start)
+    await h.open_create_ttn(FakeMessage(), FakeState(), _ctx(_CLIENT), None)
+    assert spy.get("called") is True
+
+
+async def test_submit_success_render_failure_does_not_raise(monkeypatch):
+    # Если показ успеха падает (Telegram), исключение НЕ должно всплыть — иначе
+    # middleware откатит транзакцию и осиротит уже созданный NP-ТТН.
+    from aiogram.exceptions import TelegramAPIError
+
+    h._SUBMITTING.discard(_CLIENT.telegram_id)
+    _patch_create(monkeypatch, ttn="59000777")
+
+    class RaisingMessage(FakeMessage):
+        async def edit_text(self, *a, **kw):
+            raise TelegramAPIError(method=None, message="boom")
+
+        async def answer(self, *a, **kw):
+            raise TelegramAPIError(method=None, message="boom")
+
+    state = _ready_state()
+    cb = FakeCallback("cab:ttn:send")
+    cb.message = RaisingMessage()
+    await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)  # не должно бросить
+    assert state.cleared is True
+    assert _CLIENT.telegram_id not in h._SUBMITTING
+
+
+async def test_again_forwards_to_entry(monkeypatch):
+    spy: dict = {}
+
+    async def fake_start(message, state, ctx, session):
+        spy["called"] = True
+
+    monkeypatch.setattr(h, "start_create_ttn", fake_start)
+    cb = FakeCallback("cab:ttn:again")
+    await h.cb_again(cb, _ctx(_CLIENT), None, FakeState())
+    assert spy.get("called") is True
+    assert cb.acks  # callback подтверждён
 
 
 async def test_warehouse_page():

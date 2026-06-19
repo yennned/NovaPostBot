@@ -182,6 +182,16 @@ def payment_edit_text() -> str:
     return "💳 Спосіб оплати:"
 
 
+def success_text(ttn_number: str | None) -> str:
+    num = f"<b>{html.escape(ttn_number)}</b>" if ttn_number else "—"
+    return (
+        f"✅ <b>ТТН створено!</b>\n\n"
+        f"Номер: {num}\n"
+        "Резерв активний — позиції зменшено у 📦 Товари.\n"
+        "Передайте посилку на наш склад для відправлення."
+    )
+
+
 def card_text(data: dict, price: dict) -> str:
     """Карточка-зведення перед відправкою. `data` — FSM-data, `price` — кэш цены."""
     cart = data.get("cart", {})

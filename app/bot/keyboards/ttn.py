@@ -146,6 +146,7 @@ def build_card_kb(*, is_org: bool) -> InlineKeyboardMarkup:
     """Карточка-зведення: ✏️-правка каждого поля + перерасчёт + отмена. Кнопка
     «✅ Відправити» добавится в PR 9d."""
     rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="✅ Відправити ТТН", callback_data="cab:ttn:send")],
         [
             InlineKeyboardButton(text="✏️ Отримувач", callback_data="cab:ttn:edit:name"),
             InlineKeyboardButton(text="✏️ Телефон", callback_data="cab:ttn:edit:phone"),
@@ -179,6 +180,15 @@ def build_back_to_card_kb() -> InlineKeyboardMarkup:
     """Под prompt правки поля — вернуться на карточку без изменений."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")]]
+    )
+
+
+def build_success_kb() -> InlineKeyboardMarkup:
+    """Экран успеха: создать ещё одну ТТН."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚚 Створити ще одну", callback_data="cab:ttn:again")]
+        ]
     )
 
 
