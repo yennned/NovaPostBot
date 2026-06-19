@@ -87,3 +87,60 @@ def weight_invalid_text() -> str:
 
 def recipient_kind_text() -> str:
     return "👤 <b>Отримувач</b> — крок 3\n\nКому відправляємо?"
+
+
+def recipient_name_prompt(kind: str) -> str:
+    if kind == "organization":
+        return "Введіть повну назву організації (напр. ТОВ «Ромашка»):"
+    return "Введіть ПІБ отримувача (напр. Іваненко Іван Іванович):"
+
+
+def recipient_name_invalid() -> str:
+    return "❌ Порожнє значення. Введіть ПІБ або назву організації."
+
+
+def edrpou_prompt() -> str:
+    return "Введіть код ЄДРПОУ організації або ІПН ФОП (8 або 10 цифр):"
+
+
+def edrpou_invalid() -> str:
+    return "❌ Невірний код. ЄДРПОУ — 8 цифр, ІПН ФОП — 10 цифр."
+
+
+def phone_prompt() -> str:
+    return "Введіть телефон отримувача (напр. 0671234567):"
+
+
+def phone_invalid() -> str:
+    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+
+
+def city_prompt() -> str:
+    return "📍 <b>Місто отримувача</b> — почніть вводити назву (напр. Київ):"
+
+
+def city_not_found(query: str) -> str:
+    return f"Нічого не знайшли за «{html.escape(query)}». Спробуйте іншу назву міста."
+
+
+def city_results_text(query: str) -> str:
+    return f"Знайдено за «{html.escape(query)}». Оберіть місто:"
+
+
+def warehouse_results_text(city_name: str, *, total: int) -> str:
+    return (
+        f"🏤 <b>Відділення у місті {html.escape(city_name)}</b>\n"
+        f"Знайдено: {total}. Оберіть відділення або знайдіть за номером."
+    )
+
+
+def warehouse_none_text(city_name: str) -> str:
+    return f"У місті {html.escape(city_name)} відділень не знайдено. Спробуйте інше місто."
+
+
+def warehouse_find_prompt() -> str:
+    return "Введіть номер або частину адреси відділення:"
+
+
+def search_unavailable_text() -> str:
+    return "⚠️ Довідник НП тимчасово недоступний. Спробуйте за хвилину."

@@ -123,7 +123,7 @@ def build_parcel_kb(*, size_token: str, weight_set: bool) -> InlineKeyboardMarku
 
 
 def build_recipient_kind_kb() -> InlineKeyboardMarkup:
-    """Розвилка типу отримувача (керує наявністю кроку ЄДРПОУ в PR 9b)."""
+    """Розвилка типу отримувача (керує наявністю кроку ЄДРПОУ)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👤 Приватна особа", callback_data="cab:ttn:rk:p")],
@@ -134,3 +134,67 @@ def build_recipient_kind_kb() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+# Сколько результатов показывать: города — без пагинации (юзер уточняет запрос),
+# відділення — окнами (их в большом городе много).
+CITY_RESULTS = 9
+WAREHOUSE_PAGE_SIZE = 8
+
+
+def build_cancel_kb() -> InlineKeyboardMarkup:
+    """Минимальная клавиатура под prompt текстового ввода — только «Скасувати»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]]
+    )
+
+
+def build_city_results_kb(cities: list[dict]) -> InlineKeyboardMarkup:
+    """Результаты поиска города (по индексу; список City — в FSM-data)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, city in enumerate(cities[:CITY_RESULTS]):
+        area = f" ({city['area']})" if city.get("area") else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{city['name']}{area}"[:60],
+                    callback_data=f"cab:ttn:city:{idx}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_warehouse_results_kb(warehouses: list[dict], *, offset: int) -> InlineKeyboardMarkup:
+    """Окно відділень (абсолютный индекс в callback; список — в FSM-data) + пошук за №."""
+    rows: list[list[InlineKeyboardButton]] = []
+    window = warehouses[offset : offset + WAREHOUSE_PAGE_SIZE]
+    for i, wh in enumerate(window):
+        abs_idx = offset + i
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"№{wh['number']}: {wh['description']}"[:60],
+                    callback_data=f"cab:ttn:wh:{abs_idx}",
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀", callback_data=f"cab:ttn:whpage:{max(offset - WAREHOUSE_PAGE_SIZE, 0)}"
+            )
+        )
+    if offset + WAREHOUSE_PAGE_SIZE < len(warehouses):
+        nav.append(
+            InlineKeyboardButton(
+                text="▶", callback_data=f"cab:ttn:whpage:{offset + WAREHOUSE_PAGE_SIZE}"
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔎 Знайти за №", callback_data="cab:ttn:whfind")])
+    rows.append([InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
