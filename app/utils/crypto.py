@@ -44,7 +44,8 @@ def decrypt(token: str) -> str:
 
     При битом/несовместимом токене (повреждение или ротация `FERNET_KEY`) бросает
     `DecryptionError` вместо «сырого» `InvalidToken` — чтобы загрузка ORM падала
-    предсказуемо и ловилась вызывающим кодом.
+    предсказуемо. Ловит её глобальный errors-router бота
+    (`app/bot/handlers/errors.py`): лог для ops + понятное сообщение пользователю.
     """
     try:
         return _fernet().decrypt(token.encode()).decode()
