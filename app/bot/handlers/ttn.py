@@ -27,6 +27,7 @@ from app.bot.keyboards.ttn import (
     SIZE_PRESETS,
     TTN_PAGE_SIZE,
     build_cancel_kb,
+    build_card_kb,
     build_cart_picker_kb,
     build_cart_review_kb,
     build_city_results_kb,
@@ -41,7 +42,7 @@ from app.bot.types import EffectiveContext
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
-from app.services import address, sender_profile
+from app.services import address, pricing, sender_profile
 from app.services.exceptions import ClientServiceError, PermissionDenied
 from app.services.inventory import InventoryItem, list_inventory
 
@@ -183,6 +184,104 @@ async def _show_parcel(message: Message, state: FSMContext, *, edit: bool = True
     size_token = data.get("size_token", DEFAULT_SIZE_TOKEN)
     text = texts.parcel_text(weight=data.get("weight"), size_token=size_token)
     kb = build_parcel_kb(size_token=size_token, weight_set=bool(data.get("weight")))
+    if edit:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+def _cart_total(cart: dict) -> Decimal:
+    total = Decimal("0")
+    for entry in cart.values():
+        if entry["price"] is not None:
+            total += Decimal(entry["price"]) * entry["qty"]
+    return total
+
+
+async def _ensure_card_defaults(state: FSMContext) -> dict:
+    """Молчаливые дефолты карточки (страховка/опис/оплата/платник) — один раз."""
+    data = await state.get_data()
+    updates: dict = {}
+    cart = data.get("cart", {})
+    if data.get("insured_amount") is None:
+        total = _cart_total(cart)
+        updates["insured_amount"] = f"{total:f}" if total > 0 else "0"
+    if data.get("description") is None:
+        names = list(dict.fromkeys(e["name"] for e in cart.values()))
+        updates["description"] = (", ".join(names)[:100]) or "Товари"
+    if data.get("payment_method") is None:
+        updates["payment_method"] = "prepay"
+    if data.get("payer_type") is None:
+        updates["payer_type"] = "Recipient"
+    if updates:
+        await state.update_data(**updates)
+        data = await state.get_data()
+    return data
+
+
+def _price_key(data: dict) -> str:
+    """Хэш влияющих на тариф полей (getDocumentPrice): місто/вага/вартість/COD."""
+    parts = (
+        data.get("recipient_city_ref"),
+        data.get("weight"),
+        data.get("insured_amount"),
+        data.get("cod_amount") or "",
+    )
+    return "|".join(str(p) for p in parts)
+
+
+async def _card_price(
+    session: AsyncSession, client, data: dict, np_client: NovaPoshtaClient, *, force: bool
+) -> dict:
+    """Цена НП с кэшем в FSM-data по `_price_key` + graceful-degradation."""
+    key = _price_key(data)
+    cached = data.get("price_cache")
+    if not force and cached and cached.get("key") == key:
+        return cached
+    result: dict = {"key": key}
+    # Защита от устаревшей кнопки (напр. recompute на сброшенном FSM): без обязательных
+    # полей не дёргаем НП и не падаем KeyError — показываем «розрахунок недоступний».
+    if not (data.get("recipient_city_ref") and data.get("weight") and data.get("insured_amount")):
+        result["unavailable"] = True
+        return result
+    cod = data.get("cod_amount")
+    try:
+        quote = await pricing.quote_ttn(
+            session,
+            client=client,
+            sender_profile_id=_profile_uuid(data),
+            city_recipient_ref=data["recipient_city_ref"],
+            weight=Decimal(data["weight"]),
+            cost=Decimal(data["insured_amount"]),
+            cod_amount=Decimal(cod) if cod else None,
+            np_client=np_client,
+        )
+        result["cost"] = f"{quote.cost:f}"
+        result["redelivery"] = (
+            f"{quote.cost_redelivery:f}" if quote.cost_redelivery is not None else None
+        )
+        result["eta"] = quote.estimated_delivery_date
+    except (ClientServiceError, NovaPoshtaError):
+        # НП не дала Cost / недоступна — не блокируем оформление (подтвердит менеджер).
+        result["unavailable"] = True
+    return result
+
+
+async def _show_card(
+    message: Message,
+    state: FSMContext,
+    *,
+    session: AsyncSession,
+    client,
+    np_client: NovaPoshtaClient,
+    edit: bool,
+    force_price: bool = False,
+) -> None:
+    data = await _ensure_card_defaults(state)
+    price = await _card_price(session, client, data, np_client, force=force_price)
+    await state.update_data(price_cache=price)
+    text = texts.card_text(data, price)
+    kb = build_card_kb()
     if edit:
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -799,7 +898,13 @@ async def receive_warehouse_query(
 
 
 @router.callback_query(F.data.startswith("cab:ttn:wh:"))
-async def cb_wh(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_wh(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
     if callback.message is None:
         await callback.answer(_STALE, show_alert=True)
         return
@@ -812,14 +917,51 @@ async def cb_wh(callback: CallbackQuery, state: FSMContext) -> None:
     if abs_idx < 0 or abs_idx >= len(whs):
         await callback.answer(_STALE, show_alert=True)
         return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
     wh = whs[abs_idx]
     await state.update_data(
         recipient_warehouse_ref=wh["ref"],
         recipient_warehouse_name=f"№{wh['number']}: {wh['description']}",
     )
     await state.set_state(CreateTtnState.summary)
-    # Карточка-зведення з ціною НП — PR 9c.
-    await callback.answer("Адресу збережено. Далі — зведення (скоро).")
+    await _show_card(
+        callback.message, state, session=db_session, client=client, np_client=np_client, edit=True
+    )
+    await callback.answer()
+
+
+# --------------------------------------------------------------------- картка-зведення
+
+
+@router.callback_query(F.data == "cab:ttn:recompute")
+async def cb_recompute(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    await state.set_state(CreateTtnState.summary)
+    await _show_card(
+        callback.message,
+        state,
+        session=db_session,
+        client=client,
+        np_client=np_client,
+        edit=True,
+        force_price=True,
+    )
+    await callback.answer("Перераховано.")
 
 
 # --------------------------------------------------------------------- скасування
