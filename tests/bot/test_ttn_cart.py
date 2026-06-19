@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
+from app.bot.texts import ttn as ttn_texts
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import SenderProfileRepository, UserRepository
 from app.services.inventory import InventoryItem, InventoryPage
@@ -315,3 +316,19 @@ async def test_cancel_clears_state():
     await h.cb_cancel(cb, state)
     assert state.cleared is True
     assert "скасовано" in cb.message.edits[-1]["text"]
+
+
+# ----------------------------------------------------------- HTML-экранирование (review fix)
+
+
+def test_stepper_text_escapes_html():
+    item = _item("SKU", "Кава & <тег>", 5)
+    out = ttn_texts.stepper_text(item, 2)
+    assert "&amp;" in out
+    assert "&lt;тег&gt;" in out
+
+
+def test_cart_review_text_escapes_html():
+    out = ttn_texts.cart_review_text([("A&B<x>", 1, Decimal("10"))])
+    assert "&amp;" in out
+    assert "&lt;x&gt;" in out

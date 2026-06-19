@@ -149,15 +149,15 @@ async def _show_cart(message: Message, state: FSMContext) -> None:
     await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
-async def _show_parcel(message: Message, state: FSMContext) -> None:
+async def _show_parcel(message: Message, state: FSMContext, *, edit: bool = True) -> None:
     data = await state.get_data()
-    text = texts.parcel_text(
-        weight=data.get("weight"), size_token=data.get("size_token", DEFAULT_SIZE_TOKEN)
-    )
-    kb = build_parcel_kb(
-        size_token=data.get("size_token", DEFAULT_SIZE_TOKEN), weight_set=bool(data.get("weight"))
-    )
-    await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    size_token = data.get("size_token", DEFAULT_SIZE_TOKEN)
+    text = texts.parcel_text(weight=data.get("weight"), size_token=size_token)
+    kb = build_parcel_kb(size_token=size_token, weight_set=bool(data.get("weight")))
+    if edit:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 # ------------------------------------------------------------------- кошик: набор
@@ -228,6 +228,7 @@ async def cb_pick(
             "qty": 1,
         }
     )
+    await state.set_state(CreateTtnState.picking_items)
     await _show_stepper(callback.message, state, edit=True)
     await callback.answer()
 
@@ -340,6 +341,9 @@ async def cb_qty_ok(
     total = min(prev + pending["qty"], pending["available"])
     cart[sku] = {"qty": total, "name": pending["name"], "price": pending["price"]}
     await state.update_data(cart=cart, pending=None)
+    # Возвращаем состояние в picking_items: если пользователь до этого жал «Ввести
+    # число» (entering_qty), без сброса последующий текст ушёл бы в receive_qty.
+    await state.set_state(CreateTtnState.picking_items)
     client = _effective_client(effective_context)
     if client is None:
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
@@ -432,6 +436,7 @@ async def cb_cart_edit(
             "qty": min(entry["qty"], max(available, entry["qty"])),
         }
     )
+    await state.set_state(CreateTtnState.picking_items)
     await _show_stepper(callback.message, state, edit=True)
     await callback.answer()
 
@@ -498,15 +503,11 @@ async def receive_weight(message: Message, state: FSMContext) -> None:
     if weight <= 0 or weight > _MAX_WEIGHT:
         await message.answer(texts.weight_invalid_text())
         return
-    # Нормализуем до 3 знаков (как NUMERIC(8,3)); строкой — JSON-safe для FSM-data.
+    # Нормализуем (строкой — JSON-safe для FSM-data). Экран параметрів — новым
+    # сообщением (текстовый ввод нельзя редактировать как inline-экран).
     await state.update_data(weight=f"{weight.normalize():f}")
     await state.set_state(CreateTtnState.picking_parcel)
-    data = await state.get_data()
-    text = texts.parcel_text(
-        weight=data.get("weight"), size_token=data.get("size_token", DEFAULT_SIZE_TOKEN)
-    )
-    kb = build_parcel_kb(size_token=data.get("size_token", DEFAULT_SIZE_TOKEN), weight_set=True)
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await _show_parcel(message, state, edit=False)
 
 
 # ----------------------------------------------------------------- тип отримувача

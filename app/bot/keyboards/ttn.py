@@ -22,9 +22,6 @@ SIZE_PRESETS: dict[str, str] = {
 }
 DEFAULT_SIZE_TOKEN = "s"  # noqa: S105 — это пресет габаритов, не секрет
 
-# Быстрые шаги степпера количества.
-QTY_DELTAS = (1, 5, 10)
-
 
 def _nav_row(offset: int, total: int, limit: int) -> list[InlineKeyboardButton]:
     """Пагинация ◀/▶ по товарам (offset-based, как в кабинете)."""

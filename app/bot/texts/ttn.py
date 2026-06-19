@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from decimal import Decimal
 
 from app.bot.keyboards.ttn import SIZE_PRESETS
@@ -40,8 +41,9 @@ def cart_picker_text(page: InventoryPage, *, cart_count: int) -> str:
 
 
 def stepper_text(item: InventoryItem, qty: int) -> str:
+    # Назва/sku — из Sheets (могут содержать < & ") → экранируем для parse_mode=HTML.
     return (
-        f"📦 <b>{item.name}</b> ({item.sku})\n"
+        f"📦 <b>{html.escape(item.name)}</b> ({html.escape(item.sku)})\n"
         f"На залишку: <b>{item.available}</b> шт · ціна: {_money(item.price)}\n\n"
         f"Кількість у кошик: <b>{qty}</b> шт"
     )
@@ -60,7 +62,7 @@ def cart_review_text(lines: list[tuple[str, int, Decimal | None]]) -> str:
     for idx, (name, qty, price) in enumerate(lines, start=1):
         line_sum = (price or Decimal("0")) * qty
         total += line_sum
-        parts.append(f"#{idx} {name} · {qty} шт · {_money(price)}")
+        parts.append(f"#{idx} {html.escape(name)} · {qty} шт · {_money(price)}")
     parts.append(f"\n💰 Орієнтовна сума товарів: <b>{_money(total)}</b>")
     return "\n".join(parts)
 
