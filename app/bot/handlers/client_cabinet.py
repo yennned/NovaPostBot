@@ -44,6 +44,7 @@ from app.services.exceptions import (
     InvalidNotificationSetting,
     PermissionDenied,
     PhoneAlreadyTaken,
+    SenderProfileIncomplete,
     SenderProfileNotFound,
     ShipmentActionForbidden,
     ShipmentNotFound,
@@ -62,7 +63,7 @@ STATS_BUTTON = "📊 Статистика"
 SETTINGS_BUTTON = "⚙️ Налаштування"
 _STALE_BUTTON = "Кнопка застаріла, відкрийте розділ заново."
 _SELF_EDIT_FIELDS = {"full_name", "phone"}
-_CLEARABLE_FIELDS = {"full_name", "sender_full_name", "sender_phone", "edrpou"}
+_CLEARABLE_FIELDS = {"full_name", "sender_full_name", "edrpou"}  # sender_phone обязателен
 _NOTIFICATION_KEYS_BY_TOKEN = {value: key for key, value in NOTIFICATION_CALLBACK_TOKENS.items()}
 _SENDER_PROFILE_FIELDS_BY_TOKEN = {value: key for key, value in SENDER_PROFILE_FIELD_TOKENS.items()}
 
@@ -993,7 +994,7 @@ async def receive_sender_profile_edit(
             profile_id=profile_id,
             **{field: value},
         )
-    except (PermissionDenied, SenderProfileNotFound) as exc:
+    except (PermissionDenied, SenderProfileNotFound, SenderProfileIncomplete) as exc:
         await message.answer(str(exc))
         return
     await state.update_data(sender_profile_id=None, sender_profile_field=None)
