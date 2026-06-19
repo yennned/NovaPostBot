@@ -7,6 +7,7 @@ import pytest
 from app.config import Settings
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.schemas import City, Warehouse
+from redis.exceptions import RedisError
 
 
 def _cache(**over) -> NPReferenceCache:
@@ -124,3 +125,54 @@ async def test_loader_error_propagates_and_nothing_cached():
         await cache.cities("Київ", loader=boom)
     # ничего не закэшировано — следующий вызов снова попытается loader
     assert await cache._redis.get("np:cities:київ") is None
+
+
+# ----------------------------------------- устойчивость к падению Redis (graceful)
+
+
+class _BrokenRedis:
+    """Redis-двойник, недоступный на любой команде (ConnectionError/мисконфиг)."""
+
+    async def get(self, key):
+        raise RedisError("redis down")
+
+    async def set(self, key, value, ex=None):
+        raise RedisError("redis down")
+
+
+class _WriteOnlyBroken:
+    """Чтение — miss, запись падает (Redis прилёг между get и set)."""
+
+    async def get(self, key):
+        return None
+
+    async def set(self, key, value, ex=None):
+        raise RedisError("redis down")
+
+
+async def test_cities_redis_down_falls_back_to_loader():
+    cache = NPReferenceCache(_BrokenRedis(), settings=Settings(_env_file=None))
+    loader, calls = _counting_loader([City(ref="c1", name="Київ")])
+
+    # упавший Redis не должен ронять поиск — данные берём из loader (НП)
+    assert await cache.cities("Київ", loader=loader) == [City(ref="c1", name="Київ")]
+    assert calls["n"] == 1
+
+
+async def test_warehouses_redis_down_falls_back_to_loader():
+    cache = NPReferenceCache(_BrokenRedis(), settings=Settings(_env_file=None))
+    loader, calls = _counting_loader([Warehouse(ref="w1", number="1", description="№1")])
+
+    assert await cache.warehouses("c1", loader=loader) == [
+        Warehouse(ref="w1", number="1", description="№1")
+    ]
+    assert calls["n"] == 1
+
+
+async def test_cache_write_failure_is_swallowed():
+    cache = NPReferenceCache(_WriteOnlyBroken(), settings=Settings(_env_file=None))
+    loader, calls = _counting_loader([City(ref="c1", name="Київ")])
+
+    # set падает, но пользователь всё равно получает данные от loader (не падаем)
+    assert await cache.cities("Київ", loader=loader) == [City(ref="c1", name="Київ")]
+    assert calls["n"] == 1

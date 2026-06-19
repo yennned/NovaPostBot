@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db.models.enums import ShipmentStatus
+from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
 from app.db.repositories import (
     AuditRepository,
@@ -33,6 +34,8 @@ from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TT
 from app.services import inventory, notifications, shipments
 from app.services.exceptions import (
     InsufficientStock,
+    SenderDispatchNotConfigured,
+    SenderProfileIncomplete,
     SenderProfileNotConfigured,
     SenderProfileNotValidated,
     ShipmentNotFound,
@@ -45,8 +48,29 @@ from app.sheets import InventorySheetReader
 logger = structlog.get_logger(__name__)
 
 
-async def _resolve_sender(session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None):
-    """Найти ФОП клиента (явный или дефолтный) и убедиться, что он провалидирован."""
+def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> None:
+    """Убедиться, что у ФОП есть все данные отправителя для `save_ttn` в НП.
+
+    Гейт боевого пути: иначе `create_shipment` собрал бы `SenderIdentity` с пустыми
+    `contact_ref`/`phone`/`city_ref`/`warehouse_ref`, и НП отклонила бы ТТН уже на
+    save. Порядок проверок — от «ключ» к «профиль» к «системный конфиг»:
+    - нет `np_sender_ref` → `SenderProfileNotValidated` (ключ не подтверждён);
+    - нет `np_contact_ref`/`sender_phone` → `SenderProfileIncomplete` (дозаполнить ФОП);
+    - пуст город/відділення отправителя → `SenderDispatchNotConfigured` (конфиг `.env`).
+    """
+    if not profile.np_sender_ref:
+        raise SenderProfileNotValidated("ключ ФОП не підтверджено в НП")
+    if not profile.np_contact_ref or not (profile.sender_phone or "").strip():
+        raise SenderProfileIncomplete("немає контакту/телефону відправника")
+    warehouse_ref = profile.np_sender_warehouse or settings.np_sender_warehouse_ref
+    if not settings.np_sender_city_ref or not warehouse_ref:
+        raise SenderDispatchNotConfigured("склад відправника не налаштований")
+
+
+async def _resolve_sender(
+    session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None, settings: Settings
+) -> SenderProfile:
+    """Найти ФОП клиента (явный или дефолтный) и убедиться, что он готов к відправленню."""
     repo = SenderProfileRepository(session)
     if sender_profile_id is not None:
         profile = await repo.get_by_id(sender_profile_id)
@@ -56,9 +80,20 @@ async def _resolve_sender(session: AsyncSession, client: User, sender_profile_id
         profile = await repo.get_default_for_client(client.id)
         if profile is None:
             raise SenderProfileNotConfigured("ФОП ще не налаштований, зверніться до менеджера")
-    if not profile.np_sender_ref:
-        raise SenderProfileNotValidated("ключ ФОП не підтверджено в НП")
+    ensure_sender_dispatchable(profile, settings)
     return profile
+
+
+async def resolve_default_sender_id(
+    session: AsyncSession, *, client: User, settings: Settings | None = None
+) -> uuid.UUID:
+    """ID дефолтного ФОП клиента, готового к відправленню — для раннего гейта UI.
+
+    Бросает то же доменное исключение, что и `create_shipment` (NotConfigured /
+    NotValidated / Incomplete / DispatchNotConfigured), чтобы вход в FSM и сабмит
+    вели себя одинаково. Без побочных эффектов и обращений к НП."""
+    profile = await _resolve_sender(session, client, None, settings or get_settings())
+    return profile.id
 
 
 async def _resolve_items(
@@ -125,7 +160,7 @@ async def create_shipment(
     """
     shipments._require_active_client(client)
     settings = settings or get_settings()
-    profile = await _resolve_sender(session, client, sender_profile_id)
+    profile = await _resolve_sender(session, client, sender_profile_id, settings)
     drafts = await _resolve_items(session, client, items, reader)
 
     is_cod = payment_method == "cod"

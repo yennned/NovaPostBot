@@ -51,17 +51,19 @@ from app.bot.types import EffectiveContext
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
-from app.services import address, pricing, sender_profile
+from app.services import address, pricing
 from app.services.exceptions import (
     ClientServiceError,
     InsufficientStock,
     PermissionDenied,
+    SenderDispatchNotConfigured,
+    SenderProfileIncomplete,
     SenderProfileNotConfigured,
     SenderProfileNotValidated,
     TtnCreationFailed,
 )
 from app.services.inventory import InventoryItem, list_inventory
-from app.services.shipment import create_shipment
+from app.services.shipment import create_shipment, resolve_default_sender_id
 
 router = Router(name="create_ttn")
 logger = structlog.get_logger(__name__)
@@ -137,23 +139,27 @@ async def start_create_ttn(
     if client is None:
         await message.answer("Спочатку авторизуйтесь через /start.")
         return
+    # Гейт ФОП = предусловие create_shipment (один источник правды в shipment.py):
+    # не пускаем в happy-path профиль, на котором НП-сабмит заведомо упадёт.
     try:
-        profiles = await sender_profile.list_profiles(db_session, actor=client, client_id=client.id)
-    except PermissionDenied as exc:
-        await message.answer(str(exc))
-        return
-    default = next((p for p in profiles if p.is_default), None)
-    if default is None:
+        sender_profile_id = await resolve_default_sender_id(db_session, client=client)
+    except SenderProfileNotConfigured:
         await message.answer(texts.no_profile_text(), parse_mode="HTML")
         return
-    if not default.is_np_validated:
+    except SenderProfileNotValidated:
         await message.answer(texts.not_validated_text(), parse_mode="HTML")
+        return
+    except SenderProfileIncomplete:
+        await message.answer(texts.sender_incomplete_text(), parse_mode="HTML")
+        return
+    except SenderDispatchNotConfigured:
+        await message.answer(texts.sender_dispatch_not_configured_text(), parse_mode="HTML")
         return
 
     await state.clear()
     await state.set_state(CreateTtnState.picking_items)
     await state.update_data(
-        sender_profile_id=str(default.id),
+        sender_profile_id=str(sender_profile_id),
         cart={},
         cart_offset=0,
         size_token=DEFAULT_SIZE_TOKEN,
@@ -1293,6 +1299,13 @@ def _submit_error_text(exc: ClientServiceError, cart: dict) -> str:
         return f"❌ На залишку лише {exc.available} од. «{name}». Оновіть кошик і спробуйте ще раз."
     if isinstance(exc, SenderProfileNotValidated):
         return "❌ Ключ ФОП не підтверджено в НП. Зверніться до менеджера."
+    if isinstance(exc, SenderProfileIncomplete):
+        return (
+            "❌ ФОП налаштований не до кінця (немає телефону/контакту відправника). "
+            "Зверніться до менеджера."
+        )
+    if isinstance(exc, SenderDispatchNotConfigured):
+        return "❌ Склад відправника не налаштований у системі. Зверніться до підтримки."
     if isinstance(exc, SenderProfileNotConfigured):
         return "❌ ФОП не налаштований. Зверніться до менеджера."
     if isinstance(exc, TtnCreationFailed):

@@ -15,6 +15,28 @@
 
 ---
 
+## 2026-06-19 · feat/phase4-sender-redis-hardening · гейт даних відправника + стійкість Redis (Фаза 4, follow-up)
+- **Сделано:** закрыты два реальных бага боевого пути, которые маскировали моки.
+  **Issue A (неполный отправитель):** гейт создания ТТН проверял только `np_sender_ref`, а
+  `contact_ref`/`phone`/`city_ref`/`warehouse_ref` молча уходили в НП пустыми → реальный `save_ttn`
+  упал бы. Введён единый предикат `shipment.ensure_sender_dispatchable(profile, settings)` (вызов в
+  `_resolve_sender`) + новые исключения `SenderProfileIncomplete` (нет телефона/контакта) и
+  `SenderDispatchNotConfigured` (не задан склад-отправитель `NP_SENDER_*`). Вход в FSM
+  (`start_create_ttn`) переключён с `is_np_validated`-проверки на `shipment.resolve_default_sender_id`
+  (то же предусловие — UI и сабмит ведут себя одинаково), добавлены uk-тексты гейта и ветки
+  `_submit_error_text`. **Issue B (Redis):** `NPReferenceCache` дёргал Redis без `try/except`, докстринг
+  обещал устойчивость — падение Redis ломало поиск адресов целиком. Чтения/запись обёрнуты в
+  `RedisError` → мягкий fallback к `loader` (с `log.warning`), докстринг `_store` исправлен.
+  Тесты (+8): 3 в `test_shipment_create` (нет телефона/контакта/склада → исключение, НП не вызывается),
+  3 в `test_novaposhta_cache` (Redis down/write-fail → fallback), 2 entry в `test_ttn_cart`; фикстуры
+  «happy» дополнены телефоном/контактом и заданным складом (они и были той дырой). Полный сьют
+  **233** зелёный, ruff (lint+format) + гейт слоёв чисты.
+- **Дальше:** **Фаза 5** (трекинг НП/SLA/low-stock в воркере), владелец по sequential-by-phase — step.
+  Опц. хардненинг: ловить `DecryptionError` из ORM-чтения на уровне сервисов (срабатывает только при
+  ротации `FERNET_KEY`).
+- **Открытые вопросы:** делать ли `sender_phone` обязательным уже при сохранении/валидации профиля
+  (Phase-2 форма) — сейчас закрыто безопасным гейтом на создании ТТН.
+
 ## 2026-06-19 · chore/alex-phase4-env-9e-stub · плейсхолдеры env + стаб 9e (Фаза 4)
 - **Сделано:** без изменения логики. В `.env.example` добавлен блок «Нова Пошта» с пустыми
   `NP_SENDER_CITY_REF`/`NP_SENDER_WAREHOUSE_REF` (Ref нашего склада — заполнить перед боевым

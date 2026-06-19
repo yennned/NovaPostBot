@@ -15,11 +15,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+import structlog
+from redis.exceptions import RedisError
+
 from app.config import Settings, get_settings
 from app.novaposhta.schemas import City, Warehouse
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
+
+logger = structlog.get_logger(__name__)
 
 
 def _norm(value: str) -> str:
@@ -41,9 +46,9 @@ class NPReferenceCache:
     ) -> list[City]:
         """Города по подстроке: из кэша или через `loader` (с записью в кэш)."""
         key = f"np:cities:{_norm(query)}"
-        cached = await self._redis.get(key)
+        cached = await self._read(key)
         if cached is not None:
-            return [City(**row) for row in json.loads(cached)]
+            return [City(**row) for row in cached]
         cities = await loader()
         await self._store(key, cities, self._cities_ttl)
         return cities
@@ -57,12 +62,23 @@ class NPReferenceCache:
     ) -> list[Warehouse]:
         """Відділення города (опц. поиск): из кэша или через `loader`."""
         key = f"np:wh:{city_ref}:{_norm(query or '')}"
-        cached = await self._redis.get(key)
+        cached = await self._read(key)
         if cached is not None:
-            return [Warehouse(**row) for row in json.loads(cached)]
+            return [Warehouse(**row) for row in cached]
         warehouses = await loader()
         await self._store(key, warehouses, self._warehouses_ttl)
         return warehouses
+
+    async def _read(self, key: str) -> list[dict] | None:
+        """Прочитать сырые строки из кэша. На miss **или недоступности Redis** —
+        `None`, чтобы зовущий мягко ушёл в `loader` (поиск адресов не должен падать
+        целиком из-за упавшего/мисконфигнутого Redis — справочники достаём из НП)."""
+        try:
+            cached = await self._redis.get(key)
+        except RedisError:
+            logger.warning("np_cache.read_failed", key=key, exc_info=True)
+            return None
+        return None if cached is None else json.loads(cached)
 
     async def _store(self, key: str, items: list, ttl: int) -> None:
         """Записать в кэш, но не залипать на ошибках/мисконфиге.
@@ -72,9 +88,15 @@ class NPReferenceCache:
           залипло бы на весь TTL.
         - `ttl ≤ 0` (выключенный кэш через конфиг) — пропускаем `set`, иначе
           Redis бросил бы `invalid expire time` уже **после** успешного loader.
+        - Недоступность Redis (`RedisError`) — логируем и проглатываем: запрос
+          пользователя уже получил данные от `loader`, ронять его из-за кэша нельзя.
         """
-        if items and ttl > 0:
+        if not (items and ttl > 0):
+            return
+        try:
             await self._redis.set(key, _dump(items), ex=ttl)
+        except RedisError:
+            logger.warning("np_cache.write_failed", key=key, exc_info=True)
 
 
 def _dump(items: list) -> str:
