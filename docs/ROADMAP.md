@@ -160,7 +160,12 @@ CONTRIBUTING).
   `states.TtnForm`.
 - **Реализовано (Express-картка):** PR 8 (composition root) → 9a–9d (кошик →
   параметри → отримувач → адреса → картка з ціною/правкою/COD → ✅ Відправити) +
-  NP-aware «Скасувати». 225 тестов, всё в `main`.
+  NP-aware «Скасувати».
+- **Hardening follow-up (#32, #33):** гейт полноты данных отправителя перед ТТН
+  (`ensure_sender_dispatchable`: contact/phone/склад, не только `np_sender_ref`) +
+  обязательный `sender_phone` при сохранении профиля + стойкость Redis-кэша
+  справочников к падению Redis (fallback к loader) + dispatcher-level backstop на
+  `DecryptionError` (ротация `FERNET_KEY`). 238 тестов, всё в `main`.
 - **Отложено (стаб, PR 9e — опц.):** «Останні отримувачі» — 1 тап подставляет
   name/phone/kind/edrpou из прошлых ТТН (місто/відділення — заново, в БД нет ref).
   Точка подключения помечена `TODO (PR 9e)` в `keyboards/ttn.build_recipient_kind_kb`.
