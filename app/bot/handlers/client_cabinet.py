@@ -38,6 +38,7 @@ from app.bot.texts.client_cabinet import (
     stats_text,
 )
 from app.bot.types import EffectiveContext
+from app.novaposhta.client import NovaPoshtaClient
 from app.services import client_settings, sender_profile
 from app.services.exceptions import (
     InvalidNotificationSetting,
@@ -46,9 +47,11 @@ from app.services.exceptions import (
     SenderProfileNotFound,
     ShipmentActionForbidden,
     ShipmentNotFound,
+    TtnCancelFailed,
 )
 from app.services.inventory import list_inventory
-from app.services.shipments import cancel_shipment, get_shipment_card, list_shipments
+from app.services.shipment import cancel_shipment
+from app.services.shipments import get_shipment_card, list_shipments
 from app.services.stats import get_client_stats
 
 router = Router(name="client_cabinet")
@@ -590,7 +593,10 @@ async def cb_shipment_card(
 
 @router.callback_query(F.data.startswith("cab:cancel:"))
 async def cb_cancel_shipment(
-    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -611,9 +617,17 @@ async def cb_cancel_shipment(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        card = await cancel_shipment(db_session, client=client, shipment_id=shipment_id)
+        # NP-aware отмена: удаляет ТТН в НП, затем снимает резерв (release у статуса).
+        card = await cancel_shipment(
+            db_session, client=client, shipment_id=shipment_id, np_client=np_client
+        )
     except ShipmentActionForbidden:
         await callback.answer("Це відправлення вже не можна скасувати.", show_alert=True)
+        return
+    except TtnCancelFailed:
+        await callback.answer(
+            "Не вдалося скасувати ТТН у НП. Спробуйте за хвилину.", show_alert=True
+        )
         return
     except (PermissionDenied, ShipmentNotFound) as exc:
         await callback.answer(str(exc), show_alert=True)
