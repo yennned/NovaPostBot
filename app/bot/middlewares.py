@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, User
@@ -20,6 +20,10 @@ from app.bot.services import (
 )
 from app.db.repositories import AuditRepository, UserRepository
 
+if TYPE_CHECKING:
+    from app.novaposhta.cache import NPReferenceCache
+    from app.novaposhta.client import NovaPoshtaClient
+
 
 class ServicesMiddleware(BaseMiddleware):
     def __init__(
@@ -28,10 +32,14 @@ class ServicesMiddleware(BaseMiddleware):
         *,
         dev_ids: frozenset[int],
         dev_state: InMemoryDevState,
+        np_client: NovaPoshtaClient | None = None,
+        np_cache: NPReferenceCache | None = None,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.dev_ids = dev_ids
         self.dev_state = dev_state
+        self.np_client = np_client
+        self.np_cache = np_cache
 
     async def __call__(
         self,
@@ -48,6 +56,8 @@ class ServicesMiddleware(BaseMiddleware):
             )
             data["db_session"] = session
             data["services"] = services
+            data["np_client"] = self.np_client
+            data["np_cache"] = self.np_cache
             data["start_service"] = StartService(services.user_store)
             data["dev_service"] = DevService(services)
             try:

@@ -15,6 +15,22 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-composition · composition root (Фаза 4, PR 8)
+- **Сделано:** PR 8 Фазы 4 — composition root. В `app/main.py` собираем на весь процесс
+  один `NovaPoshtaClient`, один `redis.asyncio`-клиент (`from_url(settings.redis_url)`) и
+  `NPReferenceCache`; пробрасываем `np_client`/`np_cache` через `build_dispatcher` →
+  `ServicesMiddleware` в `data` хендлера (рядом с `db_session`/`services`) — так FSM
+  создания ТТН (PR 9) получит их через DI. На завершении polling — `aclose()` клиента НП и
+  Redis (`try/finally`). FSM-хранилище — **оставлено `MemoryStorage`** (решение владельца):
+  redis-клиент служит только кэшу справочников НП, бот не зависит от Redis для FSM/`/start`.
+  `build_dispatcher`/`ServicesMiddleware` приняли `np_client`/`np_cache` опционально
+  (back-compat для существующих вызовов/тестов). Тесты `tests/bot/test_composition.py`:
+  middleware кладёт `np_client`/`np_cache` в `data`; без проброса — `None`. Полный сьют
+  (153) зелёный, ruff + гейт границы слоёв чисты. `worker.py` без изменений (NP/Redis в Фазе 5).
+- **Дальше:** PR 9a — каркас FSM `CreateTtnState` + кошик (`cab:ttn:*`, ранний резолв ФОП,
+  степпер кількості, экран «Параметри посилки» вага+габарити) поверх `inventory`.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-19 · feat/alex-phase4-address-search · address-search сервис (Фаза 4, PR 7)
 - **Сделано:** PR 7 Фазы 4 — `services/address.py` (`search_cities`/`search_warehouses`)
   для FSM создания ТТН. Резолвит ключ ФОП клиента (явный/дефолтный; нет →
