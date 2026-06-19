@@ -36,4 +36,5 @@ class CreateTtnState(StatesGroup):
     entering_recipient_phone = State()  # телефон отримувача
     entering_city_query = State()  # поиск города (текст → результаты)
     entering_warehouse_query = State()  # выбор/поиск відділення
-    summary = State()  # карточка-зведення (рендер — PR 9c)
+    summary = State()  # карточка-зведення
+    editing_field = State()  # точечная правка текстового поля карточки (edit_field в data)

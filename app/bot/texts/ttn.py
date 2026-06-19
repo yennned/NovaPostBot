@@ -146,6 +146,42 @@ def search_unavailable_text() -> str:
     return "⚠️ Довідник НП тимчасово недоступний. Спробуйте за хвилину."
 
 
+def insured_prompt() -> str:
+    return "Введіть оголошену вартість у гривнях (напр. 1200):"
+
+
+def insured_invalid() -> str:
+    return "❌ Невірна сума. Введіть число 0 або більше (напр. 1200)."
+
+
+def description_prompt() -> str:
+    return "Введіть опис вкладення (напр. Одяг):"
+
+
+def description_invalid() -> str:
+    return "❌ Порожній опис. Введіть текст."
+
+
+def cod_amount_prompt() -> str:
+    return "Введіть суму накладеного платежу (грн), або «= вартість товарів»:"
+
+
+def cod_invalid() -> str:
+    return "❌ Сума накладеного платежу має бути більшою за 0."
+
+
+def size_edit_text() -> str:
+    return "📐 Оберіть габарити посилки:"
+
+
+def payer_edit_text() -> str:
+    return "🧾 Хто платить за доставку?"
+
+
+def payment_edit_text() -> str:
+    return "💳 Спосіб оплати:"
+
+
 def card_text(data: dict, price: dict) -> str:
     """Карточка-зведення перед відправкою. `data` — FSM-data, `price` — кэш цены."""
     cart = data.get("cart", {})

@@ -142,13 +142,110 @@ CITY_RESULTS = 9
 WAREHOUSE_PAGE_SIZE = 8
 
 
-def build_card_kb() -> InlineKeyboardMarkup:
-    """Карточка-зведення (PR 9c-1): перерасчёт цены + отмена. Правка полей и
-    «Відправити» добавятся в PR 9c-2 / 9d."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def build_card_kb(*, is_org: bool) -> InlineKeyboardMarkup:
+    """Карточка-зведення: ✏️-правка каждого поля + перерасчёт + отмена. Кнопка
+    «✅ Відправити» добавится в PR 9d."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="✏️ Отримувач", callback_data="cab:ttn:edit:name"),
+            InlineKeyboardButton(text="✏️ Телефон", callback_data="cab:ttn:edit:phone"),
+        ],
+    ]
+    if is_org:
+        rows.append([InlineKeyboardButton(text="✏️ ЄДРПОУ", callback_data="cab:ttn:edit:edrpou")])
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="✏️ Місто/відділення", callback_data="cab:ttn:edit:city")],
+            [
+                InlineKeyboardButton(text="✏️ Вага", callback_data="cab:ttn:edit:weight"),
+                InlineKeyboardButton(text="✏️ Габарити", callback_data="cab:ttn:edit:size"),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Опис", callback_data="cab:ttn:edit:descr"),
+                InlineKeyboardButton(text="✏️ Вартість", callback_data="cab:ttn:edit:insured"),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Оплата", callback_data="cab:ttn:edit:pay"),
+                InlineKeyboardButton(text="✏️ Платник", callback_data="cab:ttn:edit:payer"),
+            ],
             [InlineKeyboardButton(text="🔄 Перерахувати ціну", callback_data="cab:ttn:recompute")],
             [InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_back_to_card_kb() -> InlineKeyboardMarkup:
+    """Под prompt правки поля — вернуться на карточку без изменений."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")]]
+    )
+
+
+def build_size_edit_kb(current: str) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(
+            text=("• " if token == current else "") + label,
+            callback_data=f"cab:ttn:setsz:{token}",
+        )
+        for token, label in SIZE_PRESETS.items()
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            row,
+            [InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")],
+        ]
+    )
+
+
+def build_payer_edit_kb(current: str) -> InlineKeyboardMarkup:
+    def _mark(value: str, label: str) -> str:
+        return ("• " if current == value else "") + label
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_mark("Recipient", "Отримувач"), callback_data="cab:ttn:setpr:r"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_mark("Sender", "Відправник"), callback_data="cab:ttn:setpr:s"
+                )
+            ],
+            [InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")],
+        ]
+    )
+
+
+def build_payment_edit_kb(current: str) -> InlineKeyboardMarkup:
+    def _mark(value: str, label: str) -> str:
+        return ("• " if current == value else "") + label
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_mark("prepay", "Передоплата"), callback_data="cab:ttn:setpm:prepay"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_mark("cod", "Накладений платіж"), callback_data="cab:ttn:setpm:cod"
+                )
+            ],
+            [InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")],
+        ]
+    )
+
+
+def build_cod_amount_kb() -> InlineKeyboardMarkup:
+    """Под prompt суммы COD — быстрый «= вартість товарів» + назад."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="= вартість товарів", callback_data="cab:ttn:codeq")],
+            [InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")],
         ]
     )
 
