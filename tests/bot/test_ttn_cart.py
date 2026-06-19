@@ -14,6 +14,7 @@ from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import SenderProfileRepository, UserRepository
+from app.novaposhta.schemas import City, Warehouse
 from app.services.inventory import InventoryItem, InventoryPage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -332,3 +333,176 @@ def test_cart_review_text_escapes_html():
     out = ttn_texts.cart_review_text([("A&B<x>", 1, Decimal("10"))])
     assert "&amp;" in out
     assert "&lt;x&gt;" in out
+
+
+# ===================== PR 9b: отримувач + адреса =====================
+
+
+def test_normalize_phone():
+    assert h._normalize_phone("0671234567") == "380671234567"
+    assert h._normalize_phone("380671234567") == "380671234567"
+    assert h._normalize_phone("+38 (067) 123-45-67") == "380671234567"
+    assert h._normalize_phone("12345") is None
+    assert h._normalize_phone("0971234567890") is None
+
+
+def test_valid_edrpou():
+    assert h._valid_edrpou("12345678") is True  # 8
+    assert h._valid_edrpou("1234567890") is True  # 10 (ІПН ФОП)
+    assert h._valid_edrpou("1234567") is False  # 7
+    assert h._valid_edrpou("123456789") is False  # 9
+    assert h._valid_edrpou("abcdefgh") is False
+
+
+async def test_recipient_kind_forwards_to_name():
+    state = FakeState(weight="1.0")
+    cb = FakeCallback("cab:ttn:rk:o")
+    await h.cb_recipient_kind(cb, state)
+    assert state._data["recipient_kind"] == "organization"
+    assert state.state == CreateTtnState.entering_recipient_name
+    assert "організації" in cb.message.answers[-1]["text"]
+
+
+async def test_receive_name_org_then_edrpou():
+    state = FakeState(recipient_kind="organization")
+    await state.set_state(CreateTtnState.entering_recipient_name)
+    msg = FakeMessage(text="ТОВ Ромашка")
+    await h.receive_recipient_name(msg, state)
+    assert state._data["recipient_name"] == "ТОВ Ромашка"
+    assert state.state == CreateTtnState.entering_recipient_edrpou
+
+
+async def test_receive_name_person_skips_edrpou():
+    state = FakeState(recipient_kind="person")
+    await state.set_state(CreateTtnState.entering_recipient_name)
+    msg = FakeMessage(text="Іваненко Іван")
+    await h.receive_recipient_name(msg, state)
+    assert state.state == CreateTtnState.entering_recipient_phone  # без ЄДРПОУ
+
+
+async def test_receive_name_empty_rejected():
+    state = FakeState(recipient_kind="person")
+    await state.set_state(CreateTtnState.entering_recipient_name)
+    msg = FakeMessage(text="   ")
+    await h.receive_recipient_name(msg, state)
+    assert "recipient_name" not in state._data
+    assert state.state == CreateTtnState.entering_recipient_name
+
+
+async def test_receive_edrpou_invalid_then_valid():
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_recipient_edrpou)
+    bad = FakeMessage(text="123")
+    await h.receive_recipient_edrpou(bad, state)
+    assert "recipient_edrpou" not in state._data
+    good = FakeMessage(text="12345678")
+    await h.receive_recipient_edrpou(good, state)
+    assert state._data["recipient_edrpou"] == "12345678"
+    assert state.state == CreateTtnState.entering_recipient_phone
+
+
+async def test_receive_phone_normalizes_and_advances():
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_recipient_phone)
+    msg = FakeMessage(text="067 123 45 67")
+    await h.receive_recipient_phone(msg, state)
+    assert state._data["recipient_phone"] == "380671234567"
+    assert state.state == CreateTtnState.entering_city_query
+
+
+def _patch_cities(monkeypatch, cities):
+    async def fake(session, *, client, query, np_client, cache, sender_profile_id=None):
+        return cities
+
+    monkeypatch.setattr(h.address, "search_cities", fake)
+
+
+def _patch_warehouses(monkeypatch, whs):
+    async def fake(
+        session, *, client, city_ref, np_client, cache, query=None, sender_profile_id=None
+    ):
+        return whs
+
+    monkeypatch.setattr(h.address, "search_warehouses", fake)
+
+
+async def test_city_query_shows_results(monkeypatch):
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+    msg = FakeMessage(text="Київ")
+    await h.receive_city_query(msg, state, _ctx(_CLIENT), None, object(), object())
+    assert state._data["cities"][0]["ref"] == "c1"
+    assert msg.answers[-1]["reply_markup"] is not None
+
+
+async def test_city_query_not_found(monkeypatch):
+    _patch_cities(monkeypatch, [])
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+    msg = FakeMessage(text="Хххх")
+    await h.receive_city_query(msg, state, _ctx(_CLIENT), None, object(), object())
+    assert "cities" not in state._data
+    assert "Нічого не знайшли" in msg.answers[-1]["text"]
+
+
+async def test_city_pick_loads_warehouses(monkeypatch):
+    _patch_warehouses(monkeypatch, [Warehouse(ref="w1", number="5", description="вул. Хрещатик")])
+    state = FakeState(cities=[{"ref": "c1", "name": "Київ", "area": "Київська"}])
+    cb = FakeCallback("cab:ttn:city:0")
+    await h.cb_city(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert state._data["recipient_city_ref"] == "c1"
+    assert state._data["warehouses"][0]["ref"] == "w1"
+    assert state.state == CreateTtnState.entering_warehouse_query
+
+
+async def test_city_pick_no_warehouses_returns_to_city(monkeypatch):
+    _patch_warehouses(monkeypatch, [])
+    state = FakeState(cities=[{"ref": "c1", "name": "Село", "area": None}])
+    cb = FakeCallback("cab:ttn:city:0")
+    await h.cb_city(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert state.state == CreateTtnState.entering_city_query
+    assert "не знайдено" in cb.message.edits[-1]["text"]
+
+
+async def test_warehouse_pick_stores_and_advances():
+    state = FakeState(
+        recipient_city_name="Київ",
+        warehouses=[
+            {"ref": "w1", "number": "5", "description": "Хрещатик"},
+            {"ref": "w2", "number": "7", "description": "Сагайдачного"},
+        ],
+    )
+    cb = FakeCallback("cab:ttn:wh:1")
+    await h.cb_wh(cb, state)
+    assert state._data["recipient_warehouse_ref"] == "w2"
+    assert "№7" in state._data["recipient_warehouse_name"]
+    assert state.state == CreateTtnState.summary
+
+
+async def test_warehouse_page():
+    whs = [{"ref": f"w{i}", "number": str(i), "description": f"від {i}"} for i in range(20)]
+    state = FakeState(recipient_city_name="Київ", warehouses=whs)
+    cb = FakeCallback("cab:ttn:whpage:8")
+    await h.cb_wh_page(cb, state)
+    assert state._data["wh_offset"] == 8
+    assert cb.message.edits
+
+
+# ----------------------------------------------- негативный индекс (review fix, defense-in-depth)
+
+
+async def test_negative_index_rejected_city():
+    state = FakeState(cities=[{"ref": "c1", "name": "Київ", "area": None}])
+    cb = FakeCallback("cab:ttn:city:-1")
+    await h.cb_city(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert "recipient_city_ref" not in state._data  # -1 не выбрал «последний» город
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_negative_index_rejected_warehouse():
+    state = FakeState(warehouses=[{"ref": "w1", "number": "5", "description": "X"}])
+    cb = FakeCallback("cab:ttn:wh:-1")
+    await h.cb_wh(cb, state)
+    assert "recipient_warehouse_ref" not in state._data
+    assert cb.acks[-1]["show_alert"] is True

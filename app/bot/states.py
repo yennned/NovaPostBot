@@ -31,3 +31,9 @@ class CreateTtnState(StatesGroup):
     picking_parcel = State()  # экран «Параметри посилки» (вага+габарити)
     entering_weight = State()  # текстовый ввод веса
     picking_recipient_kind = State()  # розвилка особа/організація
+    entering_recipient_name = State()  # ПІБ / назва організації
+    entering_recipient_edrpou = State()  # ЄДРПОУ/ІПН (только organization)
+    entering_recipient_phone = State()  # телефон отримувача
+    entering_city_query = State()  # поиск города (текст → результаты)
+    entering_warehouse_query = State()  # выбор/поиск відділення
+    summary = State()  # карточка-зведення (рендер — PR 9c)
