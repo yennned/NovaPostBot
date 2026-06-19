@@ -26,13 +26,18 @@ from app.bot.keyboards.ttn import (
     DEFAULT_SIZE_TOKEN,
     SIZE_PRESETS,
     TTN_PAGE_SIZE,
+    build_back_to_card_kb,
     build_cancel_kb,
     build_card_kb,
     build_cart_picker_kb,
     build_cart_review_kb,
     build_city_results_kb,
+    build_cod_amount_kb,
     build_parcel_kb,
+    build_payer_edit_kb,
+    build_payment_edit_kb,
     build_recipient_kind_kb,
+    build_size_edit_kb,
     build_stepper_kb,
     build_warehouse_results_kb,
 )
@@ -77,6 +82,28 @@ def _valid_edrpou(raw: str) -> bool:
     """ЄДРПОУ — 8 цифр; ІПН ФОП — 10 цифр."""
     value = raw.strip()
     return value.isdigit() and len(value) in (8, 10)
+
+
+def _parse_weight(raw: str) -> str | None:
+    """Вес в кг (0 < w ≤ макс), строкой без научной нотации; иначе None."""
+    try:
+        weight = Decimal(raw.strip().replace(",", "."))
+    except InvalidOperation:
+        return None
+    if weight <= 0 or weight > _MAX_WEIGHT:
+        return None
+    return f"{weight.normalize():f}"
+
+
+def _parse_money(raw: str, *, positive: bool = False) -> str | None:
+    """Сумма в гривнах (≥0, либо >0 при positive); строкой; иначе None."""
+    try:
+        value = Decimal(raw.strip().replace(",", "."))
+    except InvalidOperation:
+        return None
+    if value < 0 or (positive and value <= 0):
+        return None
+    return f"{value:f}"
 
 
 # ---------------------------------------------------------------- вход + ФОП-гейт
@@ -281,7 +308,7 @@ async def _show_card(
     price = await _card_price(session, client, data, np_client, force=force_price)
     await state.update_data(price_cache=price)
     text = texts.card_text(data, price)
-    kb = build_card_kb()
+    kb = build_card_kb(is_org=data.get("recipient_kind") == "organization")
     if edit:
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -622,18 +649,12 @@ async def cb_weight_prompt(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(CreateTtnState.entering_weight, F.text, ~F.text.startswith("/"))
 async def receive_weight(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip().replace(",", ".")
-    try:
-        weight = Decimal(raw)
-    except InvalidOperation:
+    weight = _parse_weight(message.text or "")
+    if weight is None:
         await message.answer(texts.weight_invalid_text())
         return
-    if weight <= 0 or weight > _MAX_WEIGHT:
-        await message.answer(texts.weight_invalid_text())
-        return
-    # Нормализуем (строкой — JSON-safe для FSM-data). Экран параметрів — новым
-    # сообщением (текстовый ввод нельзя редактировать как inline-экран).
-    await state.update_data(weight=f"{weight.normalize():f}")
+    # Экран параметрів — новым сообщением (текстовый ввод нельзя редактировать как inline).
+    await state.update_data(weight=weight)
     await state.set_state(CreateTtnState.picking_parcel)
     await _show_parcel(message, state, edit=False)
 
@@ -962,6 +983,287 @@ async def cb_recompute(
         force_price=True,
     )
     await callback.answer("Перераховано.")
+
+
+# ------------------------------------------------------- картка: точкова правка ✏️
+
+# Поля карточки с текстовым вводом: токен → (prompt, валидатор/апдейтер в receive_edit).
+_TEXT_EDIT_TOKENS = {"name", "phone", "edrpou", "weight", "insured", "descr"}
+
+
+async def _back_to_card(
+    callback: CallbackQuery,
+    state: FSMContext,
+    *,
+    session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    effective_context: EffectiveContext,
+) -> bool:
+    """Общий хвост для возврата на карточку из правки. False → не удалось (нет клиента)."""
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return False
+    await state.set_state(CreateTtnState.summary)
+    await _show_card(
+        callback.message, state, session=session, client=client, np_client=np_client, edit=True
+    )
+    return True
+
+
+@router.callback_query(F.data == "cab:ttn:card")
+async def cb_card(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    if await _back_to_card(
+        callback,
+        state,
+        session=db_session,
+        np_client=np_client,
+        effective_context=effective_context,
+    ):
+        await callback.answer()
+
+
+def _edit_prompt(field: str, data: dict) -> str:
+    if field == "name":
+        return texts.recipient_name_prompt(data.get("recipient_kind", "person"))
+    return {
+        "phone": texts.phone_prompt(),
+        "edrpou": texts.edrpou_prompt(),
+        "weight": texts.weight_prompt_text(),
+        "insured": texts.insured_prompt(),
+        "descr": texts.description_prompt(),
+    }[field]
+
+
+@router.callback_query(F.data.startswith("cab:ttn:edit:"))
+async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    field = callback.data.split(":")[3]
+    data = await state.get_data()
+    if field in _TEXT_EDIT_TOKENS:
+        if field == "edrpou" and data.get("recipient_kind") != "organization":
+            await callback.answer(_STALE, show_alert=True)
+            return
+        await state.update_data(edit_field=field)
+        await state.set_state(CreateTtnState.editing_field)
+        await callback.message.answer(
+            _edit_prompt(field, data), reply_markup=build_back_to_card_kb()
+        )
+        await callback.answer()
+        return
+    if field == "size":
+        await callback.message.edit_text(
+            texts.size_edit_text(), reply_markup=build_size_edit_kb(data.get("size_token", "s"))
+        )
+    elif field == "payer":
+        await callback.message.edit_text(
+            texts.payer_edit_text(),
+            reply_markup=build_payer_edit_kb(data.get("payer_type", "Recipient")),
+        )
+    elif field == "pay":
+        await callback.message.edit_text(
+            texts.payment_edit_text(),
+            reply_markup=build_payment_edit_kb(data.get("payment_method", "prepay")),
+        )
+    elif field == "city":
+        # Перевыбор адреса: cb_wh в конце снова отрендерит карточку — возврат «даром».
+        await state.set_state(CreateTtnState.entering_city_query)
+        await callback.message.answer(
+            texts.city_prompt(), reply_markup=build_back_to_card_kb(), parse_mode="HTML"
+        )
+    else:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(CreateTtnState.editing_field, F.text, ~F.text.startswith("/"))
+async def receive_edit(
+    message: Message,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+) -> None:
+    field = (await state.get_data()).get("edit_field")
+    raw = (message.text or "").strip()
+    updates: dict = {}
+    if field == "name":
+        if not raw:
+            await message.answer(texts.recipient_name_invalid())
+            return
+        updates["recipient_name"] = raw
+    elif field == "phone":
+        phone = _normalize_phone(raw)
+        if phone is None:
+            await message.answer(texts.phone_invalid())
+            return
+        updates["recipient_phone"] = phone
+    elif field == "edrpou":
+        if not _valid_edrpou(raw):
+            await message.answer(texts.edrpou_invalid())
+            return
+        updates["recipient_edrpou"] = raw
+    elif field == "weight":
+        weight = _parse_weight(raw)
+        if weight is None:
+            await message.answer(texts.weight_invalid_text())
+            return
+        updates["weight"] = weight
+    elif field == "insured":
+        amount = _parse_money(raw)
+        if amount is None:
+            await message.answer(texts.insured_invalid())
+            return
+        updates["insured_amount"] = amount
+    elif field == "descr":
+        if not raw:
+            await message.answer(texts.description_invalid())
+            return
+        updates["description"] = raw[:100]
+    elif field == "cod":
+        amount = _parse_money(raw, positive=True)
+        if amount is None:
+            await message.answer(texts.cod_invalid())
+            return
+        updates["cod_amount"] = amount
+        updates["payment_method"] = "cod"
+    else:
+        await state.set_state(CreateTtnState.summary)
+        await message.answer(_STALE)
+        return
+
+    await state.update_data(**updates)
+    await state.set_state(CreateTtnState.summary)
+    client = _effective_client(effective_context)
+    if client is None:
+        await message.answer("Авторизуйтесь через /start.")
+        return
+    await _show_card(
+        message, state, session=db_session, client=client, np_client=np_client, edit=False
+    )
+
+
+@router.callback_query(F.data.startswith("cab:ttn:setsz:"))
+async def cb_set_size(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    token = callback.data.split(":")[3]
+    if token not in SIZE_PRESETS:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.update_data(size_token=token)
+    if await _back_to_card(
+        callback,
+        state,
+        session=db_session,
+        np_client=np_client,
+        effective_context=effective_context,
+    ):
+        await callback.answer(f"Габарити: {SIZE_PRESETS[token]}")
+
+
+@router.callback_query(F.data.startswith("cab:ttn:setpr:"))
+async def cb_set_payer(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    payer = {"r": "Recipient", "s": "Sender"}.get(callback.data.split(":")[3])
+    if payer is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.update_data(payer_type=payer)
+    if await _back_to_card(
+        callback,
+        state,
+        session=db_session,
+        np_client=np_client,
+        effective_context=effective_context,
+    ):
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cab:ttn:setpm:"))
+async def cb_set_payment(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    mode = callback.data.split(":")[3]
+    if mode == "prepay":
+        # Сброс COD: payment_method=prepay не должен тащить старую сумму.
+        await state.update_data(payment_method="prepay", cod_amount=None)
+        if await _back_to_card(
+            callback,
+            state,
+            session=db_session,
+            np_client=np_client,
+            effective_context=effective_context,
+        ):
+            await callback.answer()
+    elif mode == "cod":
+        # payment_method=cod выставим только после ввода суммы (иначе COD без суммы).
+        await state.update_data(edit_field="cod")
+        await state.set_state(CreateTtnState.editing_field)
+        await callback.message.answer(texts.cod_amount_prompt(), reply_markup=build_cod_amount_kb())
+        await callback.answer()
+    else:
+        await callback.answer(_STALE, show_alert=True)
+
+
+@router.callback_query(F.data == "cab:ttn:codeq")
+async def cb_cod_equal(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    insured = (await state.get_data()).get("insured_amount") or "0"
+    if Decimal(insured) <= 0:
+        await callback.answer("Вартість товарів — 0, введіть суму вручну.", show_alert=True)
+        return
+    await state.update_data(cod_amount=insured, payment_method="cod")
+    if await _back_to_card(
+        callback,
+        state,
+        session=db_session,
+        np_client=np_client,
+        effective_context=effective_context,
+    ):
+        await callback.answer("Суму COD прирівняно до вартості.")
 
 
 # --------------------------------------------------------------------- скасування

@@ -581,6 +581,137 @@ async def test_recompute_stale_state_graceful(monkeypatch):
     assert counter.get("n", 0) == 0
 
 
+# ===================== PR 9c-2: точкова правка карточки + COD =====================
+
+
+async def test_edit_text_field_prompts():
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:edit:phone")
+    await h.cb_edit(cb, state)
+    assert state.state == CreateTtnState.editing_field
+    assert state._data["edit_field"] == "phone"
+    assert cb.message.answers  # prompt отправлен
+
+
+async def test_edit_edrpou_blocked_for_person():
+    state = _card_state(recipient_kind="person")
+    cb = FakeCallback("cab:ttn:edit:edrpou")
+    await h.cb_edit(cb, state)
+    assert state._data.get("edit_field") is None
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_edit_size_shows_picker():
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:edit:size")
+    await h.cb_edit(cb, state)
+    assert cb.message.edits  # картка → пикер габаритов
+
+
+async def test_edit_city_reenters_search():
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:edit:city")
+    await h.cb_edit(cb, state)
+    assert state.state == CreateTtnState.entering_city_query
+
+
+async def test_receive_edit_name_updates_and_renders(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="name")
+    msg = FakeMessage(text="Петренко Петро")
+    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    assert state._data["recipient_name"] == "Петренко Петро"
+    assert state.state == CreateTtnState.summary
+    assert msg.answers  # карточка перерисована
+
+
+async def test_receive_edit_phone_invalid_stays(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="phone")
+    msg = FakeMessage(text="not-a-phone")
+    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    assert state._data["recipient_phone"] == "380671234567"  # не изменился
+
+
+async def test_receive_edit_weight_updates(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="weight")
+    msg = FakeMessage(text="3,2")
+    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    assert state._data["weight"] == "3.2"
+
+
+async def test_receive_edit_cod_sets_payment(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="cod")
+    msg = FakeMessage(text="500")
+    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    assert state._data["cod_amount"] == "500"
+    assert state._data["payment_method"] == "cod"
+
+
+async def test_receive_edit_cod_zero_rejected(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="cod")
+    msg = FakeMessage(text="0")
+    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    assert "cod_amount" not in state._data
+
+
+async def test_set_size_updates_and_returns(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(size_token="s")
+    cb = FakeCallback("cab:ttn:setsz:l")
+    await h.cb_set_size(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["size_token"] == "l"
+    assert state.state == CreateTtnState.summary
+
+
+async def test_set_payer(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:setpr:s")
+    await h.cb_set_payer(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["payer_type"] == "Sender"
+
+
+async def test_set_payment_prepay_clears_cod(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(payment_method="cod", cod_amount="300")
+    cb = FakeCallback("cab:ttn:setpm:prepay")
+    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["payment_method"] == "prepay"
+    assert state._data["cod_amount"] is None
+
+
+async def test_set_payment_cod_prompts_amount():
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:setpm:cod")
+    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    assert state.state == CreateTtnState.editing_field
+    assert state._data["edit_field"] == "cod"
+    # payment_method ещё НЕ cod — выставится после ввода суммы
+    assert state._data.get("payment_method") != "cod"
+
+
+async def test_cod_equal_uses_insured(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(insured_amount="450")
+    cb = FakeCallback("cab:ttn:codeq")
+    await h.cb_cod_equal(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["cod_amount"] == "450"
+    assert state._data["payment_method"] == "cod"
+
+
+async def test_back_to_card(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:card")
+    await h.cb_card(cb, _ctx(_CLIENT), None, object(), state)
+    assert state.state == CreateTtnState.summary
+    assert cb.message.edits
+
+
 async def test_warehouse_page():
     whs = [{"ref": f"w{i}", "number": str(i), "description": f"від {i}"} for i in range(20)]
     state = FakeState(recipient_city_name="Київ", warehouses=whs)
