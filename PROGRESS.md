@@ -15,6 +15,25 @@
 
 ---
 
+## 2026-06-19 · feat/alex-phase4-ttn-card · FSM ТТН: картка-зведення + ціна НП (Фаза 4, PR 9c-1)
+- **Сделано:** PR 9c разбит на 9c-1 (карточка + цена) и 9c-2 (правка полей + COD) ради
+  ревьюабельности. **9c-1**: новый сервис `services/pricing.py` (`quote_ttn` —
+  `getDocumentPrice`, склад-отправитель из `NP_SENDER_CITY_REF`, ключ ФОП по id из FSM).
+  В боте — карточка-зведення: после выбора відділення `cb_wh` рендерит её через `_show_card`.
+  Молчаливые дефолты (`_ensure_card_defaults`): `insured_amount` = Σ(price×qty) из кошика,
+  `description` = имена товаров, `payment_method=prepay`, `payer_type=Recipient`. Цена НП —
+  с кэшем в FSM-data по `_price_key` (місто|вага|вартість|COD — ровно поля, влияющие на
+  `to_price_props`) + кнопка «🔄 Перерахувати» (force). Graceful-degradation: `NovaPoshtaError`/
+  `ClientServiceError` → «Розрахунок недоступний — підтвердить менеджер», отправку не блокируем.
+  Все имена/місто/опис/eta — HTML-escape. **Focused-review** применён: guard неполного FSM в
+  `_card_price` (устаревшая `recompute` не падает `KeyError`, НП не дёргаем); escape `eta`.
+  Тесты: `tests/test_pricing.py` (3, Postgres+NP-mock) + карточка в `test_ttn_cart.py` (дефолты,
+  graceful, кэш, recompute, stale). Полный сьют **200** зелёный, ruff + гейт слоёв чисты.
+- **Дальше:** PR 9c-2 — точечная правка ✏️ полей карточки (mini-states) + под-экран COD
+  (prepay/cod + сума, «= вартість товарів») + правка міста/відділення (`return_to_summary`).
+- **Открытые вопросы:** товар без цены в кошику → `insured` неполный (правится на картці в 9c-2);
+  `NP_SENDER_CITY_REF` должен быть задан для живого расчёта (иначе graceful «недоступно»).
+
 ## 2026-06-19 · feat/alex-phase4-ttn-recipient · FSM ТТН: отримувач + адреса (Фаза 4, PR 9b)
 - **Сделано:** PR 9b — данные получателя и адрес НП. `cb_recipient_kind` теперь ведёт по цепочке:
   **ПІБ/назва → ЄДРПОУ** (только для організації, валидация 8/10 цифр) **→ телефон**

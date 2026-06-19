@@ -142,6 +142,17 @@ CITY_RESULTS = 9
 WAREHOUSE_PAGE_SIZE = 8
 
 
+def build_card_kb() -> InlineKeyboardMarkup:
+    """Карточка-зведення (PR 9c-1): перерасчёт цены + отмена. Правка полей и
+    «Відправити» добавятся в PR 9c-2 / 9d."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Перерахувати ціну", callback_data="cab:ttn:recompute")],
+            [InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")],
+        ]
+    )
+
+
 def build_cancel_kb() -> InlineKeyboardMarkup:
     """Минимальная клавиатура под prompt текстового ввода — только «Скасувати»."""
     return InlineKeyboardMarkup(

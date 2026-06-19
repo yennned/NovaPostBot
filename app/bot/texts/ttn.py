@@ -144,3 +144,47 @@ def warehouse_find_prompt() -> str:
 
 def search_unavailable_text() -> str:
     return "⚠️ Довідник НП тимчасово недоступний. Спробуйте за хвилину."
+
+
+def card_text(data: dict, price: dict) -> str:
+    """Карточка-зведення перед відправкою. `data` — FSM-data, `price` — кэш цены."""
+    cart = data.get("cart", {})
+    items = "; ".join(f"{html.escape(e['name'])} ×{e['qty']}" for e in cart.values())
+    kind = "організація" if data.get("recipient_kind") == "organization" else "особа"
+    payment = "Накладений платіж" if data.get("payment_method") == "cod" else "Передоплата"
+    payer = "Відправник" if data.get("payer_type") == "Sender" else "Отримувач"
+    size_label = SIZE_PRESETS.get(data.get("size_token", "s"), "—")
+
+    lines = [
+        "📋 <b>Перевірте ТТН перед відправкою</b>",
+        "",
+        f"📦 Товари: {items}",
+        f"👤 Отримувач: {html.escape(data.get('recipient_name', ''))} ({kind})",
+    ]
+    if data.get("recipient_edrpou"):
+        lines.append(f"🧾 ЄДРПОУ: {data['recipient_edrpou']}")
+    lines.extend(
+        [
+            f"📱 Телефон: {data.get('recipient_phone', '')}",
+            f"📍 {html.escape(data.get('recipient_city_name', ''))}, "
+            f"{html.escape(data.get('recipient_warehouse_name', ''))}",
+            f"⚖️ Вага: {data.get('weight', '')} кг",
+            f"📐 Габарити: {size_label}",
+            f"📝 Опис: {html.escape(data.get('description', ''))}",
+            f"💰 Оголошена вартість: {data.get('insured_amount', '0')} ₴",
+            f"💳 Оплата: {payment}",
+        ]
+    )
+    if data.get("cod_amount"):
+        lines.append(f"   Сума накладеного платежу: {data['cod_amount']} ₴")
+    lines.append(f"🧾 Платник доставки: {payer}")
+    lines.append("─────────────")
+    if price.get("unavailable"):
+        lines.append("💵 Розрахунок недоступний — вартість підтвердить менеджер")
+    else:
+        lines.append(f"💵 Вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
+        if price.get("redelivery"):
+            lines.append(f"   Комісія за переказ COD: {price['redelivery']} ₴")
+        if price.get("eta"):
+            lines.append(f"📅 Орієнтовна доставка: {html.escape(str(price['eta']))}")
+    return "\n".join(lines)

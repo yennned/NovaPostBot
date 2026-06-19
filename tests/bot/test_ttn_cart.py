@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import uuid4
 
 from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import SenderProfileRepository, UserRepository
-from app.novaposhta.schemas import City, Warehouse
+from app.novaposhta.schemas import City, PriceQuote, Warehouse
 from app.services.inventory import InventoryItem, InventoryPage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -465,19 +466,119 @@ async def test_city_pick_no_warehouses_returns_to_city(monkeypatch):
     assert "не знайдено" in cb.message.edits[-1]["text"]
 
 
-async def test_warehouse_pick_stores_and_advances():
-    state = FakeState(
-        recipient_city_name="Київ",
+def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None):
+    async def fake(
+        session,
+        *,
+        client,
+        sender_profile_id,
+        city_recipient_ref,
+        weight,
+        cost,
+        np_client,
+        cod_amount=None,
+        settings=None,
+    ):
+        if counter is not None:
+            counter["n"] = counter.get("n", 0) + 1
+        if raise_exc is not None:
+            raise raise_exc
+        return quote
+
+    monkeypatch.setattr(h.pricing, "quote_ttn", fake)
+
+
+def _quote():
+    return PriceQuote(
+        cost=Decimal("70"), cost_redelivery=Decimal("20"), estimated_delivery_date="2026-06-25"
+    )
+
+
+def _card_state(**over):
+    base = {
+        "sender_profile_id": str(uuid4()),
+        "cart": {"SKU1": {"qty": 2, "name": "Кава", "price": "150"}},
+        "recipient_kind": "person",
+        "recipient_name": "Іваненко Іван",
+        "recipient_phone": "380671234567",
+        "recipient_city_ref": "c1",
+        "recipient_city_name": "Київ",
+        "warehouses": [{"ref": "w1", "number": "5", "description": "Хрещатик"}],
+        "weight": "2.5",
+        "size_token": "s",
+    }
+    base.update(over)
+    return FakeState(**base)
+
+
+async def test_warehouse_pick_renders_card(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(
         warehouses=[
             {"ref": "w1", "number": "5", "description": "Хрещатик"},
             {"ref": "w2", "number": "7", "description": "Сагайдачного"},
-        ],
+        ]
     )
     cb = FakeCallback("cab:ttn:wh:1")
-    await h.cb_wh(cb, state)
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["recipient_warehouse_ref"] == "w2"
-    assert "№7" in state._data["recipient_warehouse_name"]
     assert state.state == CreateTtnState.summary
+    card = cb.message.edits[-1]["text"]
+    assert "Перевірте ТТН" in card
+    assert "70" in card  # цена показана
+
+
+async def test_card_computes_defaults(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "300"  # 150 × 2
+    assert state._data["description"] == "Кава"
+    assert state._data["payment_method"] == "prepay"
+    assert state._data["payer_type"] == "Recipient"
+
+
+async def test_card_price_graceful_on_np_error(monkeypatch):
+    from app.novaposhta.exceptions import NovaPoshtaValidationError
+
+    _patch_pricing(monkeypatch, raise_exc=NovaPoshtaValidationError("no Cost"))
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["price_cache"]["unavailable"] is True
+    assert "Розрахунок недоступний" in cb.message.edits[-1]["text"]
+
+
+async def test_card_price_cached_between_renders(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)  # те же поля → кэш
+    assert counter["n"] == 1
+
+
+async def test_recompute_forces_price(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state(price_cache={"key": "stale", "cost": "1"})
+    cb = FakeCallback("cab:ttn:recompute")
+    await h.cb_recompute(cb, _ctx(_CLIENT), None, object(), state)
+    assert counter["n"] == 1  # форс пересчёта, несмотря на наличие кэша
+    assert state._data["price_cache"]["cost"] == "70"
+
+
+async def test_recompute_stale_state_graceful(monkeypatch):
+    # Устаревшая кнопка recompute на сброшенном FSM: не падаем KeyError, НП не дёргаем.
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = FakeState(cart={})  # нет recipient_city_ref / weight
+    cb = FakeCallback("cab:ttn:recompute")
+    await h.cb_recompute(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["price_cache"]["unavailable"] is True
+    assert counter.get("n", 0) == 0
 
 
 async def test_warehouse_page():
@@ -503,6 +604,6 @@ async def test_negative_index_rejected_city():
 async def test_negative_index_rejected_warehouse():
     state = FakeState(warehouses=[{"ref": "w1", "number": "5", "description": "X"}])
     cb = FakeCallback("cab:ttn:wh:-1")
-    await h.cb_wh(cb, state)
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
     assert "recipient_warehouse_ref" not in state._data
     assert cb.acks[-1]["show_alert"] is True
