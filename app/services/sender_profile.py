@@ -31,6 +31,7 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaAuthError, NovaPoshtaValidationError
 from app.services.exceptions import (
     PermissionDenied,
+    SenderProfileIncomplete,
     SenderProfileKeyInvalid,
     SenderProfileNotFound,
 )
@@ -144,6 +145,12 @@ async def create_profile(
     settings: Settings | None = None,
 ) -> SenderProfileView:
     _require_can_manage_profiles(actor, client_id, settings)
+    # Телефон отправителя обязателен: он уходит в НП как `SendersPhone` при создании
+    # ТТН. Требуем его уже на сохранении, чтобы не возникало состояние «ключ валиден,
+    # но телефона нет» (тогда `create_shipment` отбил бы ТТН гейтом отправителя).
+    sender_phone = (sender_phone or "").strip()
+    if not sender_phone:
+        raise SenderProfileIncomplete("телефон відправника обовʼязковий")
     # Валидируем ключ ДО записи: плохой ключ → исключение, профиль не создаётся.
     refs = await _resolve_sender_refs(np_client, np_api_key, settings) if np_client else {}
     repo = SenderProfileRepository(session)
@@ -204,6 +211,12 @@ async def update_profile(
         if np_client is not None:
             # Валидируем новый ключ ДО записи; Ref'ы перезаписываем.
             changes.update(await _resolve_sender_refs(np_client, new_key, settings))
+    if "sender_phone" in changes:
+        # Телефон обязателен (см. create_profile) — очистить его нельзя.
+        phone = changes["sender_phone"]
+        if phone is None or not str(phone).strip():
+            raise SenderProfileIncomplete("телефон відправника не можна очистити")
+        changes["sender_phone"] = str(phone).strip()
     if changes:
         await repo.update(profile, **changes)
         await AuditRepository(session).log(

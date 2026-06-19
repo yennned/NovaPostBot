@@ -41,6 +41,22 @@ class SenderProfileNotValidated(ClientServiceError):
     """ФОП есть, но ключ не валидирован в НП (нет `np_sender_ref`) — ТТН нельзя."""
 
 
+class SenderProfileIncomplete(ClientServiceError):
+    """ФОП провалидирован, но не хватает данных отправителя для `save_ttn`.
+
+    Нет `np_contact_ref` (контакт-отправитель в НП) или `sender_phone`. Без них
+    реальный НП-запрос ушёл бы с пустыми `ContactSender`/`SendersPhone` и упал на
+    стороне НП. Правится менеджером/клиентом (дозаполнить профиль)."""
+
+
+class SenderDispatchNotConfigured(ClientServiceError):
+    """Не настроен склад-отправитель системы (Ref города/відділення НП).
+
+    Пусто `settings.np_sender_city_ref` и/или эффективный warehouse-ref
+    (`profile.np_sender_warehouse or settings.np_sender_warehouse_ref`). Это
+    конфиг-проблема (dev/owner ставит `NP_SENDER_*` в `.env`), не вина клиента."""
+
+
 class InsufficientStock(ClientServiceError):
     """Запрошено больше, чем доступно (`available`) по позиции."""
 

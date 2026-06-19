@@ -14,10 +14,13 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.services import sender_profile as sp
 from app.services.exceptions import (
     PermissionDenied,
+    SenderProfileIncomplete,
     SenderProfileKeyInvalid,
     SenderProfileNotFound,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_PHONE = "+380501112233"  # телефон отправителя обязателен при создании профиля
 
 
 async def _user(session: AsyncSession, telegram_id: int, role=UserRole.client):
@@ -54,7 +57,12 @@ _VALID_KEY_ROUTES = {
 async def test_create_first_profile_is_default(db_session: AsyncSession):
     client = await _user(db_session, 100)
     view = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="ФОП Іванов", np_api_key="np-key-1"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП Іванов",
+        np_api_key="np-key-1",
+        sender_phone=_PHONE,
     )
     assert view.is_default is True
     assert view.has_api_key is True
@@ -66,10 +74,20 @@ async def test_create_first_profile_is_default(db_session: AsyncSession):
 async def test_second_profile_and_set_default(db_session: AsyncSession):
     client = await _user(db_session, 101)
     first = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="ФОП-1", np_api_key="k1"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП-1",
+        np_api_key="k1",
+        sender_phone=_PHONE,
     )
     second = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="ФОП-2", np_api_key="k2"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП-2",
+        np_api_key="k2",
+        sender_phone=_PHONE,
     )
     assert first.is_default is True
     assert second.is_default is False
@@ -85,7 +103,12 @@ async def test_manager_can_manage_client_profiles(db_session: AsyncSession):
     client = await _user(db_session, 102)
     manager = await _user(db_session, 9, role=UserRole.manager)
     view = await sp.create_profile(
-        db_session, actor=manager, client_id=client.id, name="ФОП", np_api_key="k"
+        db_session,
+        actor=manager,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
     )
     assert view.client_id == client.id
 
@@ -95,8 +118,37 @@ async def test_foreign_client_denied(db_session: AsyncSession):
     other = await _user(db_session, 104)
     with pytest.raises(PermissionDenied):
         await sp.create_profile(
-            db_session, actor=other, client_id=client.id, name="ФОП", np_api_key="k"
+            db_session,
+            actor=other,
+            client_id=client.id,
+            name="ФОП",
+            np_api_key="k",
+            sender_phone=_PHONE,
         )
+
+
+async def test_create_without_phone_rejected(db_session: AsyncSession):
+    client = await _user(db_session, 113)
+    # телефон отправителя обязателен — без него профиль не создаётся
+    with pytest.raises(SenderProfileIncomplete):
+        await sp.create_profile(
+            db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+        )
+    assert await sp.list_profiles(db_session, actor=client, client_id=client.id) == []
+
+
+async def test_update_clearing_phone_rejected(db_session: AsyncSession):
+    client = await _user(db_session, 114)
+    created = await sp.create_profile(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
+    )
+    with pytest.raises(SenderProfileIncomplete):
+        await sp.update_profile(db_session, actor=client, profile_id=created.id, sender_phone="  ")
 
 
 async def test_update_masks_api_key_in_audit(db_session: AsyncSession):
@@ -105,7 +157,12 @@ async def test_update_masks_api_key_in_audit(db_session: AsyncSession):
 
     client = await _user(db_session, 105)
     created = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="Старе", np_api_key="k"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="Старе",
+        np_api_key="k",
+        sender_phone=_PHONE,
     )
     await sp.update_profile(
         db_session, actor=client, profile_id=created.id, name="Нове", np_api_key="new-key"
@@ -133,6 +190,7 @@ async def test_create_with_np_client_validates_and_fills_refs(db_session: AsyncS
         client_id=client.id,
         name="ФОП",
         np_api_key="good-key",
+        sender_phone=_PHONE,
         np_client=_np_client(_VALID_KEY_ROUTES),
         settings=settings,
     )
@@ -161,6 +219,7 @@ async def test_create_with_invalid_key_raises_and_creates_no_row(db_session: Asy
             client_id=client.id,
             name="ФОП",
             np_api_key="bad-key",
+            sender_phone=_PHONE,
             np_client=bad,
         )
     # профиль не создан (валидация до записи)
@@ -170,7 +229,12 @@ async def test_create_with_invalid_key_raises_and_creates_no_row(db_session: Asy
 async def test_create_without_np_client_skips_validation(db_session: AsyncSession):
     client = await _user(db_session, 109)
     view = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
     )
     assert view.is_np_validated is False  # ключ не валидировали — Ref'ов нет
 
@@ -178,7 +242,12 @@ async def test_create_without_np_client_skips_validation(db_session: AsyncSessio
 async def test_update_key_revalidates_and_updates_refs(db_session: AsyncSession):
     client = await _user(db_session, 110)
     created = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
     )
     assert created.is_np_validated is False
     updated = await sp.update_profile(
@@ -203,6 +272,7 @@ async def test_key_only_update_keeps_existing_warehouse(db_session: AsyncSession
         client_id=client.id,
         name="ФОП",
         np_api_key="k1",
+        sender_phone=_PHONE,
         np_client=_np_client(_VALID_KEY_ROUTES),
         settings=with_wh,
     )
@@ -225,7 +295,12 @@ async def test_key_only_update_keeps_existing_warehouse(db_session: AsyncSession
 async def test_update_empty_key_rejected(db_session: AsyncSession):
     client = await _user(db_session, 112)
     created = await sp.create_profile(
-        db_session, actor=client, client_id=client.id, name="ФОП", np_api_key="k"
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
     )
     with pytest.raises(SenderProfileKeyInvalid):
         await sp.update_profile(db_session, actor=client, profile_id=created.id, np_api_key="  ")

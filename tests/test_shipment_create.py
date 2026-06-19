@@ -15,6 +15,8 @@ from app.novaposhta.exceptions import NovaPoshtaNotFound
 from app.services import shipment
 from app.services.exceptions import (
     InsufficientStock,
+    SenderDispatchNotConfigured,
+    SenderProfileIncomplete,
     SenderProfileNotConfigured,
     SenderProfileNotValidated,
     TtnCancelFailed,
@@ -48,6 +50,16 @@ _OK_ROUTES = {
 }
 
 
+def _sender_settings() -> Settings:
+    """Конфиг с заданным складом-отправителем (Ref города/відділення) — иначе гейт
+    `ensure_sender_dispatchable` справедливо бросит `SenderDispatchNotConfigured`."""
+    settings = Settings(_env_file=None)
+    settings.np_retry_backoff = 0.0
+    settings.np_sender_city_ref = "sender-city"
+    settings.np_sender_warehouse_ref = "sender-wh"
+    return settings
+
+
 def _np_client(routes: dict[tuple[str, str], object]) -> NovaPoshtaClient:
     settings = Settings(_env_file=None)
     settings.np_retry_backoff = 0.0
@@ -60,6 +72,18 @@ def _np_client(routes: dict[tuple[str, str], object]) -> NovaPoshtaClient:
         return httpx.Response(
             200, json={"success": True, "data": result, "errors": [], "errorCodes": []}
         )
+
+    return NovaPoshtaClient(settings=settings, transport=httpx.MockTransport(handler))
+
+
+def _exploding_np_client() -> NovaPoshtaClient:
+    """NP-клиент, падающий на любом запросе — для проверки, что гейт отправителя
+    срабатывает ДО обращения к НП (save_ttn не должен вызываться)."""
+    settings = Settings(_env_file=None)
+    settings.np_retry_backoff = 0.0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("НП не повинна викликатися — гейт відправника має спрацювати раніше")
 
     return NovaPoshtaClient(settings=settings, transport=httpx.MockTransport(handler))
 
@@ -81,6 +105,7 @@ async def _validated_profile(session: AsyncSession, client):
         np_api_key="np-key",
         np_sender_ref="sender-cp",
         np_contact_ref="sender-ct",
+        sender_phone="+380501112233",
         is_default=True,
     )
 
@@ -103,6 +128,7 @@ async def _create(session, client, np_client, *, items=None, notifier=None, **ov
         "np_client": np_client,
         "reader": _FakeReader(),
         "notifier": notifier,
+        "settings": _sender_settings(),
     }
     kwargs.update(over)
     return await shipment.create_shipment(session, **kwargs)
@@ -196,6 +222,46 @@ async def test_create_shipment_unvalidated_profile_raises(db_session: AsyncSessi
     )
     with pytest.raises(SenderProfileNotValidated):
         await _create(db_session, client, _np_client(_OK_ROUTES))
+
+
+async def test_create_shipment_incomplete_profile_no_phone_raises(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=509)
+    # ключ валиден (есть Ref'ы), но не заполнен sender_phone → НП-сабмит упал бы
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        np_sender_ref="sender-cp",
+        np_contact_ref="sender-ct",
+        is_default=True,
+    )
+    with pytest.raises(SenderProfileIncomplete):
+        await _create(db_session, client, _exploding_np_client())  # НП не должна вызываться
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
+
+
+async def test_create_shipment_incomplete_profile_no_contact_raises(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=510)
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        np_sender_ref="sender-cp",
+        sender_phone="+380501112233",
+        is_default=True,
+    )  # без np_contact_ref
+    with pytest.raises(SenderProfileIncomplete):
+        await _create(db_session, client, _exploding_np_client())
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
+
+
+async def test_create_shipment_sender_dispatch_unconfigured_raises(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=511)
+    await _validated_profile(db_session, client)  # профиль полный
+    # но склад-отправитель системы не задан (пустые NP_SENDER_* в конфиге)
+    with pytest.raises(SenderDispatchNotConfigured):
+        await _create(db_session, client, _exploding_np_client(), settings=Settings(_env_file=None))
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
 
 
 async def test_create_shipment_recipient_failure_writes_nothing(db_session: AsyncSession):

@@ -1,7 +1,8 @@
 """Тесты потока создания ТТН — каркас + кошик (Фаза 4, PR 9a).
 
-ФОП-гейт входа идёт на реальном Postgres (через `sender_profile.list_profiles`);
-набор корзины/степпер/параметри — чистые (инвентарь замокан, БД не нужна).
+ФОП-гейт входа идёт на реальном Postgres (через `shipment.resolve_default_sender_id`
+— то же предусловие, что и у `create_shipment`); набор корзины/степпер/параметри —
+чистые (инвентарь замокан, БД не нужна).
 """
 
 from __future__ import annotations
@@ -134,10 +135,53 @@ async def test_entry_profile_not_validated(db_session: AsyncSession):
     assert state.state is None
 
 
-async def test_entry_ok_shows_picker(db_session: AsyncSession, monkeypatch):
-    client = await _active_client(db_session, 903)
+async def test_entry_profile_incomplete(db_session: AsyncSession):
+    client = await _active_client(db_session, 904)
+    # ключ валиден (np_sender_ref есть), но нет телефона/контакта отправителя
     await SenderProfileRepository(db_session).create(
         client_id=client.id, name="ФОП", np_api_key="k", is_default=True, np_sender_ref="cp-1"
+    )
+    msg = FakeMessage()
+    state = FakeState()
+    await h.start_create_ttn(msg, state, _ctx(client), db_session)
+    assert "не до кінця" in msg.answers[-1]["text"]
+    assert state.state is None
+
+
+async def test_entry_dispatch_not_configured(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 905)
+    # профиль полный, но склад-отправитель системы (NP_SENDER_*) не задан
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "")
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        is_default=True,
+        np_sender_ref="cp-1",
+        np_contact_ref="ct-1",
+        sender_phone="+380501112233",
+    )
+    msg = FakeMessage()
+    state = FakeState()
+    await h.start_create_ttn(msg, state, _ctx(client), db_session)
+    assert "Склад відправника не налаштований" in msg.answers[-1]["text"]
+    assert state.state is None
+
+
+async def test_entry_ok_shows_picker(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 903)
+    # склад-отправитель системы задан + профиль полный (ключ/контакт/телефон)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        is_default=True,
+        np_sender_ref="cp-1",
+        np_contact_ref="ct-1",
+        sender_phone="+380501112233",
     )
     _patch_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
     msg = FakeMessage()

@@ -30,6 +30,7 @@ async def test_get_client_settings_counts_profiles_and_toggles_notifications(
         client_id=client.id,
         name="ФОП-1",
         np_api_key="np-key-1",
+        sender_phone="+380501112233",
     )
     await sender_profile.create_profile(
         db_session,
@@ -37,6 +38,7 @@ async def test_get_client_settings_counts_profiles_and_toggles_notifications(
         client_id=client.id,
         name="ФОП-2",
         np_api_key="np-key-2",
+        sender_phone="+380501112233",
     )
 
     view = await client_settings.get_client_settings(db_session, client=client)
