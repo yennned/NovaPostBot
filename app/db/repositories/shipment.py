@@ -282,9 +282,13 @@ class ShipmentRepository(BaseRepository):
         shipment_id: uuid.UUID,
         movement_type: StockMovementType,
     ) -> bool:
-        stmt = select(func.count()).select_from(StockMovement).where(
-            StockMovement.shipment_id == shipment_id,
-            StockMovement.movement_type == movement_type,
+        stmt = (
+            select(func.count())
+            .select_from(StockMovement)
+            .where(
+                StockMovement.shipment_id == shipment_id,
+                StockMovement.movement_type == movement_type,
+            )
         )
         return bool(await self.session.scalar(stmt))
 
