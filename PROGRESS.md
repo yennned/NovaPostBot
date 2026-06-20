@@ -15,6 +15,21 @@
 
 ---
 
+## 2026-06-20 · chore/docs-status-phase5 · синк статус-доков под Фазу 5 (#35)
+- **Сделано:** Фаза 5 смержена в `main` (PR #35, `a3bf4cd`) — воркер `worker.py` +
+  `jobs.py` (APScheduler-поллинг статусов НП и low-stock), `utils/sla` (30 раб. минут,
+  Europe/Kyiv), `services/{tracking,returns,notifications}`, `services/manager_shipments`
+  + `handlers/manager_shipments` (очередь отправлений, SLA-карточки, ручные lost/damaged,
+  приёмка возврата с per-item inspection), клиентские настройки уведомлений + low-stock
+  anti-spam (persisted state), миграции `phase5_foundation` / `phase5_low_stock_alert_state`,
+  новые модели/репо (`stock_movement`/`notification_setting`/`low_stock_alert`). Тесты: 238 → 264.
+  Этим коммитом досинкан статус, который #35 не трогал: `CLAUDE.md` «Текущий статус» «Фазы 0–4»
+  → «Фазы 0–5», следующая — **Фаза 6** (alex); распределение `Phase 2/4/6 → alex, Phase 3/5/7 → step`.
+  (`docs/ROADMAP.md`/`CONTRIBUTING.md`/`README.md` уже обновлены в #35.) Кода/тестов не трогали.
+- **Дальше:** **Фаза 6** (поддержка/дежурство + персонал/аналитика), владелец по
+  sequential-by-phase — alex.
+- **Открытые вопросы:** нет. (Опц. отложено — PR 9e «Останні отримувачі».)
+
 ## 2026-06-19 · chore/docs-status-phase4-followups · синк статус-доков (без кода)
 - **Сделано:** актуализированы статус-секции, отставшие от факта. `CLAUDE.md` «Текущий статус» (был
   «Фаза 2 в main, следующая Фаза 3») → «Фазы 0–4 в `main` (+ hardening follow-up), следующая Фаза 5,
