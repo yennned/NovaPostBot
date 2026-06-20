@@ -18,7 +18,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.db.models.enums import ShipmentStatus
+from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
 from app.db.repositories import (
@@ -26,6 +26,7 @@ from app.db.repositories import (
     SenderProfileRepository,
     ShipmentItemDraft,
     ShipmentRepository,
+    StockMovementRepository,
 )
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
@@ -44,8 +45,15 @@ from app.services.exceptions import (
 )
 from app.services.notifications import Notifier
 from app.sheets import InventorySheetReader
+from app.utils.sla import shipment_sla_deadline
 
 logger = structlog.get_logger(__name__)
+
+
+def compute_shipment_fee(items_count: int) -> Decimal:
+    if items_count <= 0:
+        return Decimal("0")
+    return Decimal("20") + Decimal(max(items_count - 1, 0))
 
 
 def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> None:
@@ -231,11 +239,30 @@ async def create_shipment(
         np_ref=result.ref,
         items=drafts,
     )
+    shipment.sla_deadline = shipment_sla_deadline(shipment.created_at, settings=settings)
+    shipment.fee_amount = compute_shipment_fee(sum(item.quantity for item in drafts))
+    stock_movements = StockMovementRepository(session)
+    for draft in drafts:
+        await stock_movements.create(
+            client_id=client.id,
+            shipment_id=shipment.id,
+            sku=draft.sku,
+            movement_type=StockMovementType.ttn_reserve,
+            quantity_delta=-draft.quantity,
+            quantity_before=0,
+            quantity_after=-draft.quantity,
+            comment=f"Резерв під ТТН {result.int_doc_number}",
+        )
     await AuditRepository(session).log(
         "shipment_created",
         user_id=client.id,
         affected_entity=f"shipment:{shipment.id}",
-        after={"ttn_number": result.int_doc_number, "items": len(drafts)},
+        after={
+            "ttn_number": result.int_doc_number,
+            "items": len(drafts),
+            "sla_deadline": shipment.sla_deadline.isoformat() if shipment.sla_deadline else None,
+            "fee_amount": str(shipment.fee_amount or Decimal("0")),
+        },
     )
     if notifier is not None:
         # Пуш персоналу — best-effort: ТТН в НП уже существует, поэтому сбой пуша
@@ -289,5 +316,17 @@ async def cancel_shipment(
             logger.info("ttn_already_deleted_in_np", shipment_id=str(shipment.id))
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
-    # БД-часть (гарды/статус-чек/аудит/карточка) переиспользуем из read-side сервиса.
-    return await shipments.cancel_shipment(session, client=client, shipment_id=shipment_id)
+    card = await shipments.cancel_shipment(session, client=client, shipment_id=shipment_id)
+    movements = StockMovementRepository(session)
+    for item in shipment.items:
+        await movements.create(
+            client_id=client.id,
+            shipment_id=shipment.id,
+            sku=item.sku,
+            movement_type=StockMovementType.ttn_cancel,
+            quantity_delta=item.quantity,
+            quantity_before=0,
+            quantity_after=item.quantity,
+            comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
+        )
+    return card

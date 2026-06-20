@@ -20,8 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.clients import (
     PAGE_SIZE,
     build_client_card_kb,
+    build_client_returns_kb,
     build_clients_list_kb,
     build_edit_fields_kb,
+    build_return_card_kb,
     parse_status_token,
     status_token,
 )
@@ -32,16 +34,19 @@ from app.bot.texts.clients import (
     action_done_text,
     client_card_text,
     client_error_text,
+    client_returns_text,
     clients_header,
     edit_prompt_text,
     empty_list_text,
+    manager_return_card_text,
     profile_updated_text,
+    return_received_text,
     search_prompt_text,
 )
 from app.bot.types import EffectiveContext
 from app.db.models.user import User
 from app.db.repositories import UserRepository
-from app.services import clients, notifications
+from app.services import clients, manager_returns, notifications
 from app.services.exceptions import ClientServiceError, PermissionDenied
 
 router = Router(name="clients")
@@ -152,6 +157,113 @@ async def cb_card(
         callback.message, client_card_text(card), build_client_card_kb(card, token)
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cl:returns:"))
+async def cb_returns(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    actor = effective_context.actor_user
+    if actor is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        _, _, token, client_raw, offset_raw = callback.data.split(":")
+        client_id = uuid.UUID(client_raw)
+        offset = int(offset_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        page = await manager_returns.list_client_returns(
+            db_session,
+            actor=actor,
+            client_id=client_id,
+            limit=PAGE_SIZE,
+            offset=offset,
+        )
+    except ClientServiceError as exc:
+        await callback.answer(client_error_text(exc), show_alert=True)
+        return
+    await _edit_or_ignore(
+        callback.message,
+        client_returns_text(page),
+        build_client_returns_kb(page, token),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cl:retcard:"))
+async def cb_return_card(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    actor = effective_context.actor_user
+    if actor is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        _, _, token, offset_raw, shipment_raw = callback.data.split(":")
+        shipment_id = uuid.UUID(shipment_raw)
+        offset = int(offset_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        card = await manager_returns.get_return_card(
+            db_session,
+            actor=actor,
+            shipment_id=shipment_id,
+        )
+    except ClientServiceError as exc:
+        await callback.answer(client_error_text(exc), show_alert=True)
+        return
+    await _edit_or_ignore(
+        callback.message,
+        manager_return_card_text(card),
+        build_return_card_kb(card, token, offset),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cl:retrecv:"))
+async def cb_return_receive(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    actor = effective_context.actor_user
+    if actor is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        _, _, token, offset_raw, shipment_raw = callback.data.split(":")
+        shipment_id = uuid.UUID(shipment_raw)
+        offset = int(offset_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        card = await manager_returns.mark_return_received(
+            db_session,
+            actor=actor,
+            shipment_id=shipment_id,
+        )
+    except ClientServiceError as exc:
+        await callback.answer(client_error_text(exc), show_alert=True)
+        return
+    await _edit_or_ignore(
+        callback.message,
+        manager_return_card_text(card),
+        build_return_card_kb(card, token, offset),
+    )
+    await callback.answer(return_received_text())
 
 
 @router.callback_query(F.data.startswith("cl:act:"))

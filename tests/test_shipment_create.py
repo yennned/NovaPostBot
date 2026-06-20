@@ -8,8 +8,13 @@ from decimal import Decimal
 import httpx
 import pytest
 from app.config import Settings
-from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
-from app.db.repositories import SenderProfileRepository, ShipmentRepository, UserRepository
+from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole, UserStatus
+from app.db.repositories import (
+    SenderProfileRepository,
+    ShipmentRepository,
+    StockMovementRepository,
+    UserRepository,
+)
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaNotFound
 from app.services import shipment
@@ -141,9 +146,14 @@ async def test_create_shipment_happy_writes_row_and_reserves(db_session: AsyncSe
     card = await _create(db_session, client, _np_client(_OK_ROUTES))
 
     assert card.ttn_number == "59000999"
+    assert card.sla_deadline is not None
+    assert card.fee_amount == Decimal("22")
+    assert card.fee_free is False
     # резерв активен (status=created учитывается reserved_by_sku)
     reserved = await ShipmentRepository(db_session).reserved_by_sku(client.id)
     assert reserved == {"COF-1": 3}
+    movement = (await StockMovementRepository(db_session).list_for_shipment(card.id))[0]
+    assert movement.movement_type is StockMovementType.ttn_reserve
 
 
 async def test_create_shipment_sends_manager_push(db_session: AsyncSession):

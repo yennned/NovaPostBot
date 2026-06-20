@@ -1,4 +1,4 @@
-"""Скелет read-only клиента Google Sheets (только учёт склада).
+"""Клиент Google Sheets для чтения и корректировок складских листов.
 
 Назначение в Фазе 1 — зафиксировать границу абстракции `app/sheets/`. Реальная
 реализация (gspread + service-account, лист на клиента, кэш) появится в Фазе 3
@@ -20,7 +20,8 @@ from app.config import Settings, get_settings
 class SheetsClient:
     """Ленивая авторизация service-account и чтение листов «Склад».
 
-    Пока каркас: методы объявлены, но не реализованы (Фаза 3).
+    Авторизация ленивая; по умолчанию используем права read/write, потому что
+    Phase 5 начинает списывать и возвращать остатки ботом.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -40,7 +41,7 @@ class SheetsClient:
             raise RuntimeError("GOOGLE_SA_JSON не настроен")
 
         scopes = [
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive.readonly",
         ]
         if raw.startswith("{"):

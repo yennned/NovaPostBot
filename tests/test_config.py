@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.config import Settings, get_settings, parse_ids
+from app.config import Settings, get_settings, parse_ids, parse_work_schedule
 
 
 def test_parse_ids_variants():
@@ -28,6 +28,13 @@ def test_settings_defaults(monkeypatch):
     assert settings.timezone == "Europe/Kyiv"
     assert settings.owner_telegram_ids == []
     assert settings.redis_url.startswith("redis://")
+    assert settings.work_schedule[0] == ("08:00", "20:00")
+
+
+def test_parse_work_schedule_from_json():
+    schedule = parse_work_schedule('{"0": ["09:00", "18:00"], "5": null}')
+    assert schedule[0] == ("09:00", "18:00")
+    assert 5 not in schedule
 
 
 def test_get_settings_is_cached():

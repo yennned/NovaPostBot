@@ -19,6 +19,11 @@ class ClientCabinetState(StatesGroup):
     waiting_for_sender_profile_edit = State()
 
 
+class ManagerShipmentState(StatesGroup):
+    waiting_for_search = State()
+    inspecting_return = State()
+
+
 class CreateTtnState(StatesGroup):
     """FSM создания ТТН (Express-картка, Фаза 4 PR 9). Длинные значения — в FSM-data.
 

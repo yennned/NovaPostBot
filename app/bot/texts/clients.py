@@ -1,9 +1,10 @@
-"""Украинские тексты раздела «Клієнти» (Фаза 2)."""
+"""Украинские тексты раздела «Клієнти» и manager-side возвратов."""
 
 from __future__ import annotations
 
 from zoneinfo import ZoneInfo
 
+from app.bot.texts.client_cabinet import shipment_card_text
 from app.db.models.enums import UserStatus
 from app.services.clients import ClientCard, ClientListItem
 from app.services.exceptions import (
@@ -12,8 +13,10 @@ from app.services.exceptions import (
     ClientServiceError,
     PermissionDenied,
     PhoneAlreadyTaken,
+    ShipmentNotFound,
     TransitionForbidden,
 )
+from app.services.manager_returns import ManagerReturnCard, ManagerReturnPage
 
 # Часовой пояс отображения — Europe/Kyiv (см. CLAUDE.md «Базовые правила»).
 _KYIV = ZoneInfo("Europe/Kyiv")
@@ -78,6 +81,33 @@ def action_done_text(card: ClientCard) -> str:
     return f"✅ Готово. Новий статус: {STATUS_LABELS[card.status]}."
 
 
+def client_returns_text(page: ManagerReturnPage) -> str:
+    name = page.client_name or "без імені"
+    lines = [f"📦 <b>Повернення клієнта</b> · {name}", f"Знайдено: {page.total}"]
+    if not page.items:
+        lines.append("Повернень поки немає.")
+    else:
+        for item in page.items:
+            ttn = item.ttn_number or "без ТТН"
+            suffix = " · готово до приймання" if item.can_receive else " · уже опрацьовано"
+            lines.append(f"• <b>{ttn}</b> — {item.recipient_name} · {item.items_count} шт{suffix}")
+    return "\n".join(lines)
+
+
+def manager_return_card_text(card: ManagerReturnCard) -> str:
+    header = f"👥 Клієнт: {card.client_name or 'без імені'}"
+    status = (
+        "Повернення ще треба прийняти на склад."
+        if card.can_receive
+        else "Повернення вже опрацьоване в боті."
+    )
+    return header + "\n\n" + shipment_card_text(card.shipment) + "\n\n" + status
+
+
+def return_received_text() -> str:
+    return "✅ Повернення прийнято, залишки оновлено."
+
+
 def client_error_text(exc: ClientServiceError) -> str:
     """uk-сообщение для доменной ошибки сервиса клиентов."""
     if isinstance(exc, ClientNotFound):
@@ -90,4 +120,6 @@ def client_error_text(exc: ClientServiceError) -> str:
         return "Недостатньо прав для цієї дії."
     if isinstance(exc, PhoneAlreadyTaken):
         return "Цей телефон уже зайнятий іншим клієнтом."
+    if isinstance(exc, ShipmentNotFound):
+        return "Відправлення не знайдено."
     return "Не вдалося виконати дію."

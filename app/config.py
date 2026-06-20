@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import time as dt_time
 from functools import lru_cache
 
 from pydantic import Field
@@ -18,6 +20,37 @@ def parse_ids(value: str | None) -> list[int]:
         return []
     parts = value.replace(";", ",").split(",")
     return [int(p.strip()) for p in parts if p.strip()]
+
+
+def parse_work_schedule(value: str | None) -> dict[int, tuple[str, str]]:
+    """Распарсить JSON-расписание вида `{"0": ["08:00", "20:00"], ...}`.
+
+    Ключи — `weekday()` Python: 0=понедельник, 6=воскресенье.
+    Значение `null`/пусто для дня означает «выходной».
+    """
+    if not value:
+        return dict.fromkeys(range(0, 5), ("08:00", "20:00"))
+
+    payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise ValueError("WORK_SCHEDULE must be a JSON object")
+
+    schedule: dict[int, tuple[str, str]] = {}
+    for raw_day, raw_window in payload.items():
+        day = int(raw_day)
+        if raw_window in (None, "", []):
+            continue
+        if (
+            not isinstance(raw_window, list | tuple)
+            or len(raw_window) != 2
+            or not all(isinstance(part, str) for part in raw_window)
+        ):
+            raise ValueError(f"WORK_SCHEDULE[{raw_day}] must be ['HH:MM', 'HH:MM']")
+        start, end = raw_window
+        dt_time.fromisoformat(start)
+        dt_time.fromisoformat(end)
+        schedule[day] = (start, end)
+    return schedule
 
 
 class Settings(BaseSettings):
@@ -63,6 +96,12 @@ class Settings(BaseSettings):
     np_sender_city_ref: str = Field(default="", alias="NP_SENDER_CITY_REF")
     np_sender_warehouse_ref: str = Field(default="", alias="NP_SENDER_WAREHOUSE_REF")
 
+    # Воркер / SLA
+    work_schedule_raw: str = Field(default="", alias="WORK_SCHEDULE")
+    tracking_poll_seconds: int = Field(default=180, alias="TRACKING_POLL_SECONDS")
+    low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
+    low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
+
     # Роли (сырые строки из env; распарсенные — в свойствах ниже)
     owner_telegram_ids_raw: str = Field(default="", alias="OWNER_TELEGRAM_IDS")
     dev_telegram_ids_raw: str = Field(default="", alias="DEV_TELEGRAM_IDS")
@@ -78,6 +117,10 @@ class Settings(BaseSettings):
     @property
     def dev_telegram_ids(self) -> list[int]:
         return parse_ids(self.dev_telegram_ids_raw)
+
+    @property
+    def work_schedule(self) -> dict[int, tuple[str, str]]:
+        return parse_work_schedule(self.work_schedule_raw)
 
 
 @lru_cache(maxsize=1)

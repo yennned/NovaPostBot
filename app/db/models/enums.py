@@ -53,3 +53,13 @@ class ShipmentStatus(StrEnum):
     lost = "lost"
     damaged = "damaged"
     cancelled = "cancelled"
+
+
+class StockMovementType(StrEnum):
+    """Тип движения склада (append-only журнал)."""
+
+    ttn_reserve = "ttn_reserve"
+    ttn_dispatch = "ttn_dispatch"
+    ttn_cancel = "ttn_cancel"
+    ttn_return = "ttn_return"
+    manual = "manual"

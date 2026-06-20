@@ -12,7 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, String, Text, text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Numeric, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -21,6 +21,7 @@ from app.db.models.enums import ShipmentStatus
 
 if TYPE_CHECKING:
     from app.db.models.sender_profile import SenderProfile
+    from app.db.models.stock_movement import StockMovement
     from app.db.models.user import User
 
 
@@ -66,9 +67,14 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status_changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tracking_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    sla_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sla_met: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    fee_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    fee_free: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
     client: Mapped[User] = relationship()
     sender_profile: Mapped[SenderProfile | None] = relationship()
@@ -76,6 +82,10 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="shipment",
         cascade="all, delete-orphan",
         order_by="ShipmentItem.created_at",
+    )
+    stock_movements: Mapped[list[StockMovement]] = relationship(
+        back_populates="shipment",
+        order_by="StockMovement.created_at",
     )
 
 

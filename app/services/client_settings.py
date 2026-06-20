@@ -10,6 +10,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import (
     AuditRepository,
+    NotificationSettingRepository,
     SenderProfileRepository,
     UserRepository,
 )
@@ -53,44 +54,59 @@ def _require_active_client(client: User) -> None:
         raise PermissionDenied("налаштування доступні після підтвердження")
 
 
-def _settings_payload(user: User) -> dict:
-    payload = dict(user.permissions or {})
-    for key, value in DEFAULT_NOTIFICATION_SETTINGS.items():
-        payload.setdefault(key, value)
-    return payload
-
-
 def _settings_view(
-    user: User,
     *,
+    full_name: str | None,
+    phone: str | None,
+    notification_payload: dict[str, bool],
     sender_profiles_count: int,
     default_sender_name: str | None,
 ) -> ClientSettingsView:
-    payload = _settings_payload(user)
     labels = {
         NOTIFY_APPROVED: "Підтвердження реєстрації",
         NOTIFY_SHIPMENT_STATUS: "Статуси відправлень",
         NOTIFY_LOW_STOCK: "Залишки та low-stock",
     }
     notifications = [
-        NotificationSettingView(key=key, label=labels[key], enabled=bool(payload[key]))
+        NotificationSettingView(
+            key=key,
+            label=labels[key],
+            enabled=bool(notification_payload[key]),
+        )
         for key in DEFAULT_NOTIFICATION_SETTINGS
     ]
     return ClientSettingsView(
-        full_name=user.full_name,
-        phone=user.phone,
+        full_name=full_name,
+        phone=phone,
         notifications=notifications,
         sender_profiles_count=sender_profiles_count,
         default_sender_name=default_sender_name,
     )
 
 
+async def _notification_payload(session: AsyncSession, user: User) -> dict[str, bool]:
+    # Backward-compat: если тумблер ещё не переехал в `notification_settings`,
+    # читаем legacy-значение из `users.permissions`.
+    payload = {
+        key: bool((user.permissions or {}).get(key, default))
+        for key, default in DEFAULT_NOTIFICATION_SETTINGS.items()
+    }
+    repo = NotificationSettingRepository(session)
+    for row in await repo.list_for_user(user.id):
+        if row.key in DEFAULT_NOTIFICATION_SETTINGS:
+            payload[row.key] = row.enabled
+    return payload
+
+
 async def get_client_settings(session: AsyncSession, *, client: User) -> ClientSettingsView:
     _require_active_client(client)
     profiles = await SenderProfileRepository(session).list_for_client(client.id)
     default = next((profile for profile in profiles if profile.is_default), None)
+    notification_payload = await _notification_payload(session, client)
     return _settings_view(
-        client,
+        full_name=client.full_name,
+        phone=client.phone,
+        notification_payload=notification_payload,
         sender_profiles_count=len(profiles),
         default_sender_name=default.name if default else None,
     )
@@ -102,14 +118,18 @@ async def toggle_notification(
     _require_active_client(client)
     if key not in DEFAULT_NOTIFICATION_SETTINGS:
         raise InvalidNotificationSetting(key)
-    payload = _settings_payload(client)
-    payload[key] = not bool(payload[key])
-    await UserRepository(session).set_permissions(client, payload)
+    payload = await _notification_payload(session, client)
+    enabled = not bool(payload[key])
+    await NotificationSettingRepository(session).set_enabled(
+        user_id=client.id,
+        key=key,
+        enabled=enabled,
+    )
     await AuditRepository(session).log(
         "client_notification_toggled",
         user_id=client.id,
         affected_entity=f"user:{client.id}",
-        after={key: payload[key]},
+        after={key: enabled},
     )
     return await get_client_settings(session, client=client)
 
