@@ -14,7 +14,9 @@ from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import UserRole, UserStatus
 
 if TYPE_CHECKING:
+    from app.db.models.notification_setting import NotificationSetting
     from app.db.models.sender_profile import SenderProfile
+    from app.db.models.stock_movement import StockMovement
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -51,6 +53,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     sender_profiles: Mapped[list[SenderProfile]] = relationship(
         back_populates="client", cascade="all, delete-orphan"
+    )
+    notification_settings: Mapped[list[NotificationSetting]] = relationship(
+        cascade="all, delete-orphan"
+    )
+    stock_movements: Mapped[list[StockMovement]] = relationship(
+        foreign_keys="StockMovement.client_id"
     )
 
     def __repr__(self) -> str:  # pragma: no cover - отладочное представление

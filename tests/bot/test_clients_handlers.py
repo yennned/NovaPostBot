@@ -6,18 +6,28 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from app.bot.handlers.clients_manage import (
     cb_action,
     cb_card,
     cb_edit_field,
+    cb_return_card,
+    cb_return_receive,
+    cb_returns,
     open_clients,
     receive_edit,
 )
 from app.bot.states import ClientManageState
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.repositories import UserRepository
+from app.services.manager_returns import (
+    ManagerReturnCard,
+    ManagerReturnListItem,
+    ManagerReturnPage,
+)
+from app.services.shipments import ShipmentCard, ShipmentItemView
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -173,3 +183,138 @@ async def test_cb_action_forbidden_transition_alerts(db_session: AsyncSession):
     await cb_action(cb, SimpleNamespace(actor_user=manager), db_session, bot)
     assert cb.acks and cb.acks[-1]["show_alert"] is True
     assert bot.sent == []
+
+
+async def test_cb_returns_shows_client_return_list(db_session: AsyncSession, monkeypatch):
+    manager = await _manager(db_session)
+    client = await _pending(db_session, telegram_id=600)
+    cb = FakeCallback(data=f"cl:returns:pending:{client.id}:0")
+
+    async def fake_list_client_returns(session, *, actor, client_id, limit=8, offset=0):
+        return ManagerReturnPage(
+            client_id=client.id,
+            client_name=client.full_name,
+            items=[
+                ManagerReturnListItem(
+                    id=client.id,
+                    ttn_number="TTN-R1",
+                    recipient_name="Іван",
+                    status=ShipmentStatus.returning,
+                    items_count=2,
+                    can_receive=True,
+                )
+            ],
+            total=1,
+            limit=limit,
+            offset=offset,
+        )
+
+    monkeypatch.setattr(
+        "app.bot.handlers.clients_manage.manager_returns.list_client_returns",
+        fake_list_client_returns,
+    )
+
+    await cb_returns(cb, SimpleNamespace(actor_user=manager), db_session)
+
+    assert cb.message.edits
+    assert "Повернення клієнта" in str(cb.message.edits[0]["text"])
+
+
+async def test_cb_return_card_shows_manager_return_card(db_session: AsyncSession, monkeypatch):
+    manager = await _manager(db_session, telegram_id=601)
+    client = await _pending(db_session, telegram_id=602)
+    shipment_id = client.id
+    cb = FakeCallback(data=f"cl:retcard:pending:0:{shipment_id}")
+
+    async def fake_get_return_card(session, *, actor, shipment_id):
+        return ManagerReturnCard(
+            client_id=client.id,
+            client_name=client.full_name,
+            shipment=ShipmentCard(
+                id=shipment_id,
+                ttn_number="TTN-R2",
+                recipient_name="Іван",
+                recipient_phone="+380001",
+                recipient_city="Київ",
+                recipient_warehouse="Відділення 1",
+                status=ShipmentStatus.returning,
+                created_at=datetime.now(UTC),
+                status_changed_at=datetime.now(UTC),
+                dispatched_at=None,
+                sla_deadline=None,
+                sla_met=None,
+                payment_method="cod",
+                payer_type="recipient",
+                cod_amount=None,
+                insured_amount=None,
+                fee_amount=None,
+                fee_free=False,
+                items=[
+                    ShipmentItemView(
+                        sku="SKU-1", name="Кава", category=None, quantity=1, unit_price=None
+                    )
+                ],
+                can_cancel=False,
+            ),
+            can_receive=True,
+        )
+
+    monkeypatch.setattr(
+        "app.bot.handlers.clients_manage.manager_returns.get_return_card",
+        fake_get_return_card,
+    )
+
+    await cb_return_card(cb, SimpleNamespace(actor_user=manager), db_session)
+
+    assert cb.message.edits
+    assert "Повернення ще треба прийняти" in str(cb.message.edits[0]["text"])
+
+
+async def test_cb_return_receive_acknowledges(db_session: AsyncSession, monkeypatch):
+    manager = await _manager(db_session, telegram_id=603)
+    client = await _pending(db_session, telegram_id=604)
+    shipment_id = client.id
+    cb = FakeCallback(data=f"cl:retrecv:pending:0:{shipment_id}")
+
+    async def fake_mark_return_received(session, *, actor, shipment_id):
+        return ManagerReturnCard(
+            client_id=client.id,
+            client_name=client.full_name,
+            shipment=ShipmentCard(
+                id=shipment_id,
+                ttn_number="TTN-R3",
+                recipient_name="Іван",
+                recipient_phone="+380001",
+                recipient_city="Київ",
+                recipient_warehouse="Відділення 1",
+                status=ShipmentStatus.returned,
+                created_at=datetime.now(UTC),
+                status_changed_at=datetime.now(UTC),
+                dispatched_at=None,
+                sla_deadline=None,
+                sla_met=None,
+                payment_method="cod",
+                payer_type="recipient",
+                cod_amount=None,
+                insured_amount=None,
+                fee_amount=None,
+                fee_free=False,
+                items=[
+                    ShipmentItemView(
+                        sku="SKU-1", name="Кава", category=None, quantity=1, unit_price=None
+                    )
+                ],
+                can_cancel=False,
+            ),
+            can_receive=False,
+        )
+
+    monkeypatch.setattr(
+        "app.bot.handlers.clients_manage.manager_returns.mark_return_received",
+        fake_mark_return_received,
+    )
+
+    await cb_return_receive(cb, SimpleNamespace(actor_user=manager), db_session)
+
+    assert cb.acks
+    assert "Повернення прийнято" in str(cb.acks[-1]["text"])

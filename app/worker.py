@@ -1,15 +1,18 @@
-"""Фоновый воркер (APScheduler).
-
-Фаза 0 — каркас. Трекинг НП, продвижение статусов, SLA-таймер и low-stock
-появятся в Фазе 5.
-"""
+"""Фоновый воркер Phase 5: трекинг НП и low-stock."""
 
 from __future__ import annotations
 
 import asyncio
 
+from aiogram import Bot
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from app.bot.notify import BotNotifier
 from app.config import get_settings
+from app.jobs import low_stock_job, poll_tracking_job
 from app.logging_config import configure_logging, get_logger
+from app.novaposhta.client import NovaPoshtaClient
+from app.sheets.inventory import InventorySheetMutator
 
 
 async def main() -> None:
@@ -17,9 +20,42 @@ async def main() -> None:
     configure_logging(settings.log_level)
     log = get_logger("worker")
     log.info("worker.start", timezone=settings.timezone)
+    scheduler = AsyncIOScheduler(timezone=settings.timezone)
+    np_client = NovaPoshtaClient(settings=settings)
+    mutator = InventorySheetMutator()
+    bot = Bot(token=settings.bot_token) if settings.bot_token else None
+    notifier = BotNotifier(bot) if bot is not None else None
 
-    # TODO (Фаза 5): APScheduler — опрос трекинга НП, SLA, low-stock.
-    await asyncio.Event().wait()  # держим процесс живым (каркас)
+    scheduler.add_job(
+        poll_tracking_job,
+        trigger="interval",
+        seconds=settings.tracking_poll_seconds,
+        kwargs={
+            "np_client": np_client,
+            "notifier": notifier,
+            "mutator": mutator,
+            "settings": settings,
+        },
+        max_instances=1,
+        coalesce=True,
+    )
+    if notifier is not None:
+        scheduler.add_job(
+            low_stock_job,
+            trigger="interval",
+            seconds=settings.low_stock_poll_seconds,
+            kwargs={"notifier": notifier, "settings": settings},
+            max_instances=1,
+            coalesce=True,
+        )
+    scheduler.start()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        scheduler.shutdown(wait=False)
+        await np_client.aclose()
+        if bot is not None:
+            await bot.session.close()
 
 
 if __name__ == "__main__":

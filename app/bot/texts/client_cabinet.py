@@ -92,6 +92,17 @@ def shipment_card_text(card: ShipmentCard) -> str:
         f"COD: {_money(card.cod_amount)} · Оціночна: {_money(card.insured_amount)}",
         f"Створено: {_fmt_dt(card.created_at)}",
         f"Оновлено: {_fmt_dt(card.status_changed_at)}",
+        f"Відправлено: {_fmt_dt(card.dispatched_at) if card.dispatched_at else '—'}",
+        f"SLA дедлайн: {_fmt_dt(card.sla_deadline) if card.sla_deadline else '—'}",
+        "SLA: "
+        + (
+            "вчасно"
+            if card.sla_met is True
+            else "прострочено"
+            if card.sla_met is False
+            else "ще не зафіксовано"
+        ),
+        f"Комісія: {_money(card.fee_amount)}{' · безкоштовно' if card.fee_free else ''}",
         "",
         "<b>Позиції</b>",
     ]

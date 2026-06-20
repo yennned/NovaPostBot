@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
-from app.db.models.enums import OrgType, UserRole, UserStatus
+from app.db.models.enums import OrgType, StockMovementType, UserRole, UserStatus
 from app.db.repositories import (
     AuditRepository,
+    NotificationSettingRepository,
     SenderProfileRepository,
+    ShipmentItemDraft,
+    ShipmentRepository,
+    StockMovementRepository,
     UserRepository,
 )
 from sqlalchemy import text
@@ -106,3 +111,57 @@ async def test_audit_log_append(db_session: AsyncSession):
     assert entry.before == {"status": "pending"}
     assert entry.after == {"status": "active"}
     assert entry.created_at is not None
+
+
+async def test_notification_setting_repository_upserts(db_session: AsyncSession):
+    user = await UserRepository(db_session).create(telegram_id=556)
+    repo = NotificationSettingRepository(db_session)
+
+    created = await repo.set_enabled(
+        user_id=user.id,
+        key="notify_low_stock",
+        enabled=False,
+    )
+    updated = await repo.set_enabled(
+        user_id=user.id,
+        key="notify_low_stock",
+        enabled=True,
+    )
+
+    assert created.id == updated.id
+    assert updated.enabled is True
+    rows = await repo.list_for_user(user.id)
+    assert len(rows) == 1
+
+
+async def test_stock_movement_repository_persists_ledger_and_shipment_link(
+    db_session: AsyncSession,
+):
+    users = UserRepository(db_session)
+    shipments = ShipmentRepository(db_session)
+    movements = StockMovementRepository(db_session)
+    client = await users.create(telegram_id=557)
+    actor = await users.create(telegram_id=558, role=UserRole.manager)
+    shipment = await shipments.create(
+        client_id=client.id,
+        recipient_name="Іван",
+        items=[ShipmentItemDraft(sku="COF-1", name="Кава", quantity=2, unit_price=Decimal("100"))],
+    )
+
+    entry = await movements.create(
+        client_id=client.id,
+        shipment_id=shipment.id,
+        actor_user_id=actor.id,
+        sku="COF-1",
+        movement_type=StockMovementType.ttn_reserve,
+        quantity_delta=-2,
+        quantity_before=10,
+        quantity_after=8,
+        comment="reserve for shipment",
+    )
+
+    assert entry.shipment_id == shipment.id
+    assert entry.actor_user_id == actor.id
+    assert entry.quantity_after == 8
+    rows = await movements.list_for_shipment(shipment.id)
+    assert [row.id for row in rows] == [entry.id]

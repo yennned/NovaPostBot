@@ -62,10 +62,15 @@ class ShipmentCard:
     status: ShipmentStatus
     created_at: datetime
     status_changed_at: datetime
+    dispatched_at: datetime | None
+    sla_deadline: datetime | None
+    sla_met: bool | None
     payment_method: str | None
     payer_type: str | None
     cod_amount: Decimal | None
     insured_amount: Decimal | None
+    fee_amount: Decimal | None
+    fee_free: bool
     items: list[ShipmentItemView]
     can_cancel: bool
 
@@ -113,10 +118,15 @@ def _to_card(shipment: Shipment) -> ShipmentCard:
         status=shipment.status,
         created_at=shipment.created_at,
         status_changed_at=shipment.status_changed_at,
+        dispatched_at=shipment.dispatched_at,
+        sla_deadline=shipment.sla_deadline,
+        sla_met=shipment.sla_met,
         payment_method=shipment.payment_method,
         payer_type=shipment.payer_type,
         cod_amount=shipment.cod_amount,
         insured_amount=shipment.insured_amount,
+        fee_amount=shipment.fee_amount,
+        fee_free=shipment.fee_free,
         items=[_to_item_view(item) for item in shipment.items],
         can_cancel=shipment.status in CANCELABLE_STATUSES,
     )

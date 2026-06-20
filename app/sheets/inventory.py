@@ -1,9 +1,10 @@
-"""Read-side абстракция книги «Склад» (Фаза 3)."""
+"""Абстракции книги «Склад»: чтение и адресные корректировки остатков."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from app.sheets.client import SheetsClient
 
@@ -21,6 +22,15 @@ class StockRow:
     category: str | None
     quantity: int
     price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class StockDelta:
+    sku: str
+    quantity_delta: int
+    name: str | None = None
+    category: str | None = None
+    price: Decimal | None = None
 
 
 def _lookup(row: dict[str, object], *aliases: str) -> str | None:
@@ -69,3 +79,60 @@ class InventorySheetReader:
                 )
             )
         return result
+
+
+class InventorySheetMutator:
+    """Тонкий writer поверх листа «Склад».
+
+    Изменяет только колонку количества и при необходимости добавляет новую строку
+    для возврата/ручной корректировки товара, которого ещё нет в листе.
+    """
+
+    def __init__(self, client: SheetsClient | None = None) -> None:
+        self.client = client or SheetsClient()
+
+    def apply_deltas(self, client_key: str, deltas: list[StockDelta]) -> None:
+        if not deltas:
+            return
+
+        worksheet = self.client.get_stock_worksheet(client_key)
+        rows = list(worksheet.get_all_records(default_blank=""))
+        headers = [str(header).strip().lower() for header in worksheet.row_values(1)]
+        quantity_col = _column_index(headers, _QUANTITY_KEYS)
+
+        indexed: dict[str, tuple[int, dict[str, Any]]] = {}
+        for offset, row in enumerate(rows, start=2):
+            sku = _lookup(row, *_SKU_KEYS)
+            if sku:
+                indexed[sku] = (offset, row)
+
+        for delta in deltas:
+            current = indexed.get(delta.sku)
+            if current is None:
+                if delta.quantity_delta < 0:
+                    raise ValueError(f"sku {delta.sku} not found in stock sheet")
+                worksheet.append_row(
+                    [
+                        delta.sku,
+                        delta.name or delta.sku,
+                        delta.category or "",
+                        delta.quantity_delta,
+                        str(delta.price) if delta.price is not None else "",
+                    ]
+                )
+                continue
+
+            row_index, row = current
+            before = _parse_quantity(_lookup(row, *_QUANTITY_KEYS))
+            after = before + delta.quantity_delta
+            if after < 0:
+                raise ValueError(f"sku {delta.sku} would become negative")
+            worksheet.update_cell(row_index, quantity_col, after)
+            row["кількість"] = str(after)
+
+
+def _column_index(headers: list[str], aliases: tuple[str, ...]) -> int:
+    for alias in aliases:
+        if alias in headers:
+            return headers.index(alias) + 1
+    raise ValueError(f"column not found: {aliases[0]}")

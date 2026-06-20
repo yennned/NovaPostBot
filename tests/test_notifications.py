@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
+from app.db.repositories import ShipmentItemDraft, ShipmentRepository, UserRepository
 from app.services import notifications
+from app.services.inventory import InventoryItem
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -44,3 +47,59 @@ async def test_notify_client_approved(db_session: AsyncSession):
     await notifications.notify_client_approved(notifier, client=client)
 
     assert notifier.sent == [(100, notifications.client_approved_text())]
+
+
+async def test_notify_shipment_status_changed_respects_client_toggle(db_session: AsyncSession):
+    users = UserRepository(db_session)
+    shipments = ShipmentRepository(db_session)
+    client = await users.create(
+        telegram_id=101,
+        role=UserRole.client,
+        status=UserStatus.active,
+        permissions={"notify_shipment_status": False},
+    )
+    shipment = await shipments.create(
+        client_id=client.id,
+        recipient_name="Іван",
+        ttn_number="59000111",
+        items=[ShipmentItemDraft(sku="SKU-1", name="Товар", quantity=1)],
+    )
+    notifier = FakeNotifier()
+
+    await notifications.notify_shipment_status_changed(
+        db_session,
+        notifier,
+        client=client,
+        shipment=shipment,
+    )
+
+    assert notifier.sent == []
+
+
+async def test_notify_low_stock_goes_to_client_and_staff(db_session: AsyncSession):
+    users = UserRepository(db_session)
+    await users.create(telegram_id=1, role=UserRole.owner, status=UserStatus.active)
+    manager = await users.create(telegram_id=2, role=UserRole.manager, status=UserStatus.active)
+    manager.on_duty = True
+    client = await users.create(telegram_id=102, role=UserRole.client, status=UserStatus.active)
+    notifier = FakeNotifier()
+
+    await notifications.notify_low_stock(
+        db_session,
+        notifier,
+        client=client,
+        items=[
+            InventoryItem(
+                sku="SKU-LOW",
+                name="Кава",
+                category="Кава",
+                stock=4,
+                reserved=2,
+                available=2,
+                price=Decimal("100"),
+            )
+        ],
+    )
+
+    recipients = {tid for tid, _ in notifier.sent}
+    assert recipients == {1, 2, 102}

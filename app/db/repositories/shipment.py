@@ -10,11 +10,21 @@ from decimal import Decimal
 from sqlalchemy import Date, cast, func, or_, select
 from sqlalchemy.orm import joinedload
 
-from app.db.models.enums import ShipmentStatus
+from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment, ShipmentItem
+from app.db.models.stock_movement import StockMovement
+from app.db.models.user import User
 from app.db.repositories.base import BaseRepository
 
 RESERVING_STATUSES = {ShipmentStatus.created, ShipmentStatus.confirmed}
+TRACKABLE_STATUSES = {
+    ShipmentStatus.created,
+    ShipmentStatus.confirmed,
+    ShipmentStatus.dispatched,
+    ShipmentStatus.in_transit,
+    ShipmentStatus.arrived,
+    ShipmentStatus.returning,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,14 +39,26 @@ class ShipmentItemDraft:
 class ShipmentRepository(BaseRepository):
     async def get_by_id(self, shipment_id: uuid.UUID) -> Shipment | None:
         stmt = (
-            select(Shipment).options(joinedload(Shipment.items)).where(Shipment.id == shipment_id)
+            select(Shipment)
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+                joinedload(Shipment.stock_movements),
+            )
+            .where(Shipment.id == shipment_id)
         )
         return await self.session.scalar(stmt)
 
     async def get_by_ttn_number(self, ttn_number: str) -> Shipment | None:
         stmt = (
             select(Shipment)
-            .options(joinedload(Shipment.items))
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+                joinedload(Shipment.stock_movements),
+            )
             .where(Shipment.ttn_number == ttn_number)
         )
         return await self.session.scalar(stmt)
@@ -131,7 +153,11 @@ class ShipmentRepository(BaseRepository):
         )
         rows = await self.session.scalars(
             select(Shipment)
-            .options(joinedload(Shipment.items))
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+            )
             .where(*conditions)
             .order_by(Shipment.created_at.desc())
             .limit(limit)
@@ -148,7 +174,11 @@ class ShipmentRepository(BaseRepository):
     ) -> list[Shipment]:
         stmt = (
             select(Shipment)
-            .options(joinedload(Shipment.items))
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+            )
             .where(
                 Shipment.client_id == client_id,
                 Shipment.status_changed_at >= start,
@@ -171,6 +201,96 @@ class ShipmentRepository(BaseRepository):
         )
         rows = await self.session.execute(stmt)
         return {sku: int(total) for sku, total in rows}
+
+    async def list_for_tracking(self, *, limit: int = 200) -> list[Shipment]:
+        stmt = (
+            select(Shipment)
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+                joinedload(Shipment.stock_movements),
+            )
+            .where(
+                Shipment.ttn_number.is_not(None),
+                Shipment.sender_profile_id.is_not(None),
+                Shipment.status.in_(tuple(TRACKABLE_STATUSES)),
+            )
+            .order_by(Shipment.status_changed_at.asc())
+            .limit(limit)
+        )
+        rows = await self.session.scalars(stmt)
+        return list(rows.unique())
+
+    async def list_for_staff(
+        self,
+        *,
+        statuses: set[ShipmentStatus] | None = None,
+        query: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[Shipment], int]:
+        conditions = []
+        if statuses:
+            conditions.append(Shipment.status.in_(tuple(statuses)))
+        stmt = select(Shipment).join(User, User.id == Shipment.client_id)
+        count_stmt = (
+            select(func.count()).select_from(Shipment).join(User, User.id == Shipment.client_id)
+        )
+        if query:
+            stripped = query.strip()
+            pattern = f"%{stripped}%"
+            text_filters = [
+                Shipment.ttn_number.ilike(pattern),
+                Shipment.recipient_name.ilike(pattern),
+                User.full_name.ilike(pattern),
+                User.phone.ilike(pattern),
+            ]
+            parsed_date = _parse_query_date(stripped)
+            if parsed_date is not None:
+                text_filters.append(cast(Shipment.created_at, Date) == parsed_date)
+            conditions.append(or_(*text_filters))
+        if conditions:
+            stmt = stmt.where(*conditions)
+            count_stmt = count_stmt.where(*conditions)
+        total = await self.session.scalar(count_stmt)
+        rows = await self.session.scalars(
+            stmt.options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+                joinedload(Shipment.stock_movements),
+            )
+            .order_by(Shipment.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(rows.unique()), int(total or 0)
+
+    async def count_by_statuses(self, statuses: set[ShipmentStatus]) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count())
+                .select_from(Shipment)
+                .where(Shipment.status.in_(tuple(statuses)))
+            )
+            or 0
+        )
+
+    async def movement_exists(
+        self,
+        shipment_id: uuid.UUID,
+        movement_type: StockMovementType,
+    ) -> bool:
+        stmt = (
+            select(func.count())
+            .select_from(StockMovement)
+            .where(
+                StockMovement.shipment_id == shipment_id,
+                StockMovement.movement_type == movement_type,
+            )
+        )
+        return bool(await self.session.scalar(stmt))
 
     async def update_status(self, shipment: Shipment, status: ShipmentStatus) -> Shipment:
         shipment.status = status

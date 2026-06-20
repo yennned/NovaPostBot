@@ -1,4 +1,4 @@
-"""Inline-клавиатуры раздела «Клієнти» (Фаза 2).
+"""Inline-клавиатуры раздела «Клієнти» и manager-side возвратов.
 
 callback_data (token = `<status|all>`):
 - `cl:list:<token>:<offset>` — показать список (фильтр+страница)
@@ -16,6 +16,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.bot.texts.clients import STATUS_LABELS, client_list_button
 from app.db.models.enums import UserStatus
 from app.services.clients import ClientCard, ClientPage
+from app.services.manager_returns import ManagerReturnCard, ManagerReturnPage
 
 PAGE_SIZE = 5
 
@@ -97,6 +98,14 @@ def build_client_card_kb(card: ClientCard, token: str) -> InlineKeyboardMarkup:
     rows.append(
         [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"cl:edit:{token}:{card.id}")]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📦 Повернення",
+                callback_data=f"cl:returns:{token}:{card.id}:0",
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton(text="⬅️ До списку", callback_data=f"cl:list:{token}:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -118,3 +127,67 @@ def build_edit_fields_kb(token: str, client_id) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cl:card:{token}:{client_id}")],
         ]
     )
+
+
+def build_client_returns_kb(page: ManagerReturnPage, token: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in page.items:
+        label = item.ttn_number or item.recipient_name
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"cl:retcard:{token}:{page.offset}:{item.id}",
+                )
+            ]
+        )
+    nav: list[InlineKeyboardButton] = []
+    if page.offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️",
+                callback_data=(
+                    f"cl:returns:{token}:{page.client_id}:{max(page.offset - page.limit, 0)}"
+                ),
+            )
+        )
+    if page.offset + page.limit < page.total:
+        nav.append(
+            InlineKeyboardButton(
+                text="▶️",
+                callback_data=f"cl:returns:{token}:{page.client_id}:{page.offset + page.limit}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ До клієнта",
+                callback_data=f"cl:card:{token}:{page.client_id}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_return_card_kb(card: ManagerReturnCard, token: str, offset: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if card.can_receive:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Повернення замовлення",
+                    callback_data=f"cl:retrecv:{token}:{offset}:{card.shipment.id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ До повернень",
+                callback_data=f"cl:returns:{token}:{card.client_id}:{offset}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
+from app.db.repositories import NotificationSettingRepository, UserRepository
 from app.services import client_settings, sender_profile
 from app.services.exceptions import PhoneAlreadyTaken
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +57,29 @@ async def test_get_client_settings_counts_profiles_and_toggles_notifications(
         item for item in toggled.notifications if item.key == client_settings.NOTIFY_LOW_STOCK
     )
     assert low_stock.enabled is False
+    row = await NotificationSettingRepository(db_session).get_by_user_and_key(
+        client.id,
+        client_settings.NOTIFY_LOW_STOCK,
+    )
+    assert row is not None and row.enabled is False
+
+
+async def test_get_client_settings_uses_legacy_permissions_as_fallback(db_session: AsyncSession):
+    client = await UserRepository(db_session).create(
+        telegram_id=813,
+        phone="+380813",
+        full_name="Client 813",
+        role=UserRole.client,
+        status=UserStatus.active,
+        permissions={client_settings.NOTIFY_SHIPMENT_STATUS: False},
+    )
+
+    view = await client_settings.get_client_settings(db_session, client=client)
+
+    shipment_toggle = next(
+        item for item in view.notifications if item.key == client_settings.NOTIFY_SHIPMENT_STATUS
+    )
+    assert shipment_toggle.enabled is False
 
 
 async def test_update_self_profile_changes_fields_and_checks_unique(db_session: AsyncSession):

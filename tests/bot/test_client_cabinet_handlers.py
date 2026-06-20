@@ -196,10 +196,15 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
             status=ShipmentStatus.created,
             created_at=datetime.now(UTC),
             status_changed_at=datetime.now(UTC),
+            dispatched_at=None,
+            sla_deadline=None,
+            sla_met=None,
             payment_method="cod",
             payer_type="recipient",
             cod_amount=Decimal("500.00"),
             insured_amount=Decimal("700.00"),
+            fee_amount=Decimal("21.00"),
+            fee_free=False,
             items=[
                 ShipmentItemView(
                     sku="SKU-1",
@@ -239,10 +244,15 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
             status=ShipmentStatus.cancelled,
             created_at=datetime.now(UTC),
             status_changed_at=datetime.now(UTC),
+            dispatched_at=None,
+            sla_deadline=None,
+            sla_met=None,
             payment_method="cod",
             payer_type="recipient",
             cod_amount=Decimal("500.00"),
             insured_amount=Decimal("700.00"),
+            fee_amount=Decimal("21.00"),
+            fee_free=False,
             items=[
                 ShipmentItemView(
                     sku="SKU-1",
