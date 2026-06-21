@@ -15,6 +15,34 @@
 
 ---
 
+## 2026-06-21 · feat/alex-phase6-foundation · PR 6a — фундамент Фазы 6 (данные + расписание + реестр прав)
+- **Сделано:** старт Фазы 6 (поддержка/дежурство + персонал/аналитика, владелец alex по
+  sequential-by-phase). PR 6a — фундамент под следующие PR, без UI:
+  - Модели `app/db/models/support.py`: `SupportThread` (client/assigned_manager/shipment,
+    `status`, `closed_at`) + `SupportMessage` (thread/`sender_role`/text); enum
+    `SupportThreadStatus(open/waiting/closed)`; зарегистрированы в `models/__init__`.
+  - Колонка `users.duty_since` (момент открытия смены — выбор «вставшего последним»
+    дежурного при нескольких на смене + отображение статуса).
+  - Миграция `c9e2f7a1b3d4_phase6_support_threads_and_duty` от head `b7d2f4a1c9e0`
+    (таблицы `support_threads`/`support_messages` + enum + `duty_since`; downgrade обратим).
+  - `app/db/repositories/support.py` (`SupportRepository`): create_thread / add_message /
+    get_active_thread_for_client / get_with_messages / list_for_manager / list_all (поиск
+    клиент/менеджер/дата + фильтр статуса) / assign_manager / close_thread.
+  - `app/utils/work_schedule.py`: оконная логика расписания вынесена из `utils/sla.py`
+    (единый источник правды) + новые `is_open` / `current_window_end` — нужны дежурству
+    (маршрутизация поддержки и авто-снятие смены при закрытии отделения). `sla.py`
+    импортирует общие хелперы.
+  - Реестр прав в `app/bot/permissions.py`: `PERMISSION_FLAGS` + канонические ключи
+    (`can_manage_clients`/`can_edit_clients` + новые `can_handle_support`/`can_view_reports`);
+    `services/clients` ссылается на канонические константы (без дублей строк).
+  - Тесты: `test_work_schedule` (окна/`is_open`/границы/выходные), реестр прав в
+    `test_permissions`, `test_support_repository` (треды/сообщения/инбокс/лог/закрытие).
+    Локально ruff (lint+format) чисто, чистые юниты зелёные, весь сьют собирается;
+    DB-тесты исполняются на Postgres в CI.
+- **Дальше:** PR 6b — дежурство (`🟢 Я на зв'язку`, `services/duty`, авто-снятие воркером)
+  на этом фундаменте.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-20 · chore/docs-status-phase5 · синк статус-доков под Фазу 5 (#35)
 - **Сделано:** Фаза 5 смержена в `main` (PR #35, `a3bf4cd`) — воркер `worker.py` +
   `jobs.py` (APScheduler-поллинг статусов НП и low-stock), `utils/sla` (30 раб. минут,

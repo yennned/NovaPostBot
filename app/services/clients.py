@@ -27,9 +27,11 @@ from app.services.exceptions import (
     TransitionForbidden,
 )
 
-# Per-flag права (ключи в `users.permissions`).
-CAN_MANAGE_CLIENTS = "can_manage_clients"  # подтверждение/блок/архив
-CAN_EDIT_CLIENTS = "can_edit_clients"  # правка ПІБ/телефона
+# Per-flag права (ключи в `users.permissions`). Канонический источник —
+# `app/bot/permissions.py`; здесь — алиасы для обратной совместимости вызовов
+# `clients.CAN_MANAGE_CLIENTS` / `clients.CAN_EDIT_CLIENTS`.
+CAN_MANAGE_CLIENTS = permissions.CAN_MANAGE_CLIENTS  # подтверждение/блок/архив
+CAN_EDIT_CLIENTS = permissions.CAN_EDIT_CLIENTS  # правка ПІБ/телефона
 
 
 @dataclass(frozen=True, slots=True)

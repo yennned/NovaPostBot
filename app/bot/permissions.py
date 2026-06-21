@@ -8,6 +8,8 @@ WebApp и легко тестировать. Источник правды по 
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from app.config import Settings, get_settings
 from app.db.models.enums import UserRole
 from app.db.models.user import User
@@ -18,6 +20,48 @@ _ROLE_RANK: dict[UserRole, int] = {
     UserRole.manager: 1,
     UserRole.owner: 2,
 }
+
+# Канонические ключи per-flag прав менеджера (хранятся в `users.permissions`).
+# Единый источник правды — на них ссылаются сервисы (`services/clients`,
+# `services/staff`) и экран «👔 Персонал» (рендер тоглов из `PERMISSION_FLAGS`).
+CAN_MANAGE_CLIENTS = "can_manage_clients"
+CAN_EDIT_CLIENTS = "can_edit_clients"
+CAN_HANDLE_SUPPORT = "can_handle_support"
+CAN_VIEW_REPORTS = "can_view_reports"
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionFlag:
+    """Описание гранулярного права для UI управления персоналом."""
+
+    key: str
+    label: str  # uk-метка на экране «Персонал»
+    description: str  # короткое пояснение, что именно разрешает
+
+
+# Порядок = порядок отображения тоглов в карточке менеджера.
+PERMISSION_FLAGS: tuple[PermissionFlag, ...] = (
+    PermissionFlag(
+        CAN_MANAGE_CLIENTS,
+        "Керування клієнтами",
+        "Підтвердження, блокування та архівування клієнтів",
+    ),
+    PermissionFlag(
+        CAN_EDIT_CLIENTS,
+        "Редагування клієнтів",
+        "Зміна ПІБ і телефону клієнта",
+    ),
+    PermissionFlag(
+        CAN_HANDLE_SUPPORT,
+        "Підтримка й чергування",
+        "Чергування та відповіді клієнтам у підтримці",
+    ),
+    PermissionFlag(
+        CAN_VIEW_REPORTS,
+        "Звіти",
+        "Перегляд звітів по відправленнях",
+    ),
+)
 
 
 def _settings(settings: Settings | None) -> Settings:
