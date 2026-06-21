@@ -3,8 +3,8 @@
 ## Текущий статус
 
 - Репозиторий уже инициализирован и ведётся на GitHub.
-- `main` локально содержит завершённую **Фазу 5**.
-- Следующая рабочая фаза: **Фаза 6 — поддержка, дежурство, персонал, аналитика**.
+- `main` локально содержит завершённую **Фазу 6**.
+- Следующая рабочая фаза: **Фаза 7 — задел CRM/WMS** (за абстракцией `app/sheets/`).
 
 ## Git-гигиена
 
@@ -119,8 +119,8 @@ CONTRIBUTING).
 | 3 — кабинет клиента (чтение) + остатки | **step** | ✅ в `main` |
 | 4 — интеграция НП + создание ТТН | **alex** | ✅ в `main` |
 | 5 — уведомления/трекинг/возвраты (воркер) | **step** | ✅ в `main` |
-| 6 — поддержка/персонал/аналитика | **alex** | следующая |
-| 7 — задел CRM/WMS | **step** | planned |
+| 6 — поддержка/персонал/аналитика | **alex** | ✅ в `main` |
+| 7 — задел CRM/WMS | **step** | следующая |
 
 Ниже — **scope каждой фазы**: полный набор модулей, который делает её владелец
 (оба слоя). Это чек-лист фазы, **не** разделение между людьми.
@@ -190,14 +190,24 @@ CONTRIBUTING).
 - Клиентские настройки: UI персональных уведомлений и low-stock anti-spam с
   persisted state, чтобы воркер не спамил одинаковыми алертами на каждом цикле.
 
-### Фаза 6 — Поддержка/дежурство + персонал/аналитика
+### Фаза 6 — Поддержка/дежурство + персонал/аналитика (✅ alex, в `main`)
 - Доменный слой: `services/support` (маршрутизация дежурному, очередь без дежурного
-  → владельцу, лог переписок, авто-снятие), `repositories/support`, `models/support`,
-  `utils/work_schedule`, `services/reports` (fee-формула, опоздавшие ТТН, сводки),
-  `repositories/reports`, `services/staff` (per-flag права + аудит).
-- Bot/UI: `handlers/{support,manager,staff,analytics}`,
-  `keyboards/{support,staff,analytics}`, тексты,
-  `states.{SupportForm,StaffForm,AnalyticsForm}`, per-flag-гейтинг.
+  → владельцу, лог переписок), `services/duty` (смена + авто-снятие воркером),
+  `repositories/support`, `repositories/reports`, `models/support`,
+  `utils/work_schedule`, `services/reports` (fee-итоги, опоздавшие ТТН, сводки),
+  `services/staff` (per-flag права + аудит).
+- Bot/UI: `handlers/{duty,support,staff,reports,analytics}`,
+  `keyboards/{support,staff,reports}`, тексты, `states.{SupportState,StaffState}`,
+  per-flag-гейтинг (`can_handle_support`/`can_view_reports`).
+- **Реализовано (PR 6a–6e, #37–#41):** 6a — модели `SupportThread/SupportMessage` +
+  `users.duty_since` + `utils/work_schedule` (вынесено из `utils/sla`) + реестр прав
+  `permissions.PERMISSION_FLAGS`; 6b — дежурство «🟢 Я на зв'язку» + worker-job
+  авто-снятия (`DUTY_CHECK_SECONDS`); 6c — релей-чат клиент↔дежурный + инбокс/лог +
+  очередь без дежурного → владельцу; 6d — 👔 Персонал (найм/права/блок/снятие роли,
+  всё в `audit_logs`); 6e — 📊 Звіти/📈 Аналітика (сводки по клиентам, fee + опоздавшие
+  ТТН, поддержка по менеджерам).
+- **Отложено (TODO):** аттрибуция ТТН по менеджерам (нет `manager_id` у `shipments`),
+  сводка склада в отчётах (зависит от Sheets), произвольный диапазон дат и графики.
 
 ### Фаза 7 — Задел CRM/WMS (маленькая, неделимая)
 - Абстракция `app/sheets/` → `Protocol StockSource` + `GoogleSheetsStockSource` +
