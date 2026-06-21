@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from collections.abc import Iterable
 from decimal import Decimal
 from typing import Protocol
@@ -45,6 +46,23 @@ def duty_shift_ended_text() -> str:
     return (
         "🔘 Зміну завершено — відділення зачинилося, ви більше не на звʼязку. "
         "Завтра відкрийте зміну кнопкою «🟢 Я на звʼязку»."
+    )
+
+
+def support_message_for_manager_text(client: User, text: str) -> str:
+    """Релей сообщения клиента дежурному менеджеру (HTML — экранируем)."""
+    return f"💬 Звернення від {html.escape(_client_label(client))}:\n{html.escape(text)}"
+
+
+def support_message_for_client_text(text: str) -> str:
+    """Релей ответа менеджера клиенту (HTML — экранируем)."""
+    return f"💬 Менеджер:\n{html.escape(text)}"
+
+
+def support_thread_closed_text() -> str:
+    """Уведомление клиенту о закрытии обращения менеджером."""
+    return (
+        "✅ Менеджер закрив звернення. За потреби напишіть нове через «💬 Звернення до менеджера»."
     )
 
 
@@ -165,6 +183,39 @@ async def _manager_recipient_ids(session: AsyncSession) -> set[int]:
         if manager.status is UserStatus.active and manager.on_duty:
             recipient_ids.add(manager.telegram_id)
     return recipient_ids
+
+
+async def _owner_recipient_ids(
+    session: AsyncSession,
+    *,
+    settings: Settings | None = None,
+) -> set[int]:
+    current_settings = settings or get_settings()
+    recipient_ids: set[int] = set(current_settings.owner_telegram_ids)
+    for owner in await UserRepository(session).list_by_role(UserRole.owner):
+        if owner.status is UserStatus.active:
+            recipient_ids.add(owner.telegram_id)
+    return recipient_ids
+
+
+async def notify_support_queued_to_owner(
+    session: AsyncSession,
+    notifier: Notifier,
+    *,
+    client_label: str,
+    settings: Settings | None = None,
+) -> None:
+    """Обращение в очереди в рабочее время без дежурного — срочный сигнал владельцу.
+
+    `client_label` передаётся строкой (а не ORM-объектом): хендлер формирует её до
+    commit, чтобы пуш после commit не упёрся в expired-атрибуты.
+    """
+    text = (
+        "⚠️ Звернення клієнта в черзі, але немає чергового менеджера.\n"
+        f"Клієнт: {html.escape(client_label)}.\n"
+        "Призначте чергового або відповідайте через «💬 Підтримка»."
+    )
+    await _send_many(notifier, await _owner_recipient_ids(session, settings=settings), text)
 
 
 async def _notification_enabled(

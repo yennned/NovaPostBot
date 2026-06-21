@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime
 
-from sqlalchemy import Date, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.orm import aliased, joinedload
 
 from app.db.models.enums import SupportThreadStatus
@@ -95,6 +95,38 @@ class SupportRepository(BaseRepository):
             select(SupportThread)
             .options(joinedload(SupportThread.client), joinedload(SupportThread.assigned_manager))
             .where(*conditions)
+            .order_by(SupportThread.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(rows.unique()), int(total or 0)
+
+    async def list_for_manager_inbox(
+        self,
+        manager_id: uuid.UUID,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[SupportThread], int]:
+        """Инбокс дежурного: его открытые треды + вся очередь без дежурного (`waiting`).
+
+        Так заступивший менеджер видит и разгребает очередь, накопленную, пока
+        дежурного не было; ответ на `waiting`-тред назначает его себе.
+        """
+        condition = or_(
+            and_(
+                SupportThread.assigned_manager_id == manager_id,
+                SupportThread.status == SupportThreadStatus.open,
+            ),
+            SupportThread.status == SupportThreadStatus.waiting,
+        )
+        total = await self.session.scalar(
+            select(func.count()).select_from(SupportThread).where(condition)
+        )
+        rows = await self.session.scalars(
+            select(SupportThread)
+            .options(joinedload(SupportThread.client), joinedload(SupportThread.assigned_manager))
+            .where(condition)
             .order_by(SupportThread.updated_at.desc())
             .limit(limit)
             .offset(offset)
