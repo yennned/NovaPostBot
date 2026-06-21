@@ -9,6 +9,7 @@
 from app.db.repositories.audit import AuditRepository
 from app.db.repositories.low_stock_alert import LowStockAlertRepository
 from app.db.repositories.notification_setting import NotificationSettingRepository
+from app.db.repositories.reports import ReportsRepository
 from app.db.repositories.sender_profile import SenderProfileRepository
 from app.db.repositories.shipment import ShipmentItemDraft, ShipmentRepository
 from app.db.repositories.stock_movement import StockMovementRepository
@@ -19,6 +20,7 @@ __all__ = [
     "AuditRepository",
     "LowStockAlertRepository",
     "NotificationSettingRepository",
+    "ReportsRepository",
     "SenderProfileRepository",
     "ShipmentItemDraft",
     "ShipmentRepository",

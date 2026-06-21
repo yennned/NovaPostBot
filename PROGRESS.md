@@ -15,6 +15,29 @@
 
 ---
 
+## 2026-06-21 · feat/alex-phase6-reports · PR 6e — отчёты/аналитика (📊 Звіти / 📈 Аналітика)
+- **Сделано:** последний модуль Фазы 6:
+  - `app/db/repositories/reports.py` (`ReportsRepository`): кросс-клиентские агрегаты —
+    ТТН по окнам `status_changed_at` (сводки) и `dispatched_at` (fee/опоздавшие),
+    счётчики тредов поддержки по менеджерам (open/closed).
+  - `app/services/reports.py`: `period_report` (відправлено/повернення/втрати + чисті
+    продажі + разбивка по клиентам; гейт `can_view_reports`), `financial_report` (сумма
+    `fee_amount` где не `fee_free` + список опоздавших ТТН по `sla_met=False`; owner),
+    `manager_support_stats` (open/closed треды по менеджерам; owner), `fee_for_units`
+    (preview-формула `20 + (n−1)`). Периоды сьогодні/тиждень/місяць (переиспользует
+    статус-сеты из `services/stats`).
+  - `app/bot/handlers/reports.py` («📊 Звіти», manager+owner с правом) и
+    `handlers/analytics.py` («📈 Аналітика», owner) с inline-переключателем периода;
+    `keyboards/reports`, `texts/reports`. Роутеры в `dispatcher`.
+  - Тесты: `test_reports` (агрегация по клиентам / право `can_view_reports` / fee+опоздавшие
+    / owner-гейт / поддержка по менеджерам), `tests/bot/test_reports_handlers`. Локально
+    ruff чисто, гейт слоёв чист, чистые юниты зелёные; DB-тесты — CI.
+  - **Отложено (TODO):** аттрибуция ТТН по менеджерам (нет `manager_id` у `shipments` —
+    per-manager пока = метрики поддержки), сводка склада в отчётах (зависит от Sheets),
+    произвольный диапазон дат и графики.
+- **Дальше:** синк статус-доков под закрытую Фазу 6 (CLAUDE.md/ROADMAP).
+- **Открытые вопросы:** нет.
+
 ## 2026-06-21 · feat/alex-phase6-staff · PR 6d — управление персоналом (👔, owner-only)
 - **Сделано:** владелец управляет менеджерами:
   - `app/services/staff.py`: `list_staff`/`get_staff_card` (менеджеры + индикатор on-duty +
