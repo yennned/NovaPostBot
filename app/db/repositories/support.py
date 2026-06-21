@@ -204,6 +204,22 @@ class SupportRepository(BaseRepository):
         await self.session.flush()
         return thread
 
+    async def unassign_open_for_manager(self, manager_id: uuid.UUID) -> int:
+        """Снять назначение и вернуть в очередь открытые треды менеджера (снятие роли)."""
+        rows = list(
+            await self.session.scalars(
+                select(SupportThread).where(
+                    SupportThread.assigned_manager_id == manager_id,
+                    SupportThread.status == SupportThreadStatus.open,
+                )
+            )
+        )
+        for thread in rows:
+            thread.assigned_manager_id = None
+            thread.status = SupportThreadStatus.waiting
+        await self.session.flush()
+        return len(rows)
+
 
 def _parse_query_date(raw: str) -> date | None:
     for fmt in ("%Y-%m-%d", "%d.%m.%Y"):

@@ -14,6 +14,7 @@ from app.bot.handlers import (
     duty_router,
     errors_router,
     manager_shipments_router,
+    staff_router,
     start_router,
     support_router,
     ttn_router,
@@ -56,6 +57,7 @@ def build_dispatcher(
     dp.include_router(duty_router)
     dp.include_router(manager_shipments_router)
     dp.include_router(support_router)
+    dp.include_router(staff_router)
     dp.include_router(client_cabinet_router)
     dp.include_router(ttn_router)
     dp.include_router(errors_router)  # backstop: непрочитанный ключ ФОП (ротация FERNET_KEY)

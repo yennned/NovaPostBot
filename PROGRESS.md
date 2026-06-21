@@ -15,6 +15,28 @@
 
 ---
 
+## 2026-06-21 · feat/alex-phase6-staff · PR 6d — управление персоналом (👔, owner-only)
+- **Сделано:** владелец управляет менеджерами:
+  - `app/services/staff.py`: `list_staff`/`get_staff_card` (менеджеры + индикатор on-duty +
+    per-flag права), `add_manager` (по Telegram-ID/телефону: промоут не-активного юзера
+    или создание нового; активного клиента/владельца/уже-менеджера отклоняем; флаги on
+    по умолчанию), `set_permission` (тогл флага из реестра), `block_manager`/
+    `unblock_manager` (при блоке — сброс дежурства + возврат открытых тредов в очередь),
+    `demote_manager` (роль→client, дежурство/треды сняты). Всё через `_require_owner` +
+    `can_manage` + `audit_logs`.
+  - `repositories/support.unassign_open_for_manager`; новые исключения (`StaffNotFound`,
+    `StaffAlreadyManager`, `StaffPromotionForbidden`, `InvalidPermissionFlag`);
+    `notifications.manager_added_text`.
+  - `app/bot/handlers/staff.py` на «👔 Персонал» (owner/dev): список (поиск/пагинация/
+    «➕ Додати»), карточка с тоглами прав, блок/розблок/зняти роль (с подтверждением),
+    найм по вводу. `keyboards/staff`, `texts/staff`, states `StaffState`; роутер в
+    `dispatcher`.
+  - Тесты: `test_staff` (owner-гейт/найм/права/блок+треды/снятие роли + audit),
+    `tests/bot/test_staff_handlers` (список/найм+пуш/тогл права). Локально ruff чисто,
+    гейт слоёв чист, чистые юниты зелёные; DB-тесты — CI.
+- **Дальше:** PR 6e — отчёты/аналитика (📊 Звіти / 📈 Аналітика), последний в Фазе 6.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-21 · feat/alex-phase6-support · PR 6c — поддержка (релей клиент↔дежурный + лог)
 - **Сделано:** релей-чат поддержки через бота (без прямых TG-контактов):
   - `app/services/support.py`: `get_duty_contact`, `open_or_get_thread` (маршрутизация —
