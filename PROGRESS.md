@@ -15,6 +15,28 @@
 
 ---
 
+## 2026-06-21 · feat/alex-phase6-support · PR 6c — поддержка (релей клиент↔дежурный + лог)
+- **Сделано:** релей-чат поддержки через бота (без прямых TG-контактов):
+  - `app/services/support.py`: `get_duty_contact`, `open_or_get_thread` (маршрутизация —
+    рабочее время+дежурный → `open` назначен дежурному; рабочее время без дежурного →
+    `waiting` + сигнал владельцу; вне часов → `waiting`), `post_message` (bump инбокса),
+    `claim_if_waiting` (ответ на очередь назначает тред менеджеру), `close_thread`.
+  - `repositories/support.list_for_manager_inbox` — свои `open` + вся очередь `waiting`
+    (заступивший дежурный разгребает накопленное).
+  - `services/notifications`: релей-тексты (HTML-escape пользовательского текста),
+    `notify_support_queued_to_owner` (строка-метка, чтобы пуш после commit не упёрся в
+    expired-атрибуты), `_owner_recipient_ids`.
+  - `app/bot/handlers/support.py`: клиент «💬 Звернення до менеджера» (карточка дежурного
+    → «Почати чат» → FSM-чат, релей менеджеру или очередь), менеджер «💬 Підтримка»
+    (инбокс «мої + черга», открыть/відповісти/закрити), owner/dev — полный лог + поиск.
+    `keyboards/support`, `texts/support`, states `SupportState`; роутер в `dispatcher`.
+  - Тесты: `test_support` (маршрутизация/очередь/повтор/escape), `test_support_repository`
+    (+inbox), `tests/bot/test_support_handlers` (релей менеджеру/клиенту, очередь, claim,
+    инбокс). Локально ruff (lint+format) чисто, гейт слоёв чист, чистые юниты зелёные;
+    DB-тесты исполняются на Postgres в CI.
+- **Дальше:** PR 6d — управление персоналом (👔 Персонал, owner-only).
+- **Открытые вопросы:** нет.
+
 ## 2026-06-21 · feat/alex-phase6-duty · PR 6b — дежурство менеджера (смена + авто-снятие)
 - **Сделано:** на фундаменте 6a реализовано дежурство:
   - `app/services/duty.py`: `go_on_duty` (открыть смену — `on_duty`/`duty_date`/`duty_since`

@@ -103,3 +103,22 @@ async def test_assign_manager_updates_thread(db_session: AsyncSession):
 
     assert thread.assigned_manager_id == manager.id
     assert thread.status is SupportThreadStatus.open
+
+
+async def test_manager_inbox_shows_own_open_and_all_waiting(db_session: AsyncSession):
+    repo = SupportRepository(db_session)
+    client = await _client(db_session)
+    mine = await _manager(db_session, telegram_id=11, full_name="Мій")
+    other = await _manager(db_session, telegram_id=12, full_name="Інший")
+
+    my_open = await repo.create_thread(client_id=client.id, assigned_manager_id=mine.id)
+    queued = await repo.create_thread(client_id=client.id, status=SupportThreadStatus.waiting)
+    await repo.create_thread(client_id=client.id, assigned_manager_id=other.id)  # чужой
+    closed = await repo.create_thread(client_id=client.id, assigned_manager_id=mine.id)
+    await repo.close_thread(closed)  # закрытый не в инбоксе
+
+    threads, total = await repo.list_for_manager_inbox(mine.id)
+
+    ids = {t.id for t in threads}
+    assert total == 2
+    assert ids == {my_open.id, queued.id}

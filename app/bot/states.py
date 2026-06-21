@@ -24,6 +24,14 @@ class ManagerShipmentState(StatesGroup):
     inspecting_return = State()
 
 
+class SupportState(StatesGroup):
+    """Поддержка Фазы 6. Длинные значения (thread_id) — в FSM-data."""
+
+    client_chatting = State()  # клиент в чате обращения (data: support_thread_id)
+    manager_replying = State()  # дежурный печатает ответ (data: support_thread_id)
+    log_search = State()  # owner/dev: ввод строки поиска по логу
+
+
 class CreateTtnState(StatesGroup):
     """FSM создания ТТН (Express-картка, Фаза 4 PR 9). Длинные значения — в FSM-data.
 
