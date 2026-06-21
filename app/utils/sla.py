@@ -1,43 +1,16 @@
-"""SLA-хелперы для «30 рабочих минут» в часовом поясе отделения."""
+"""SLA-хелперы для «30 рабочих минут» в часовом поясе отделения.
+
+Оконная логика расписания вынесена в [app/utils/work_schedule.py](work_schedule.py)
+(единый источник правды, общий с дежурством Фазы 6).
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import Settings, get_settings
-
-WorkingSchedule = dict[int, tuple[str, str]]
-
-
-def _window_for_day(value: datetime, schedule: WorkingSchedule) -> tuple[datetime, datetime] | None:
-    raw = schedule.get(value.weekday())
-    if raw is None:
-        return None
-    start_raw, end_raw = raw
-    start = datetime.combine(value.date(), time.fromisoformat(start_raw), tzinfo=value.tzinfo)
-    end = datetime.combine(value.date(), time.fromisoformat(end_raw), tzinfo=value.tzinfo)
-    if end <= start:
-        raise ValueError(f"invalid work window for weekday={value.weekday()}: {raw!r}")
-    return start, end
-
-
-def _next_window_start(value: datetime, schedule: WorkingSchedule) -> datetime:
-    cursor = value
-    for _ in range(8):
-        window = _window_for_day(cursor, schedule)
-        if window is not None:
-            start, end = window
-            if cursor <= start:
-                return start
-            if start <= cursor < end:
-                return cursor
-        cursor = datetime.combine(
-            cursor.date() + timedelta(days=1),
-            time(0, 0),
-            tzinfo=cursor.tzinfo,
-        )
-    raise ValueError("work schedule has no working days")
+from app.utils.work_schedule import WorkingSchedule, next_window_start, window_for_day
 
 
 def add_working_minutes(
@@ -52,18 +25,18 @@ def add_working_minutes(
         return start
 
     remaining = timedelta(minutes=minutes)
-    cursor = _next_window_start(start, schedule)
+    cursor = next_window_start(start, schedule)
     while remaining > timedelta():
-        window = _window_for_day(cursor, schedule)
+        window = window_for_day(cursor, schedule)
         if window is None:
-            cursor = _next_window_start(cursor + timedelta(days=1), schedule)
+            cursor = next_window_start(cursor + timedelta(days=1), schedule)
             continue
         _, end = window
         available = end - cursor
         if remaining <= available:
             return cursor + remaining
         remaining -= available
-        cursor = _next_window_start(end + timedelta(seconds=1), schedule)
+        cursor = next_window_start(end + timedelta(seconds=1), schedule)
     return cursor
 
 

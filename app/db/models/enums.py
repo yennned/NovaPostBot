@@ -63,3 +63,11 @@ class StockMovementType(StrEnum):
     ttn_cancel = "ttn_cancel"
     ttn_return = "ttn_return"
     manual = "manual"
+
+
+class SupportThreadStatus(StrEnum):
+    """Статус обращения клиента в поддержку (Фаза 6)."""
+
+    open = "open"  # назначено дежурному, активный диалог
+    waiting = "waiting"  # в очереди (нет дежурного / вне рабочих часов)
+    closed = "closed"  # закрыто менеджером

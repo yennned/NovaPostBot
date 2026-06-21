@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Date, Enum, String, text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,6 +50,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, default=False, server_default=text("false"), nullable=False
     )
     duty_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Момент открытия смены (нажатия «🟢 Я на зв'язку»). При нескольких дежурных
+    # новый тред получает вставший последним; авто-снимается воркером.
+    duty_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     sender_profiles: Mapped[list[SenderProfile]] = relationship(
         back_populates="client", cascade="all, delete-orphan"

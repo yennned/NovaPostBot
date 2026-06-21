@@ -91,3 +91,31 @@ def test_has_permission_client_denied(settings):
 def test_is_configured_owner(settings):
     assert perm.is_configured_owner(100100, settings)
     assert not perm.is_configured_owner(123, settings)
+
+
+def test_permission_flags_registry_unique_and_canonical():
+    keys = [flag.key for flag in perm.PERMISSION_FLAGS]
+    assert len(keys) == len(set(keys))  # без дублей
+    # Все канонические ключи присутствуют в реестре.
+    assert {
+        perm.CAN_MANAGE_CLIENTS,
+        perm.CAN_EDIT_CLIENTS,
+        perm.CAN_HANDLE_SUPPORT,
+        perm.CAN_VIEW_REPORTS,
+    } <= set(keys)
+    # Метки и описания заполнены (рендерятся на экране «Персонал»).
+    for flag in perm.PERMISSION_FLAGS:
+        assert flag.label.strip()
+        assert flag.description.strip()
+
+
+def test_new_flags_default_enabled_for_manager(settings):
+    manager = _user(UserRole.manager, 2)
+    assert perm.has_permission(manager, perm.CAN_HANDLE_SUPPORT, settings)
+    assert perm.has_permission(manager, perm.CAN_VIEW_REPORTS, settings)
+
+
+def test_new_flags_revocable_for_manager(settings):
+    manager = _user(UserRole.manager, 2, {perm.CAN_HANDLE_SUPPORT: False})
+    assert not perm.has_permission(manager, perm.CAN_HANDLE_SUPPORT, settings)
+    assert perm.has_permission(manager, perm.CAN_VIEW_REPORTS, settings)  # другой флаг — включён
