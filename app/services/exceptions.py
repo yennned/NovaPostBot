@@ -6,11 +6,24 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.db.models.enums import ShipmentStatus, UserStatus
 
 
 class ClientServiceError(Exception):
     """База для ошибок управления клиентами."""
+
+
+class OfficeClosed(ClientServiceError):
+    """Відділення зачинене — поза робочими годинами зміну відкрити не можна.
+
+    `next_open` — ближайшее открытие по расписанию (для подсказки пользователю).
+    """
+
+    def __init__(self, *, next_open: datetime | None = None) -> None:
+        self.next_open = next_open
+        super().__init__("відділення зараз зачинене")
 
 
 class ClientNotFound(ClientServiceError):

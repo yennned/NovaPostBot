@@ -11,7 +11,7 @@ from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import LowStockAlertRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
-from app.services import notifications, tracking
+from app.services import duty, notifications, tracking
 from app.services.inventory import InventoryItem, list_inventory
 from app.services.notifications import Notifier
 from app.sheets.inventory import InventorySheetMutator
@@ -21,6 +21,11 @@ from app.sheets.inventory import InventorySheetMutator
 class LowStockResult:
     clients_checked: int
     alerts_sent: int
+
+
+@dataclass(frozen=True, slots=True)
+class DutyExpiryResult:
+    cleared: int
 
 
 class _KnownLowStockAlert(Protocol):
@@ -110,6 +115,25 @@ async def poll_tracking_job(
         )
         await session.commit()
         return result
+
+
+async def clear_expired_duty_job(
+    *,
+    notifier: Notifier | None = None,
+    settings: Settings | None = None,
+) -> DutyExpiryResult:
+    """Снять дежурство у менеджеров после закрытия отделения; опц. уведомить их."""
+    current_settings = settings or get_settings()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        cleared = await duty.clear_expired_duty(session, settings=current_settings)
+        recipient_ids = [user.telegram_id for user in cleared]  # до commit (expire)
+        await session.commit()
+    if notifier is not None and recipient_ids:
+        text = notifications.duty_shift_ended_text()
+        for telegram_id in recipient_ids:
+            await notifier.send_message(telegram_id, text)
+    return DutyExpiryResult(cleared=len(recipient_ids))
 
 
 async def low_stock_job(

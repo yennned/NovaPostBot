@@ -59,9 +59,10 @@ class UserRepository(BaseRepository):
         await self.session.flush()
         return user
 
-    async def set_duty(self, user: User, *, on_duty: bool, duty_date=None) -> User:
+    async def set_duty(self, user: User, *, on_duty: bool, duty_date=None, duty_since=None) -> User:
         user.on_duty = on_duty
         user.duty_date = duty_date
+        user.duty_since = duty_since
         await self.session.flush()
         return user
 

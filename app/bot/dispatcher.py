@@ -11,6 +11,7 @@ from app.bot.handlers import (
     client_cabinet_router,
     clients_router,
     dev_router,
+    duty_router,
     errors_router,
     manager_shipments_router,
     start_router,
@@ -51,6 +52,7 @@ def build_dispatcher(
     dp.include_router(start_router)
     dp.include_router(dev_router)
     dp.include_router(clients_router)
+    dp.include_router(duty_router)
     dp.include_router(manager_shipments_router)
     dp.include_router(client_cabinet_router)
     dp.include_router(ttn_router)

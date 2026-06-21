@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.bot.notify import BotNotifier
 from app.config import get_settings
-from app.jobs import low_stock_job, poll_tracking_job
+from app.jobs import clear_expired_duty_job, low_stock_job, poll_tracking_job
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
 from app.sheets.inventory import InventorySheetMutator
@@ -48,6 +48,14 @@ async def main() -> None:
             max_instances=1,
             coalesce=True,
         )
+    scheduler.add_job(
+        clear_expired_duty_job,
+        trigger="interval",
+        seconds=settings.duty_check_seconds,
+        kwargs={"notifier": notifier, "settings": settings},
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     try:
         await asyncio.Event().wait()
