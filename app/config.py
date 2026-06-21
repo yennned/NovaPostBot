@@ -101,6 +101,8 @@ class Settings(BaseSettings):
     tracking_poll_seconds: int = Field(default=180, alias="TRACKING_POLL_SECONDS")
     low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
     low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
+    # Период проверки авто-снятия дежурства (закрытие отделения), сек.
+    duty_check_seconds: int = Field(default=300, alias="DUTY_CHECK_SECONDS")
 
     # Роли (сырые строки из env; распарсенные — в свойствах ниже)
     owner_telegram_ids_raw: str = Field(default="", alias="OWNER_TELEGRAM_IDS")

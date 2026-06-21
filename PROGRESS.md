@@ -15,6 +15,26 @@
 
 ---
 
+## 2026-06-21 · feat/alex-phase6-duty · PR 6b — дежурство менеджера (смена + авто-снятие)
+- **Сделано:** на фундаменте 6a реализовано дежурство:
+  - `app/services/duty.py`: `go_on_duty` (открыть смену — `on_duty`/`duty_date`/`duty_since`
+    + audit `duty_started`; вне рабочих часов — `OfficeClosed` с `next_open`),
+    `current_duty_managers` (дежурные сейчас, вставший последним — первый; фильтр
+    `duty_date=сегодня` отсекает зависшие смены), `clear_expired_duty` (снять смену при
+    закрытии отделения / новом дне + audit `duty_ended`).
+  - Хендлер `app/bot/handlers/duty.py` на кнопку «🟢 Я на зв'язку» (manager/owner/dev) +
+    uk-тексты `texts/duty`; роутер зарегистрирован в `dispatcher` (перед `errors`). Кнопка
+    уже была в меню — теперь на неё есть обработчик.
+  - Воркер: job `clear_expired_duty_job` (interval `DUTY_CHECK_SECONDS`=300с, `max_instances=1`,
+    опц. пуш «зміну завершено» снятым) + `notifications.duty_shift_ended_text`.
+  - `UserRepository.set_duty` расширен `duty_since`; новый конфиг `DUTY_CHECK_SECONDS`
+    (+ `.env.example`); доменное исключение `OfficeClosed`.
+  - Тесты `test_duty` (открытие смены / закрыто после часов / выходной / роль / порядок
+    дежурных / авто-снятие / зависшая смена прошлого дня). Локально ruff (lint+format)
+    чисто, гейт слоёв чист, чистые юниты зелёные; DB-тесты исполняются на Postgres в CI.
+- **Дальше:** PR 6c — релей-чат поддержки (клиент↔дежурный) поверх `current_duty_managers`.
+- **Открытые вопросы:** нет.
+
 ## 2026-06-21 · feat/alex-phase6-foundation · PR 6a — фундамент Фазы 6 (данные + расписание + реестр прав)
 - **Сделано:** старт Фазы 6 (поддержка/дежурство + персонал/аналитика, владелец alex по
   sequential-by-phase). PR 6a — фундамент под следующие PR, без UI:
