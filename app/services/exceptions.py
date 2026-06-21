@@ -105,6 +105,22 @@ class PermissionDenied(ClientServiceError):
     """У актёра нет прав на действие (иерархия `can_manage` или per-flag)."""
 
 
+class StaffNotFound(ClientServiceError):
+    """Сотрудник (менеджер) с таким id не найден."""
+
+
+class StaffAlreadyManager(ClientServiceError):
+    """Пользователь уже менеджер — повторное назначение не нужно."""
+
+
+class StaffPromotionForbidden(ClientServiceError):
+    """Нельзя назначить менеджером: активный клиент / владелец / неизвестный телефон."""
+
+
+class InvalidPermissionFlag(ClientServiceError):
+    """Запрошен неизвестный ключ per-flag права."""
+
+
 class PhoneAlreadyTaken(ClientServiceError):
     """Телефон уже занят другим пользователем (нарушит UNIQUE)."""
 

@@ -66,6 +66,14 @@ def support_thread_closed_text() -> str:
     )
 
 
+def manager_added_text() -> str:
+    """Уведомление новому менеджеру о выдаче доступа."""
+    return (
+        "👔 Вам надано доступ менеджера. Натисніть /start, щоб відкрити меню. "
+        "Зміну відкривайте кнопкою «🟢 Я на звʼязку»."
+    )
+
+
 def new_client_text(client: User) -> str:
     return (
         "🆕 <b>Нова заявка на реєстрацію</b>\n"

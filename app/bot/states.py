@@ -32,6 +32,13 @@ class SupportState(StatesGroup):
     log_search = State()  # owner/dev: ввод строки поиска по логу
 
 
+class StaffState(StatesGroup):
+    """Управление персоналом (👔, owner-only)."""
+
+    waiting_for_search = State()  # ввод строки поиска по менеджерам
+    waiting_for_add = State()  # ввод телефона или Telegram-ID нового менеджера
+
+
 class CreateTtnState(StatesGroup):
     """FSM создания ТТН (Express-картка, Фаза 4 PR 9). Длинные значения — в FSM-data.
 
