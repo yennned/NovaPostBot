@@ -103,6 +103,6 @@ GitHub, ветка на задачу, в `main` только через PR (за
 
 ## Статус
 
-Планирование завершено. Фазы **0–5** уже собраны в `main`, включая Phase 5
-shipment operations, tracking, returns и notification worker. Следующая рабочая
-фаза — **Фаза 6: поддержка, дежурство, персонал и аналитика**.
+Планирование завершено. Фазы **0–6** уже собраны в `main`, включая Phase 6
+support, duty, staff management и reports/analytics. Следующая рабочая фаза —
+**Фаза 7: задел CRM/WMS**.
