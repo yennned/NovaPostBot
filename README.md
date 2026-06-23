@@ -32,10 +32,11 @@
 - **PostgreSQL — вся БД:** пользователи/клиенты, ФОП (`sender_profiles`,
   ключ НП зашифрован Fernet), ТТН (`shipments` + items, резерв, движения),
   поддержка, уведомления, аудит/логи. Managed Postgres (**Neon**) + Alembic.
-- **Google Sheets — только учёт склада:** книга «Склад» (лист на клиента,
-  read-only) + книга «Приймання» (лист на клиента, черновик; синк в «Склад»
-  кнопкой «Внести» с двойным подтверждением, Apps Script). `available =
-  Склад(Sheets) − reserved(Postgres)`.
+- **Складской источник — за seam `app/sheets/`:** по умолчанию это Google Sheets
+  (книга «Склад», лист на клиента, read-only) + книга «Приймання» (черновик;
+  синк в «Склад» кнопкой «Внести», Apps Script). `available = Склад(source) −
+  reserved(Postgres)`. Phase 7 добавляет переключатель `INVENTORY_SOURCE`
+  (`sheets`/`crm`) без изменения handler/service слоя.
 - **Redis** — FSM/кэш справочников НП. **Docker** — bot + worker.
 
 ## Роли
@@ -56,12 +57,13 @@ Europe/Kyiv. Язык бота — украинский (uk).
 ```
 app/
   config.py            pydantic-settings (BOT_TOKEN, DATABASE_URL, REDIS_URL,
-                       GOOGLE_SA_JSON, SHEETS_*, FERNET_KEY, OWNER/DEV_TELEGRAM_IDS)
+                       INVENTORY_SOURCE, GOOGLE_SA_JSON, SHEETS_*,
+                       FERNET_KEY, OWNER/DEV_TELEGRAM_IDS)
   logging_config.py    structlog
   main.py              запуск бота (long polling)
   worker.py            APScheduler-воркер (трекинг, low-stock)
   db/                  PostgreSQL — вся БД (models/, repositories/, base, enums)
-  sheets/              Google Sheets — только склад (client.py, inventory.py)
+  sheets/              StockSource seam: Google Sheets now, CRM/WMS adapter later
   bot/                 dispatcher, middlewares, permissions, states, filters,
                        keyboards, texts (uk), handlers (start, client_cabinet,
                        clients_manage, ttn, stats, support, notifications, dev)
@@ -77,7 +79,8 @@ tests/                 unit-тесты (чистая логика)
 ```bash
 cp .env.example .env   # BOT_TOKEN, DATABASE_URL (Neon pooled),
                        # DATABASE_URL_DIRECT (Alembic), REDIS_URL, FERNET_KEY,
-                       # GOOGLE_SA_JSON, SHEETS_*, OWNER_TELEGRAM_IDS, DEV_TELEGRAM_IDS
+                       # INVENTORY_SOURCE, GOOGLE_SA_JSON, SHEETS_*,
+                       # OWNER_TELEGRAM_IDS, DEV_TELEGRAM_IDS
 docker compose up -d --build     # migrate (alembic upgrade head) → bot + worker
 docker compose logs -f bot
 ```
@@ -103,6 +106,6 @@ GitHub, ветка на задачу, в `main` только через PR (за
 
 ## Статус
 
-Планирование завершено. Фазы **0–6** уже собраны в `main`, включая Phase 6
-support, duty, staff management и reports/analytics. Следующая рабочая фаза —
-**Фаза 7: задел CRM/WMS**.
+Планирование завершено. Фазы **0–7** уже собраны в `main`. Phase 7 закрыла seam
+для склада: `StockSource`/`GoogleSheetsStockSource`/`CrmStockSource` и
+переключатель `INVENTORY_SOURCE` без изменений в хендлерах и сервисах.

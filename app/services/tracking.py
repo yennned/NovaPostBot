@@ -19,7 +19,7 @@ from app.novaposhta.tracking import map_tracking_status
 from app.services import notifications
 from app.services.inventory import stock_sheet_key
 from app.services.notifications import Notifier
-from app.sheets.inventory import InventorySheetMutator, StockDelta
+from app.sheets import StockDelta, StockSource, build_stock_source
 from app.utils.sla import sla_met
 
 NONSTANDARD_STATUSES = {
@@ -42,7 +42,7 @@ async def poll_shipments(
     *,
     np_client: NovaPoshtaClient,
     notifier: Notifier | None = None,
-    mutator: InventorySheetMutator | None = None,
+    mutator: StockSource | None = None,
     settings: Settings | None = None,
 ) -> TrackingPollResult:
     repo = ShipmentRepository(session)
@@ -88,7 +88,7 @@ async def apply_tracking_status(
     shipment: Shipment,
     tracking: TrackingStatus,
     notifier: Notifier | None = None,
-    mutator: InventorySheetMutator | None = None,
+    mutator: StockSource | None = None,
 ) -> tuple[bool, bool]:
     target_status = map_tracking_status(tracking)
     shipment.tracking_updated_at = datetime.now(UTC)
@@ -145,13 +145,13 @@ async def _apply_dispatch_stock(
     session: AsyncSession,
     *,
     shipment: Shipment,
-    mutator: InventorySheetMutator | None = None,
+    mutator: StockSource | None = None,
 ) -> None:
     repo = ShipmentRepository(session)
     if await repo.movement_exists(shipment.id, StockMovementType.ttn_dispatch):
         return
 
-    (mutator or InventorySheetMutator()).apply_deltas(
+    (mutator or build_stock_source()).apply_deltas(
         stock_sheet_key(shipment.client),
         [
             StockDelta(

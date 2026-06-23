@@ -1,36 +1,18 @@
-"""Абстракции книги «Склад»: чтение и адресные корректировки остатков."""
+"""Google Sheets-реализация источника склада и совместимые алиасы Phase 3/5."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from app.sheets.client import SheetsClient
+from app.sheets.source import StockDelta, StockRow
 
 _SKU_KEYS = ("артикул", "sku")
 _NAME_KEYS = ("назва", "name")
 _CATEGORY_KEYS = ("категорія", "category")
 _QUANTITY_KEYS = ("кількість", "quantity", "qty")
 _PRICE_KEYS = ("ціна", "price")
-
-
-@dataclass(frozen=True, slots=True)
-class StockRow:
-    sku: str
-    name: str
-    category: str | None
-    quantity: int
-    price: Decimal | None
-
-
-@dataclass(frozen=True, slots=True)
-class StockDelta:
-    sku: str
-    quantity_delta: int
-    name: str | None = None
-    category: str | None = None
-    price: Decimal | None = None
 
 
 def _lookup(row: dict[str, object], *aliases: str) -> str | None:
@@ -55,8 +37,8 @@ def _parse_price(raw: str | None) -> Decimal | None:
     return Decimal(raw.replace(" ", "").replace(",", "."))
 
 
-class InventorySheetReader:
-    """Тонкий адаптер над `SheetsClient` с нормализацией строк листа."""
+class GoogleSheetsStockSource:
+    """Рабочий источник склада поверх Google Sheets."""
 
     def __init__(self, client: SheetsClient | None = None) -> None:
         self.client = client or SheetsClient()
@@ -79,17 +61,6 @@ class InventorySheetReader:
                 )
             )
         return result
-
-
-class InventorySheetMutator:
-    """Тонкий writer поверх листа «Склад».
-
-    Изменяет только колонку количества и при необходимости добавляет новую строку
-    для возврата/ручной корректировки товара, которого ещё нет в листе.
-    """
-
-    def __init__(self, client: SheetsClient | None = None) -> None:
-        self.client = client or SheetsClient()
 
     def apply_deltas(self, client_key: str, deltas: list[StockDelta]) -> None:
         if not deltas:
@@ -129,6 +100,32 @@ class InventorySheetMutator:
                 raise ValueError(f"sku {delta.sku} would become negative")
             worksheet.update_cell(row_index, quantity_col, after)
             row["кількість"] = str(after)
+
+
+class CrmStockSource:
+    """Заглушка под будущий REST-источник CRM/WMS.
+
+    Phase 7 добавляет seam и переключатель конфигурации, но не реальную
+    интеграцию. Явная ошибка безопаснее «тихого» fallback в Sheets.
+    """
+
+    def read_stock(self, client_key: str) -> list[StockRow]:
+        raise RuntimeError(
+            "INVENTORY_SOURCE=crm ще не реалізовано: Phase 7 додає тільки контракт інтеграції"
+        )
+
+    def apply_deltas(self, client_key: str, deltas: list[StockDelta]) -> None:
+        raise RuntimeError(
+            "INVENTORY_SOURCE=crm ще не реалізовано: Phase 7 додає тільки контракт інтеграції"
+        )
+
+
+class InventorySheetReader(GoogleSheetsStockSource):
+    """Совместимый alias для read-side старых импортов."""
+
+
+class InventorySheetMutator(GoogleSheetsStockSource):
+    """Совместимый alias для write-side старых импортов."""
 
 
 def _column_index(headers: list[str], aliases: tuple[str, ...]) -> int:

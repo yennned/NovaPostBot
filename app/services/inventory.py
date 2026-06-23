@@ -11,7 +11,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services.exceptions import PermissionDenied
-from app.sheets import InventorySheetReader, StockRow
+from app.sheets import StockRow, StockSource, build_stock_source
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +74,10 @@ async def get_inventory_snapshot(
     session: AsyncSession,
     *,
     client: User,
-    reader: InventorySheetReader | None = None,
+    reader: StockSource | None = None,
 ) -> list[InventoryItem]:
     _require_active_client(client)
-    rows = (reader or InventorySheetReader()).read_stock(stock_sheet_key(client))
+    rows = (reader or build_stock_source()).read_stock(stock_sheet_key(client))
     reserved = await ShipmentRepository(session).reserved_by_sku(client.id)
     items = _build_items(rows, reserved)
     items.sort(
@@ -98,7 +98,7 @@ async def list_inventory(
     category: str | None = None,
     limit: int = 8,
     offset: int = 0,
-    reader: InventorySheetReader | None = None,
+    reader: StockSource | None = None,
 ) -> InventoryPage:
     items = await get_inventory_snapshot(session, client=client, reader=reader)
     categories = sorted({item.category for item in items if item.category})

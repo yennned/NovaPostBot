@@ -24,11 +24,13 @@ def test_settings_defaults(monkeypatch):
     monkeypatch.delenv("OWNER_TELEGRAM_IDS", raising=False)
     monkeypatch.delenv("DEV_TELEGRAM_IDS", raising=False)
     monkeypatch.delenv("TIMEZONE", raising=False)
+    monkeypatch.delenv("INVENTORY_SOURCE", raising=False)
     settings = Settings(_env_file=None)
     assert settings.timezone == "Europe/Kyiv"
     assert settings.owner_telegram_ids == []
     assert settings.redis_url.startswith("redis://")
     assert settings.work_schedule[0] == ("08:00", "20:00")
+    assert settings.inventory_source == "sheets"
 
 
 def test_parse_work_schedule_from_json():
@@ -40,3 +42,9 @@ def test_parse_work_schedule_from_json():
 def test_get_settings_is_cached():
     # Горячий путь (permissions/middleware) не должен пересоздавать Settings.
     assert get_settings() is get_settings()
+
+
+def test_inventory_source_can_switch_to_crm(monkeypatch):
+    monkeypatch.setenv("INVENTORY_SOURCE", "crm")
+    settings = Settings(_env_file=None)
+    assert settings.inventory_source == "crm"

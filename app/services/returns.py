@@ -11,7 +11,7 @@ from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
 from app.services.exceptions import ShipmentActionForbidden, ShipmentNotFound
 from app.services.inventory import stock_sheet_key
-from app.sheets.inventory import InventorySheetMutator, StockDelta
+from app.sheets import StockDelta, StockSource, build_stock_source
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +28,7 @@ async def receive_returned_shipment(
     shipment_id: uuid.UUID,
     actor_user_id: uuid.UUID | None = None,
     decisions: list[ReturnDecision] | None = None,
-    mutator: InventorySheetMutator | None = None,
+    mutator: StockSource | None = None,
 ) -> None:
     repo = ShipmentRepository(session)
     shipment = await repo.get_by_id(shipment_id)
@@ -57,7 +57,7 @@ async def receive_returned_shipment(
                 price=item.unit_price,
             )
         )
-    (mutator or InventorySheetMutator()).apply_deltas(stock_sheet_key(shipment.client), deltas)
+    (mutator or build_stock_source()).apply_deltas(stock_sheet_key(shipment.client), deltas)
 
     movements = StockMovementRepository(session)
     accepted_total = 0

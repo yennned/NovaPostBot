@@ -15,6 +15,26 @@
 
 ---
 
+## 2026-06-23 · feat/step-phase7-stock-source · phase7-stock-source
+- **Сделано:** полностью закрыта Фаза 7 — seam под будущий CRM/WMS для склада:
+  - введён контракт `app/sheets/source.py`: `StockSource`, `StockRow`, `StockDelta`;
+    текущая рабочая реализация собрана как `GoogleSheetsStockSource`, добавлен явный
+    stub `CrmStockSource`.
+  - в `app/sheets/__init__.py` добавлена factory `build_stock_source()` и
+    переключатель через новый конфиг `INVENTORY_SOURCE` (`sheets`/`crm`).
+  - default-path чтения/списания переведён на фабрику источника без изменения
+    handler/service API: `services/inventory`, `shipment`, `stats`, `tracking`,
+    `returns`, `jobs`, `worker`.
+  - сохранена обратная совместимость импортов через alias-классы
+    `InventorySheetReader` / `InventorySheetMutator`.
+  - досинканы `.env.example`, `README.md`, `CLAUDE.md`, `docs/02-architecture.md`,
+    `docs/04-warehouse-sheets.md`, `docs/ROADMAP.md`.
+  - валидация: `./.venv/bin/ruff check app tests`, `./.venv/bin/ruff format --check app tests`,
+    полный `./.venv/bin/pytest` — всё зелёное (**330 passed**).
+- **Дальше:** push ветки, PR в `main`, дождаться зелёного GitHub Actions CI и смержить.
+- **Открытые вопросы:** реальный CRM/WMS REST adapter остаётся отдельной следующей задачей
+  поверх готового seam; в этой фазе он сознательно оставлен stub-ом.
+
 ## 2026-06-23 · fix/phase6-support-auth · review-fix
 - **Сделано:** после code review Фазы 6 закрыты два боевых риска и досинкан статус:
   - support hardening: серверный гейт на доступ к тредам в `handlers/support` — менеджер

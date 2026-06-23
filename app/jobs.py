@@ -14,7 +14,7 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.services import duty, notifications, tracking
 from app.services.inventory import InventoryItem, list_inventory
 from app.services.notifications import Notifier
-from app.sheets.inventory import InventorySheetMutator
+from app.sheets import StockSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +101,7 @@ async def poll_tracking_job(
     *,
     np_client: NovaPoshtaClient,
     notifier: Notifier | None = None,
-    mutator: InventorySheetMutator | None = None,
+    mutator: StockSource | None = None,
     settings: Settings | None = None,
 ) -> tracking.TrackingPollResult:
     sessionmaker = get_sessionmaker()

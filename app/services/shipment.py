@@ -44,7 +44,7 @@ from app.services.exceptions import (
     TtnCreationFailed,
 )
 from app.services.notifications import Notifier
-from app.sheets import InventorySheetReader
+from app.sheets import StockSource
 from app.utils.sla import shipment_sla_deadline
 
 logger = structlog.get_logger(__name__)
@@ -108,7 +108,7 @@ async def _resolve_items(
     session: AsyncSession,
     client: User,
     items: list[tuple[str, int]],
-    reader: InventorySheetReader | None,
+    reader: StockSource | None,
 ) -> list[ShipmentItemDraft]:
     """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой."""
     snapshot = await inventory.get_inventory_snapshot(session, client=client, reader=reader)
@@ -158,7 +158,7 @@ async def create_shipment(
     sender_profile_id: uuid.UUID | None = None,
     seats_amount: int = 1,
     notifier: Notifier | None = None,
-    reader: InventorySheetReader | None = None,
+    reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> shipments.ShipmentCard:
     """Создать ТТН (NP-first) и записать `Shipment` + резерв.

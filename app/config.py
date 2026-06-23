@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import time as dt_time
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -78,6 +79,10 @@ class Settings(BaseSettings):
     google_sa_json: str = Field(default="", alias="GOOGLE_SA_JSON")
     sheets_stock_book_id: str = Field(default="", alias="SHEETS_STOCK_BOOK_ID")
     sheets_intake_book_id: str = Field(default="", alias="SHEETS_INTAKE_BOOK_ID")
+    inventory_source: Literal["sheets", "crm"] = Field(
+        default="sheets",
+        alias="INVENTORY_SOURCE",
+    )
 
     # Нова Пошта (ключ — per-ФОП, шифруется в БД; здесь только транспорт).
     # Тарифы/мин-стоимость не храним — НП валидирует онлайн.
