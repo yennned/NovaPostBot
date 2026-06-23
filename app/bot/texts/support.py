@@ -119,3 +119,11 @@ def search_prompt_text() -> str:
 
 def thread_unavailable_text() -> str:
     return "Звернення недоступне або вже закрите."
+
+
+def support_unavailable_text() -> str:
+    return "Підтримка недоступна для вашого акаунта."
+
+
+def thread_forbidden_text() -> str:
+    return "Це звернення недоступне: воно закріплене за іншим менеджером."

@@ -34,3 +34,7 @@ def office_closed_text(exc: OfficeClosed) -> str:
 
 def not_staff_text() -> str:
     return "Ця дія доступна лише персоналу."
+
+
+def duty_unavailable_text() -> str:
+    return "Чергування недоступне для вашого акаунта."

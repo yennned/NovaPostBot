@@ -19,13 +19,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import permissions
 from app.bot.keyboards import support as kb
 from app.bot.keyboards.menus import build_role_menu
 from app.bot.notify import BotNotifier
 from app.bot.states import SupportState
 from app.bot.texts import support as texts
 from app.bot.types import EffectiveContext
-from app.db.models.enums import SupportThreadStatus, UserRole
+from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import SupportRepository
 from app.services import notifications, support
@@ -45,6 +46,32 @@ def _is_staff(ctx: EffectiveContext) -> bool:
 
 def _is_owner_or_dev(ctx: EffectiveContext) -> bool:
     return ctx.effective_role is UserRole.owner or ctx.is_dev
+
+
+def _can_handle_support(ctx: EffectiveContext) -> bool:
+    user = ctx.effective_user
+    if user is None:
+        return False
+    if ctx.is_dev:
+        return True
+    if user.status is not UserStatus.active:
+        return False
+    if ctx.effective_role is UserRole.owner:
+        return True
+    if ctx.effective_role is UserRole.manager:
+        return permissions.has_permission(user, permissions.CAN_HANDLE_SUPPORT)
+    return False
+
+
+def _can_access_thread(ctx: EffectiveContext, thread) -> bool:
+    user = ctx.effective_user
+    if not _can_handle_support(ctx) or user is None:
+        return False
+    if _is_owner_or_dev(ctx):
+        return True
+    return thread.assigned_manager_id == user.id or (
+        thread.assigned_manager_id is None and thread.status is SupportThreadStatus.waiting
+    )
 
 
 def _client_user(ctx: EffectiveContext) -> User | None:
@@ -215,6 +242,10 @@ async def staff_reply_message(
     state: FSMContext,
     bot: Bot,
 ) -> None:
+    if not _can_handle_support(effective_context):
+        await state.clear()
+        await message.answer(texts.support_unavailable_text())
+        return
     thread_id = await _thread_id_from_state(state)
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
     if thread is None or thread.status is SupportThreadStatus.closed:
@@ -223,6 +254,10 @@ async def staff_reply_message(
             texts.thread_unavailable_text(),
             reply_markup=build_role_menu(effective_context.effective_role or UserRole.manager),
         )
+        return
+    if not _can_access_thread(effective_context, thread):
+        await state.clear()
+        await message.answer(texts.thread_forbidden_text())
         return
     await support.claim_if_waiting(
         db_session, thread=thread, manager=effective_context.effective_user
@@ -249,6 +284,10 @@ async def staff_open(
 ) -> None:
     if not _is_staff(effective_context):
         raise SkipHandler()
+    if not _can_handle_support(effective_context):
+        await state.clear()
+        await message.answer(texts.support_unavailable_text())
+        return
     await state.clear()
     await _show_inbox(message, db_session, effective_context, offset=0, query=None, edit=False)
 
@@ -262,6 +301,9 @@ async def cb_inbox(
 ) -> None:
     if callback.message is None or not _is_staff(effective_context):
         await callback.answer(_STALE, show_alert=True)
+        return
+    if not _can_handle_support(effective_context):
+        await callback.answer(texts.support_unavailable_text(), show_alert=True)
         return
     try:
         offset = int(callback.data.split(":")[2])
@@ -284,10 +326,16 @@ async def cb_open(
     if callback.message is None or not _is_staff(effective_context):
         await callback.answer(_STALE, show_alert=True)
         return
+    if not _can_handle_support(effective_context):
+        await callback.answer(texts.support_unavailable_text(), show_alert=True)
+        return
     thread_id = _parse_id(callback.data.split(":")[-1])
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
     if thread is None:
         await callback.answer(_STALE, show_alert=True)
+        return
+    if not _can_access_thread(effective_context, thread):
+        await callback.answer(texts.thread_forbidden_text(), show_alert=True)
         return
     can_reply = thread.status is not SupportThreadStatus.closed
     await callback.message.edit_text(
@@ -302,14 +350,22 @@ async def cb_open(
 async def cb_reply(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
+    db_session: AsyncSession,
     state: FSMContext,
 ) -> None:
     if callback.message is None or not _is_staff(effective_context):
         await callback.answer(_STALE, show_alert=True)
         return
+    if not _can_handle_support(effective_context):
+        await callback.answer(texts.support_unavailable_text(), show_alert=True)
+        return
     thread_id = _parse_id(callback.data.split(":")[-1])
-    if thread_id is None:
+    thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
+    if thread is None:
         await callback.answer(_STALE, show_alert=True)
+        return
+    if not _can_access_thread(effective_context, thread):
+        await callback.answer(texts.thread_forbidden_text(), show_alert=True)
         return
     await state.set_state(SupportState.manager_replying)
     await state.update_data(support_thread_id=str(thread_id))
@@ -327,10 +383,16 @@ async def cb_close(
     if callback.message is None or not _is_staff(effective_context):
         await callback.answer(_STALE, show_alert=True)
         return
+    if not _can_handle_support(effective_context):
+        await callback.answer(texts.support_unavailable_text(), show_alert=True)
+        return
     thread_id = _parse_id(callback.data.split(":")[-1])
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
     if thread is None:
         await callback.answer(_STALE, show_alert=True)
+        return
+    if not _can_access_thread(effective_context, thread):
+        await callback.answer(texts.thread_forbidden_text(), show_alert=True)
         return
     client_tid = thread.client.telegram_id
     await support.close_thread(db_session, thread=thread)

@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+from app.bot import permissions as perm
 from app.bot.handlers.support import (
+    cb_open,
     client_chat_message,
     client_open,
     staff_open,
@@ -43,9 +45,13 @@ class FakeMessage:
     def __init__(self, text: str = "") -> None:
         self.text = text
         self.answers: list[dict] = []
+        self.edits: list[dict] = []
 
     async def answer(self, text, reply_markup=None, parse_mode=None) -> None:
         self.answers.append({"text": text, "reply_markup": reply_markup})
+
+    async def edit_text(self, text, reply_markup=None, parse_mode=None) -> None:
+        self.edits.append({"text": text, "reply_markup": reply_markup})
 
 
 class FakeBot:
@@ -54,6 +60,16 @@ class FakeBot:
 
     async def send_message(self, telegram_id: int, text: str, parse_mode=None) -> None:
         self.sent.append((telegram_id, text))
+
+
+class FakeCallback:
+    def __init__(self, data: str) -> None:
+        self.data = data
+        self.message = FakeMessage()
+        self.acks: list[dict] = []
+
+    async def answer(self, text=None, show_alert=False) -> None:
+        self.acks.append({"text": text, "show_alert": show_alert})
 
 
 def _ctx(user, role: UserRole) -> EffectiveContext:
@@ -145,3 +161,55 @@ async def test_staff_open_lists_inbox(db_session: AsyncSession):
     await staff_open(msg, _ctx(manager, UserRole.manager), db_session, FakeState())
     assert msg.answers
     assert "Підтримка" in str(msg.answers[0]["text"])
+
+
+async def test_staff_open_denies_manager_without_support_permission(db_session: AsyncSession):
+    manager = await UserRepository(db_session).create(
+        telegram_id=11,
+        role=UserRole.manager,
+        status=UserStatus.active,
+        permissions={perm.CAN_HANDLE_SUPPORT: False},
+    )
+    msg = FakeMessage()
+
+    await staff_open(msg, _ctx(manager, UserRole.manager), db_session, FakeState())
+
+    assert msg.answers
+    assert "Підтримка недоступна" in str(msg.answers[0]["text"])
+
+
+async def test_staff_reply_message_denies_foreign_thread_access(db_session: AsyncSession):
+    client = await _client(db_session)
+    assigned = await _manager(db_session, telegram_id=12)
+    foreign = await _manager(db_session, telegram_id=13)
+    thread = await SupportRepository(db_session).create_thread(
+        client_id=client.id, assigned_manager_id=assigned.id, status=SupportThreadStatus.open
+    )
+    state = FakeState({"support_thread_id": str(thread.id)})
+    bot = FakeBot()
+    msg = FakeMessage("Я не ваш менеджер")
+
+    await staff_reply_message(msg, _ctx(foreign, UserRole.manager), db_session, state, bot)
+
+    assert msg.answers
+    assert "недоступне" in str(msg.answers[0]["text"])
+    assert bot.sent == []
+    refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
+    assert refreshed.assigned_manager_id == assigned.id
+
+
+async def test_cb_open_denies_foreign_thread_access(db_session: AsyncSession):
+    client = await _client(db_session)
+    assigned = await _manager(db_session, telegram_id=14)
+    foreign = await _manager(db_session, telegram_id=15)
+    thread = await SupportRepository(db_session).create_thread(
+        client_id=client.id, assigned_manager_id=assigned.id, status=SupportThreadStatus.open
+    )
+    cb = FakeCallback(data=f"sup:open:{thread.id}")
+
+    await cb_open(cb, _ctx(foreign, UserRole.manager), db_session)
+
+    assert cb.acks
+    assert cb.acks[-1]["show_alert"] is True
+    assert "іншим менеджером" in str(cb.acks[-1]["text"])
+    assert cb.message.edits == []
