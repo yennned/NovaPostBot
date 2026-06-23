@@ -48,7 +48,7 @@ async def open_shift(
     message: Message,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
-    ) -> None:
+) -> None:
     if not _is_staff(effective_context):
         raise SkipHandler()
     if not _can_handle_support(effective_context):
