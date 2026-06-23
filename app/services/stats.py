@@ -15,7 +15,7 @@ from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services.exceptions import PermissionDenied
 from app.services.inventory import get_inventory_snapshot
-from app.sheets import InventorySheetReader
+from app.sheets import StockSource
 
 DISPATCHED_STATUSES = {
     ShipmentStatus.dispatched,
@@ -75,7 +75,7 @@ async def get_client_stats(
     client: User,
     period: str = "today",
     day: date | None = None,
-    reader: InventorySheetReader | None = None,
+    reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> ClientStatsSnapshot:
     _require_active_client(client)

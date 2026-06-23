@@ -6,8 +6,9 @@
 app/
   config.py              pydantic-settings; BOT_TOKEN, DATABASE_URL (pooled),
                          DATABASE_URL_DIRECT (Alembic), REDIS_URL,
-                         GOOGLE_SA_JSON (service account), SHEETS_* (ID книг),
-                         FERNET_KEY, OWNER_TELEGRAM_IDS, DEV_TELEGRAM_IDS, TIMEZONE
+                         INVENTORY_SOURCE, GOOGLE_SA_JSON (service account),
+                         SHEETS_* (ID книг), FERNET_KEY, OWNER_TELEGRAM_IDS,
+                         DEV_TELEGRAM_IDS, TIMEZONE
   logging_config.py      structlog
   main.py                запуск бота (long polling)
   worker.py              APScheduler-воркер (трекинг, low-stock)
@@ -18,9 +19,10 @@ app/
                          notifications, audit, enums
     repositories/        user, sender_profile, shipment, support, stats,
                          notifications, audit
-  sheets/                Google Sheets — ТОЛЬКО учёт склада
+  sheets/                seam источника склада (`StockSource`)
     client.py            Sheets API: чтение/запись, лист на клиента, кэш
-    inventory.py         остатки «Склад» (чтение/списание), «Історія»
+    inventory.py         Google Sheets adapter + CRM/WMS stub
+    source.py            контракт `StockSource`, `StockRow`, `StockDelta`
   bot/
     dispatcher.py        сборка диспетчера и роутеров
     middlewares.py       inject session/sheets/user/t/bot/np, Throttling
@@ -100,7 +102,9 @@ tests/                   unit-тесты (чистая логика, без жи
 - `available = quantity(Sheets) − reserved(Postgres)`.
 - При «відправлено» бот пишет списание в лист «Склад» (Sheets API), приёмка
   прибавляет (Apps Script) — над одним листом.
-- CRM/WMS для склада — позже, за абстракцией `app/sheets/` (Фаза 7).
+- Phase 7 уже вынесла seam `app/sheets/`: сейчас дефолтный источник —
+  `GoogleSheetsStockSource`, переключение идёт через `INVENTORY_SOURCE`, а
+  будущий CRM/WMS REST adapter подключается без правок handler/service слоя.
 
 ## Сквозные параметры
 

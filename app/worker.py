@@ -12,7 +12,7 @@ from app.config import get_settings
 from app.jobs import clear_expired_duty_job, low_stock_job, poll_tracking_job
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
-from app.sheets.inventory import InventorySheetMutator
+from app.sheets import build_stock_source
 
 
 async def main() -> None:
@@ -22,7 +22,7 @@ async def main() -> None:
     log.info("worker.start", timezone=settings.timezone)
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     np_client = NovaPoshtaClient(settings=settings)
-    mutator = InventorySheetMutator()
+    mutator = build_stock_source(settings)
     bot = Bot(token=settings.bot_token) if settings.bot_token else None
     notifier = BotNotifier(bot) if bot is not None else None
 

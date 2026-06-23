@@ -3,8 +3,10 @@
 ## Текущий статус
 
 - Репозиторий уже инициализирован и ведётся на GitHub.
-- `main` локально содержит завершённую **Фазу 6**.
-- Следующая рабочая фаза: **Фаза 7 — задел CRM/WMS** (за абстракцией `app/sheets/`).
+- `main` локально содержит завершённые **Фазы 0–7**.
+- Phase 7 уже закрыла seam склада: `StockSource` + Google Sheets adapter +
+  `CrmStockSource` stub + переключение `INVENTORY_SOURCE`.
+- Следующий отдельный backlog после фаз — реальный CRM/WMS REST adapter или Mini App.
 
 ## Git-гигиена
 
@@ -120,7 +122,7 @@ CONTRIBUTING).
 | 4 — интеграция НП + создание ТТН | **alex** | ✅ в `main` |
 | 5 — уведомления/трекинг/возвраты (воркер) | **step** | ✅ в `main` |
 | 6 — поддержка/персонал/аналитика | **alex** | ✅ в `main` |
-| 7 — задел CRM/WMS | **step** | следующая |
+| 7 — задел CRM/WMS | **step** | ✅ в `main` |
 
 Ниже — **scope каждой фазы**: полный набор модулей, который делает её владелец
 (оба слоя). Это чек-лист фазы, **не** разделение между людьми.
@@ -213,6 +215,10 @@ CONTRIBUTING).
 - Абстракция `app/sheets/` → `Protocol StockSource` + `GoogleSheetsStockSource` +
   заглушка `CrmStockSource`; переключатель `INVENTORY_SOURCE` в `config`.
   Хендлеры/сервисы уже через интерфейс — не меняются.
+- **Реализовано:** `app/sheets/source.py` (контракт + типы), `build_stock_source`
+  в `app/sheets/__init__.py`, перевод дефолтной инициализации read/write путей
+  (`services/inventory`, `tracking`, `returns`, `worker`) на конфигурируемый
+  источник, регрессионные тесты на factory/config/stub.
 
 ## Проверка (end-to-end)
 
