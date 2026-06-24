@@ -9,10 +9,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import joinedload
 
-from app.db.models.enums import SupportThreadStatus
+from app.db.models.enums import ShipmentStatus, SupportThreadStatus
 from app.db.models.shipment import Shipment
 from app.db.models.support import SupportThread
 from app.db.repositories.base import BaseRepository
@@ -40,14 +40,36 @@ class ReportsRepository(BaseRepository):
         return list(rows.unique())
 
     async def shipments_dispatched(self, *, start: datetime, end: datetime) -> list[Shipment]:
-        """ТТН, отправленные в окне (по `dispatched_at`) — для fee и опоздавших."""
+        """ТТН, отправленные в окне.
+
+        Основной источник истины — `dispatched_at`. Для legacy/test rows, где это
+        поле ещё не заполнено, fallback'имся на `status_changed_at` только если
+        текущий статус всё ещё в dispatched-ветке.
+        """
         stmt = (
             select(Shipment)
-            .options(joinedload(Shipment.client))
+            .options(joinedload(Shipment.client), joinedload(Shipment.items))
             .where(
-                Shipment.dispatched_at.is_not(None),
-                Shipment.dispatched_at >= start,
-                Shipment.dispatched_at < end,
+                or_(
+                    and_(
+                        Shipment.dispatched_at.is_not(None),
+                        Shipment.dispatched_at >= start,
+                        Shipment.dispatched_at < end,
+                    ),
+                    and_(
+                        Shipment.dispatched_at.is_(None),
+                        Shipment.status.in_(
+                            (
+                                ShipmentStatus.dispatched,
+                                ShipmentStatus.in_transit,
+                                ShipmentStatus.arrived,
+                                ShipmentStatus.delivered,
+                            )
+                        ),
+                        Shipment.status_changed_at >= start,
+                        Shipment.status_changed_at < end,
+                    ),
+                )
             )
             .order_by(Shipment.dispatched_at.desc())
         )

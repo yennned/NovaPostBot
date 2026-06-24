@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.orm import joinedload
 
 from app.db.models.enums import ShipmentStatus, StockMovementType
@@ -209,9 +209,26 @@ class ShipmentRepository(BaseRepository):
             )
             .where(
                 Shipment.client_id == client_id,
-                Shipment.dispatched_at.is_not(None),
-                Shipment.dispatched_at >= start,
-                Shipment.dispatched_at < end,
+                or_(
+                    and_(
+                        Shipment.dispatched_at.is_not(None),
+                        Shipment.dispatched_at >= start,
+                        Shipment.dispatched_at < end,
+                    ),
+                    and_(
+                        Shipment.dispatched_at.is_(None),
+                        Shipment.status.in_(
+                            (
+                                ShipmentStatus.dispatched,
+                                ShipmentStatus.in_transit,
+                                ShipmentStatus.arrived,
+                                ShipmentStatus.delivered,
+                            )
+                        ),
+                        Shipment.status_changed_at >= start,
+                        Shipment.status_changed_at < end,
+                    ),
+                ),
             )
             .order_by(Shipment.dispatched_at.desc())
         )
