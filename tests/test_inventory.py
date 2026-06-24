@@ -8,6 +8,7 @@ from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.repositories import ShipmentItemDraft, ShipmentRepository, UserRepository
 from app.services import inventory
 from app.sheets.inventory import StockRow
+from app.sheets.source import StockSheetNotFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -80,3 +81,23 @@ async def test_inventory_search_and_category_filter(db_session: AsyncSession):
         reader=FakeReader(),
     )
     assert [item.sku for item in by_category.items] == ["COF-1"]
+
+
+class MissingSheetReader:
+    """Лист склада клиента отсутствует (ещё не заведён/переименован)."""
+
+    def read_stock(self, client_key: str):
+        raise StockSheetNotFound(client_key)
+
+
+async def test_inventory_missing_sheet_degrades_to_empty(db_session: AsyncSession):
+    # Нет листа склада → пустой остаток, а не падение хендлера створення ТТН.
+    client = await _active_client(db_session, telegram_id=302)
+    page = await inventory.list_inventory(
+        db_session,
+        client=client,
+        reader=MissingSheetReader(),
+    )
+    assert page.total == 0
+    assert page.items == []
+    assert page.categories == []
