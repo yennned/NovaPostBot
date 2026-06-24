@@ -95,12 +95,13 @@ class NPReferenceCache:
             return None
         items = [Warehouse(**row) for row in full]
         needle = _norm(query)
-        filtered = [
+        # Только совпадения (возможно пусто) — НЕ весь список города: иначе поиск
+        # «№5» во время сбоя НП показал бы все відділення как «найденные».
+        return [
             w
             for w in items
             if needle in _norm(w.number or "") or needle in _norm(w.description or "")
         ]
-        return filtered or items
 
     async def _read(self, key: str) -> list[dict] | None:
         """Прочитать сырые строки из кэша. На miss **или недоступности Redis** —

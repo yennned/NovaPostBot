@@ -203,3 +203,15 @@ async def test_warehouses_reraises_when_no_cached_full_list():
     cache = _cache()
     with pytest.raises(NovaPoshtaUnavailable):
         await cache.warehouses("kyiv", loader=_failing_loader, query="1")
+
+
+async def test_warehouses_stale_fallback_returns_empty_on_no_match():
+    """Нет совпадений в кэше → пустой результат, а НЕ весь список города."""
+    cache = _cache()
+    full = [Warehouse(ref="w2", number="2", description="Відділення №2: вул. Інша, 5")]
+    loader_full, _ = _counting_loader(full)
+    await cache.warehouses("kyiv", loader=loader_full)
+
+    result = await cache.warehouses("kyiv", loader=_failing_loader, query="777")
+
+    assert result == []  # не подсовываем неподходящие відділення

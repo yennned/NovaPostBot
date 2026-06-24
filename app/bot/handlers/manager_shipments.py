@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import uuid
 
 from aiogram import Bot, F, Router
@@ -48,7 +49,7 @@ def _is_staff(context: EffectiveContext) -> bool:
 
 
 def _book_link(book_id: str, title: str) -> str:
-    return f'🔗 <a href="https://docs.google.com/spreadsheets/d/{book_id}">{title}</a>'
+    return f'🔗 <a href="https://docs.google.com/spreadsheets/d/{html.escape(book_id)}">{title}</a>'
 
 
 @router.message(F.text == WAREHOUSE_BUTTON)
@@ -90,15 +91,21 @@ async def open_warehouse(
         lines.append("• активних клієнтів немає")
     else:
         total_positions = total_units = 0
+        read_ok = False
         for client, totals in await inventory.stock_summary(list(clients)):
-            label = client.full_name or str(client.telegram_id)
+            # full_name приходит из Telegram/ввода клиента → экранируем под parse_mode=HTML.
+            label = html.escape(client.full_name or str(client.telegram_id))
             if totals is None:
                 lines.append(f"• {label} — лист недоступний")
                 continue
+            read_ok = True
             total_positions += totals.positions
             total_units += totals.units
             lines.append(f"• {label} — {totals.positions} поз. / {totals.units} од.")
-        lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
+        if read_ok:
+            lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
+        else:
+            lines += ["", "⚠️ Залишки тимчасово недоступні (немає доступу до листів)."]
 
     await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 

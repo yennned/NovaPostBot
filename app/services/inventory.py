@@ -153,7 +153,15 @@ async def stock_totals(client: User, *, reader: StockSource | None = None) -> St
     return StockTotals(positions=len(rows), units=sum(row.quantity for row in rows))
 
 
-async def stock_summary(clients: list[User]) -> list[tuple[User, StockTotals | None]]:
-    """Свод склада по клиентам — лист на клиента (для экрана менеджера «📦 Склад»)."""
-    source = build_stock_source()
+async def stock_summary(
+    clients: list[User], *, reader: StockSource | None = None
+) -> list[tuple[User, StockTotals | None]]:
+    """Свод склада по клиентам — лист на клиента (для экрана менеджера «📦 Склад»).
+
+    Читаем последовательно (не `asyncio.gather`): один `SheetsClient`/gspread-сессия
+    не рассчитана на параллельные потоки, а активных клиентов немного. Если число
+    клиентов сильно вырастет — заводить отдельный источник на поток + ограничитель
+    конкуренции, а не делить одну сессию.
+    """
+    source = reader or build_stock_source()
     return [(client, await stock_totals(client, reader=source)) for client in clients]

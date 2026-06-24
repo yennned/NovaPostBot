@@ -102,7 +102,9 @@ class NovaPoshtaClient:
         except httpx.HTTPError as exc:
             raise NovaPoshtaUnavailable(f"мережева помилка НП: {exc}") from exc
 
-        if response.status_code >= 500:
+        # 5xx + 408 (timeout) + 429 (rate limit) — временные: ретраим и пускаем в
+        # stale-fallback кэша; прочие не-200 (4xx) — постоянные, без ретраев.
+        if response.status_code >= 500 or response.status_code in (408, 429):
             raise NovaPoshtaUnavailable(f"НП відповіла {response.status_code}")
         if response.status_code != 200:
             raise NovaPoshtaError(f"НП відповіла {response.status_code}")

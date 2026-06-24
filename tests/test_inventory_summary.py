@@ -43,15 +43,18 @@ async def test_stock_totals_none_on_read_error() -> None:
     assert totals is None
 
 
+class _SelectiveSource:
+    """Лист «Боб» недоступен, у остальных — одна позиция на 4 единицы."""
+
+    def read_stock(self, client_key: str) -> list[StockRow]:
+        if client_key == "Боб":
+            raise RuntimeError("лист не знайдено")
+        return [StockRow(sku="A", name="a", category=None, quantity=4, price=None)]
+
+
 async def test_stock_summary_pairs_clients_with_totals() -> None:
-    # build_stock_source() внутри stock_summary вернёт реальный источник, но мы
-    # подменяем чтение per-client через stock_totals → проверяем форму и устойчивость.
-    rows = [StockRow(sku="A", name="a", category=None, quantity=4, price=None)]
     clients = [_client("Аліса", 1), _client("Боб", 2)]
-    # эмулируем: один лист доступен, второй — нет
-    results = [
-        (clients[0], await inventory.stock_totals(clients[0], reader=_FakeSource(rows))),
-        (clients[1], await inventory.stock_totals(clients[1], reader=_BoomSource())),
-    ]
-    assert results[0][1] == StockTotals(positions=1, units=4)
-    assert results[1][1] is None
+    summary = await inventory.stock_summary(clients, reader=_SelectiveSource())
+    assert [c.full_name for c, _ in summary] == ["Аліса", "Боб"]
+    assert summary[0][1] == StockTotals(positions=1, units=4)
+    assert summary[1][1] is None  # недоступный лист → None, сводка не падает
