@@ -8,7 +8,7 @@ from app.sheets.inventory import (
     InventorySheetMutator,
     InventorySheetReader,
 )
-from app.sheets.source import StockDelta, StockRow, StockSource
+from app.sheets.source import StockDelta, StockRow, StockSheetNotFound, StockSource
 
 
 def build_stock_source(settings: Settings | None = None) -> StockSource:
@@ -27,6 +27,7 @@ __all__ = [
     "SheetsClient",
     "StockDelta",
     "StockRow",
+    "StockSheetNotFound",
     "StockSource",
     "build_stock_source",
 ]

@@ -7,6 +7,20 @@ from decimal import Decimal
 from typing import Protocol
 
 
+class StockSheetNotFound(Exception):
+    """Лист склада клиента отсутствует в источнике остатков.
+
+    Доменная обёртка над `gspread.WorksheetNotFound` — чтобы сервис-слой не
+    импортировал gspread и одинаково реагировал на «нет листа» у любого источника
+    (Sheets/CRM). Отсутствие листа — ожидаемое состояние (клиент ещё не заведён или
+    лист переименован), а не сбой: верхний слой трактует его как пустой остаток.
+    """
+
+    def __init__(self, client_key: str) -> None:
+        super().__init__(f"лист склада не найден: {client_key}")
+        self.client_key = client_key
+
+
 @dataclass(frozen=True, slots=True)
 class StockRow:
     sku: str
