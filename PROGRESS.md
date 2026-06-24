@@ -15,6 +15,30 @@
 
 ---
 
+## 2026-06-24 · feat/andrey-warehouse-phone-resilience · 349da9a
+- **Сделано:** три точечные правки UX/устойчивости, найденные на E2E-прогоне бота:
+  - **НП-довідник, serve-stale-on-error** (`app/novaposhta/cache.py`): при
+    транзиентном `NovaPoshtaUnavailable` на поиске відділення кэш отдаёт ранее
+    закэшированный полный список города и фильтрует локально — пользователь не
+    застревает в середине создания ТТН. Нет полного списка в кэше → ошибка
+    пробрасывается как прежде.
+  - **📦 Склад (manager/owner)** был мёртвой кнопкой (нет хендлера на текст) —
+    добавлен `open_warehouse` в `handlers/manager_shipments`: ссылки на книги
+    «Склад»/«Приймання» + зведення залишків по клиентам. Новый сервис
+    `inventory.stock_totals` / `stock_summary` (чтение Sheets через `asyncio.to_thread`,
+    сбой листа одного клиента не валит сводку).
+  - **Валидация телефона** в ⚙️ Налаштування: `normalize_phone` вынесен в
+    `app/utils/phone` (общий с шагом получателя ТТН), `client_cabinet` отбивает
+    мусор (`Тест ФОП → ❌ Невірний номер…`), значение не сохраняется.
+  - Тесты: `tests/test_phone`, `tests/test_inventory_summary`, +кейсы stale-fallback/
+    reraise в `tests/test_novaposhta_cache`. `ruff check` + `ruff format --check` чистые;
+    локальный прогон — на изолированной БД (см. ниже).
+- **Дальше:** push ветки, PR в `main`, дождаться зелёного CI, смержить.
+- **Открытые вопросы:** локальный `pytest` без override `DATABASE_URL` стирает dev-БД
+  (conftest `drop_all` по `.env`); прогонять на отдельной `novapostbot_test`. Два
+  пред-существующих падения reports/notifications — окружение (.env owner-IDs +
+  date-window), не код.
+
 ## 2026-06-23 · feat/step-phase7-stock-source · phase7-stock-source
 - **Сделано:** полностью закрыта Фаза 7 — seam под будущий CRM/WMS для склада:
   - введён контракт `app/sheets/source.py`: `StockSource`, `StockRow`, `StockDelta`;
