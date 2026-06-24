@@ -25,17 +25,27 @@ _TEST_FERNET_KEY = "F4px_xx3G1x9XlQf4q56ubgtVdRNB4RBET5nyqcGF_s="
 @pytest.fixture(autouse=True)
 def _clear_settings_cache():
     """`get_settings` кеширован — сбрасываем кеш вокруг каждого теста, чтобы
-    фикстуры с `monkeypatch.setenv` видели свежие значения окружения."""
-    original_fernet_key = os.environ.get("FERNET_KEY")
-    if not original_fernet_key:
+    фикстуры с `monkeypatch.setenv` видели свежие значения окружения.
+
+    Заодно нейтрализуем owner/dev ID: иначе `get_settings()` (читает `.env`)
+    подмешал бы реальные `OWNER/DEV_TELEGRAM_IDS` разработчика в получатели
+    уведомлений и в проверки прав, и тесты с точной сверкой адресатов краснели бы
+    только локально. Тесты, которым нужны конкретные id, ставят их сами через
+    `monkeypatch.setenv` — он перекроет эти пустые значения."""
+    managed = ("FERNET_KEY", "OWNER_TELEGRAM_IDS", "DEV_TELEGRAM_IDS")
+    saved = {key: os.environ.get(key) for key in managed}
+    if not saved["FERNET_KEY"]:
         os.environ["FERNET_KEY"] = _TEST_FERNET_KEY
+    os.environ["OWNER_TELEGRAM_IDS"] = ""
+    os.environ["DEV_TELEGRAM_IDS"] = ""
     get_settings.cache_clear()
     crypto._fernet.cache_clear()
     yield
-    if original_fernet_key is None:
-        os.environ.pop("FERNET_KEY", None)
-    else:
-        os.environ["FERNET_KEY"] = original_fernet_key
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
     get_settings.cache_clear()
     crypto._fernet.cache_clear()
 

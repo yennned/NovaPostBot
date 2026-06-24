@@ -15,6 +15,20 @@
 
 ---
 
+## 2026-06-24 · fix/alex-test-env-isolation · pending
+- **Сделано:** изоляция тестового окружения от локального `.env`. Autouse-фикстура
+  `_clear_settings_cache` (tests/conftest.py) теперь обнуляет
+  `OWNER_TELEGRAM_IDS`/`DEV_TELEGRAM_IDS` вокруг каждого теста (тем же
+  save/restore, что и `FERNET_KEY`). Без этого `get_settings()` (читает `.env`)
+  подмешивал реальные ID разработчика в получателей уведомлений и в проверки прав,
+  и тесты с точной сверкой адресатов (`test_notify_new_client_*`,
+  `test_notify_low_stock_*`) краснели только локально, при зелёном CI. Тесты,
+  которым нужны конкретные id, ставят их через `monkeypatch.setenv` и перекрывают
+  пустышку. Также `.gitignore` игнорирует локальный `docker-compose.override.yml`
+  (персистентный dev-стек, не для прода). Полный прогон — 354 passed, ruff чист.
+- **Дальше:** —
+- **Открытые вопросы:** нет.
+
 ## 2026-06-24 · review-killswitch-hardening · pending
 - **Сделано:** review/hardening-пакет после обновления `main`:
   - полностью удалён `kill-switch` из bot-layer, меню, текстов, типов и docs;
