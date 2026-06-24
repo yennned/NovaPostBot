@@ -81,25 +81,33 @@ async def get_client_stats(
     _require_active_client(client)
     cfg = settings or get_settings()
     start, end = _bounds(period, day=day, settings=cfg)
-    shipments = await ShipmentRepository(session).list_status_changed_between(
-        client.id, start=start, end=end
+    repo = ShipmentRepository(session)
+    dispatched_shipments = await repo.list_dispatched_between(client.id, start=start, end=end)
+    returned_shipments = await repo.list_status_changed_between(
+        client.id,
+        start=start,
+        end=end,
+        statuses=RETURN_STATUSES,
+    )
+    lost_shipments = await repo.list_status_changed_between(
+        client.id,
+        start=start,
+        end=end,
+        statuses=LOSS_STATUSES,
     )
 
     shipped = Counter[str]()
     returned = Counter[str]()
     lost = Counter[str]()
-    for shipment in shipments:
-        target = None
-        if shipment.status in DISPATCHED_STATUSES:
-            target = shipped
-        elif shipment.status in RETURN_STATUSES:
-            target = returned
-        elif shipment.status in LOSS_STATUSES:
-            target = lost
-        if target is None:
-            continue
+    for shipment in dispatched_shipments:
         for item in shipment.items:
-            target[item.sku] += item.quantity
+            shipped[item.sku] += item.quantity
+    for shipment in returned_shipments:
+        for item in shipment.items:
+            returned[item.sku] += item.quantity
+    for shipment in lost_shipments:
+        for item in shipment.items:
+            lost[item.sku] += item.quantity
 
     inventory = await get_inventory_snapshot(session, client=client, reader=reader)
     total_available = sum(item.available for item in inventory)

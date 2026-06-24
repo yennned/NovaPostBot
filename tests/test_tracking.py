@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole, UserStatus
 from app.db.repositories import (
     SenderProfileRepository,
@@ -13,6 +14,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.novaposhta.schemas import TrackingStatus
+from app.services.exceptions import InvalidReturnDecision
 from app.services.notifications import Notifier
 from app.services.returns import ReturnDecision, receive_returned_shipment
 from app.services.tracking import apply_tracking_status
@@ -147,3 +149,41 @@ async def test_receive_returned_shipment_supports_per_item_inspection(db_session
     assert shipment is not None
     assert shipment.status is ShipmentStatus.returned
     assert mutator.calls == [[("SKU-GOOD", 2)]]
+
+
+async def test_receive_returned_shipment_rejects_unknown_sku(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=903)
+    created = await ShipmentRepository(db_session).create(
+        client_id=client.id,
+        recipient_name="Іван",
+        ttn_number="59000666",
+        status=ShipmentStatus.returning,
+        items=[ShipmentItemDraft(sku="SKU-2", name="Чай", quantity=3, unit_price=Decimal("80"))],
+    )
+
+    with pytest.raises(InvalidReturnDecision):
+        await receive_returned_shipment(
+            db_session,
+            shipment_id=created.id,
+            decisions=[ReturnDecision(sku="SKU-404", accepted_quantity=1, rejected_quantity=0)],
+            mutator=FakeMutator(),
+        )
+
+
+async def test_receive_returned_shipment_rejects_overstocking_decisions(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=904)
+    created = await ShipmentRepository(db_session).create(
+        client_id=client.id,
+        recipient_name="Іван",
+        ttn_number="59000555",
+        status=ShipmentStatus.returning,
+        items=[ShipmentItemDraft(sku="SKU-3", name="Кава", quantity=2, unit_price=Decimal("90"))],
+    )
+
+    with pytest.raises(InvalidReturnDecision):
+        await receive_returned_shipment(
+            db_session,
+            shipment_id=created.id,
+            decisions=[ReturnDecision(sku="SKU-3", accepted_quantity=2, rejected_quantity=1)],
+            mutator=FakeMutator(),
+        )

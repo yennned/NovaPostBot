@@ -53,7 +53,7 @@ class SenderProfileRepository(BaseRepository):
             sender_phone=sender_phone,
             org_type=org_type,
             edrpou=edrpou,
-            is_default=is_default,
+            is_default=False,
             np_sender_ref=np_sender_ref,
             np_contact_ref=np_contact_ref,
             np_sender_warehouse=np_sender_warehouse,

@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum, ForeignKey, String, text
+from sqlalchemy import Boolean, Enum, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 
 class SenderProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "sender_profiles"
+    __table_args__ = (
+        Index(
+            "uq_sender_profiles_client_default",
+            "client_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
 
     client_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False

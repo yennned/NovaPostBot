@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.orm import joinedload
 
 from app.db.models.enums import ShipmentStatus, StockMovementType
@@ -171,6 +171,34 @@ class ShipmentRepository(BaseRepository):
         *,
         start: datetime,
         end: datetime,
+        statuses: set[ShipmentStatus] | None = None,
+    ) -> list[Shipment]:
+        conditions = [
+            Shipment.client_id == client_id,
+            Shipment.status_changed_at >= start,
+            Shipment.status_changed_at < end,
+        ]
+        if statuses:
+            conditions.append(Shipment.status.in_(tuple(statuses)))
+        stmt = (
+            select(Shipment)
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+            )
+            .where(*conditions)
+            .order_by(Shipment.status_changed_at.desc())
+        )
+        rows = await self.session.scalars(stmt)
+        return list(rows.unique())
+
+    async def list_dispatched_between(
+        self,
+        client_id: uuid.UUID,
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[Shipment]:
         stmt = (
             select(Shipment)
@@ -181,10 +209,28 @@ class ShipmentRepository(BaseRepository):
             )
             .where(
                 Shipment.client_id == client_id,
-                Shipment.status_changed_at >= start,
-                Shipment.status_changed_at < end,
+                or_(
+                    and_(
+                        Shipment.dispatched_at.is_not(None),
+                        Shipment.dispatched_at >= start,
+                        Shipment.dispatched_at < end,
+                    ),
+                    and_(
+                        Shipment.dispatched_at.is_(None),
+                        Shipment.status.in_(
+                            (
+                                ShipmentStatus.dispatched,
+                                ShipmentStatus.in_transit,
+                                ShipmentStatus.arrived,
+                                ShipmentStatus.delivered,
+                            )
+                        ),
+                        Shipment.status_changed_at >= start,
+                        Shipment.status_changed_at < end,
+                    ),
+                ),
             )
-            .order_by(Shipment.status_changed_at.desc())
+            .order_by(Shipment.dispatched_at.desc())
         )
         rows = await self.session.scalars(stmt)
         return list(rows.unique())

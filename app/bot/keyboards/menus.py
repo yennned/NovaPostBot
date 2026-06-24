@@ -36,7 +36,6 @@ def build_role_menu(role: UserRole) -> ReplyKeyboardMarkup:
             ["📦 Склад", "👥 Клієнти"],
             ["💬 Підтримка", "📊 Звіти"],
             ["👔 Персонал", "📈 Аналітика"],
-            ["🔴 Полная остановка бота"],
         ]
 
     keyboard = [[KeyboardButton(text=text) for text in row] for row in rows]

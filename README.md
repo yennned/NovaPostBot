@@ -17,7 +17,7 @@
 | — | [COMMERCIAL-PROPOSAL](docs/COMMERCIAL-PROPOSAL.md) | **Для заказчика**: коммерческое предложение / функциональное описание, sign-off |
 | 01 | [overview](docs/01-overview.md) | Контекст, цель, ключевые решения, объёмы, хостинг |
 | 02 | [architecture](docs/02-architecture.md) | Дерево `app/`, гибрид Postgres+Sheets, модель данных |
-| 03 | [roles-permissions](docs/03-roles-permissions.md) | RBAC, per-flag права, dev god-mode, kill-switch |
+| 03 | [roles-permissions](docs/03-roles-permissions.md) | RBAC, per-flag права, dev god-mode |
 | 04 | [warehouse-sheets](docs/04-warehouse-sheets.md) | Склад/приёмка: две книги, Apps Script, синк |
 | 05 | [flows-client](docs/05-flows-client.md) | Меню и флоу клиента (вкл. создание ТТН) |
 | 06 | [flows-manager](docs/06-flows-manager.md) | Меню и флоу менеджера |
@@ -42,8 +42,8 @@
 ## Роли
 
 `client → manager → owner` (строго сверху вниз) + **dev god-mode** по allowlist
-(`DEV_TELEGRAM_IDS`): `/as <role>`, impersonation, kill-switch с правилом двух
-человек. Гранулярные права менеджера — per-flag в `users.permissions`.
+(`DEV_TELEGRAM_IDS`): `/as <role>`, impersonation. Гранулярные права менеджера —
+per-flag в `users.permissions`.
 Авторизация — только телефон (`request_contact`).
 
 ## Стек

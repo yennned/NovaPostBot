@@ -12,6 +12,10 @@ ROLE_LABELS = {
 }
 
 
+def _display_name(user: User) -> str:
+    return user.full_name or "користувачу"
+
+
 def ask_contact_text() -> str:
     return (
         "Щоб увійти до кабінету, надішліть свій номер телефону кнопкою нижче. "
@@ -25,14 +29,14 @@ def contact_mismatch_text() -> str:
 
 def pending_text(user: User) -> str:
     return (
-        f"{user.full_name}, ваш запит уже створено. "
+        f"{_display_name(user)}, ваш запит уже створено. "
         "Статус: очікує підтвердження менеджером або власником."
     )
 
 
 def registered_pending_text(user: User) -> str:
     return (
-        f"Дякуємо, {user.full_name}. Заявку створено, щойно її підтвердять — "
+        f"Дякуємо, {_display_name(user)}. Заявку створено, щойно її підтвердять — "
         "доступ до кабінету відкриється."
     )
 
@@ -42,14 +46,13 @@ def blocked_text() -> str:
 
 
 def welcome_text(user: User, role: UserRole) -> str:
-    return f"Вітаю, {user.full_name}. Відкриваю меню {ROLE_LABELS[role]}."
+    return f"Вітаю, {_display_name(user)}. Відкриваю меню {ROLE_LABELS[role]}."
 
 
 def dev_help_text() -> str:
     return (
         "Ви в dev god-mode. Для перегляду конкретного сценарію скористайтесь "
-        "`/as client`, `/as manager`, `/as owner`, `/as_user <id|телефон>`, "
-        "`/as off`, `/kill_switch`, `/kill_switch confirm`, `/kill_switch cancel`."
+        "`/as client`, `/as manager`, `/as owner`, `/as_user <id|телефон>`, `/as off`."
     )
 
 

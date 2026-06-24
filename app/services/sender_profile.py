@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings, get_settings
-from app.db.models.enums import OrgType, UserRole
+from app.db.models.enums import OrgType, UserRole, UserStatus
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, SenderProfileRepository
@@ -100,7 +100,13 @@ def _require_can_manage_profiles(
     if permissions.is_dev(actor.telegram_id, settings):
         return
     if actor.id == client_id:
+        if actor.role is not UserRole.client:
+            raise PermissionDenied("нет прав управлять ФОП этого клиента")
+        if actor.status is not UserStatus.active:
+            raise PermissionDenied("налаштування ФОП доступні після підтвердження")
         return
+    if actor.status is not UserStatus.active:
+        raise PermissionDenied("учётная запись неактивна")
     if not permissions.role_at_least(actor.role, UserRole.manager):
         raise PermissionDenied("нет прав управлять ФОП этого клиента")
 

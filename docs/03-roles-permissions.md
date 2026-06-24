@@ -51,20 +51,18 @@ Enum (строковые значения, не менять после перв
 ## Dev god-mode
 
 Отдельный механизм поверх ролей. **`DEV_TELEGRAM_IDS`** в `.env` — allowlist
-(**ровно 2 человека**, two-man rule для kill-switch). Для этих ID:
+dev-аккаунтов. Для этих ID:
 
 - полный просмотр и правка данных/операций на всех уровнях;
 - команда **`/as client|manager|owner`** — рендер меню и флоу любой роли на
   своём аккаунте (предпросмотр), без отдельных Telegram-аккаунтов;
 - **impersonation** (`/as_user <id|телефон>`) — «смотреть как конкретный
   пользователь» (его данные/экраны);
-- **kill-switch** — 🔴 полная остановка бота с правилом двух (детали ниже);
 - все dev-действия пишутся в `audit_logs` (action `dev_*`).
 
 **Реализация:** `permissions.py` проверяет dev-allowlist **первым**;
-`handlers/dev.py` держит `/as`, `/as_user`, `/as off` и kill-switch; middleware
+`handlers/dev.py` держит `/as`, `/as_user`, `/as off`; middleware
 прокидывает «эффективную роль» и «эффективного пользователя» из dev-контекста
 (хранится в FSM/Redis).
 
-Подробные сценарии dev (включая kill-switch с окнами 1ч/3ч) —
-[07-flows-owner-dev.md](07-flows-owner-dev.md).
+Подробные сценарии dev — [07-flows-owner-dev.md](07-flows-owner-dev.md).

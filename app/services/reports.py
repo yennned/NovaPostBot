@@ -27,7 +27,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import ReportsRepository, UserRepository
 from app.services.exceptions import PermissionDenied
-from app.services.stats import DISPATCHED_STATUSES, LOSS_STATUSES, RETURN_STATUSES
+from app.services.stats import LOSS_STATUSES, RETURN_STATUSES
 
 PERIODS = ("today", "week", "month")
 
@@ -136,29 +136,39 @@ async def period_report(
     _require_reports(actor, settings)
     cfg = settings or get_settings()
     start, end = _bounds(period, cfg)
-    shipments = await ReportsRepository(session).shipments_status_changed(start=start, end=end)
+    repo = ReportsRepository(session)
+    dispatched = await repo.shipments_dispatched(start=start, end=end)
+    returns_and_losses = await repo.shipments_status_changed(
+        start=start,
+        end=end,
+        statuses=RETURN_STATUSES | LOSS_STATUSES,
+    )
 
     acc: dict[uuid.UUID, dict] = {}
-    for shipment in shipments:
-        if shipment.status in DISPATCHED_STATUSES:
-            bucket = "shipped"
-        elif shipment.status in RETURN_STATUSES:
-            bucket = "returns"
-        elif shipment.status in LOSS_STATUSES:
-            bucket = "losses"
-        else:
-            continue
-        units = sum(item.quantity for item in shipment.items)
-        rec = acc.setdefault(
-            shipment.client_id,
-            {
-                "shipped": 0,
-                "returns": 0,
-                "losses": 0,
-                "name": (shipment.client.full_name if shipment.client else None) or "—",
-            },
-        )
-        rec[bucket] += units
+    event_batches = [
+        (dispatched, "shipped"),
+        (
+            [shipment for shipment in returns_and_losses if shipment.status in RETURN_STATUSES],
+            "returns",
+        ),
+        (
+            [shipment for shipment in returns_and_losses if shipment.status in LOSS_STATUSES],
+            "losses",
+        ),
+    ]
+    for shipments_batch, bucket in event_batches:
+        for shipment in shipments_batch:
+            units = sum(item.quantity for item in shipment.items)
+            rec = acc.setdefault(
+                shipment.client_id,
+                {
+                    "shipped": 0,
+                    "returns": 0,
+                    "losses": 0,
+                    "name": (shipment.client.full_name if shipment.client else None) or "—",
+                },
+            )
+            rec[bucket] += units
 
     clients = [
         ClientBreakdown(

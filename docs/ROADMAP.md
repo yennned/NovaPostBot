@@ -68,8 +68,8 @@
 - **Фаза 1 — Слой данных (Postgres) + каркас бота, авторизация, роли, dev
   god-mode.** `app/db/` (модели + репозитории), `app/sheets/` (только склад),
   RBAC (3 роли + per-flag), middleware, `/start` (телефон), bootstrap
-  владельцев, рольовые меню (uk), dev-allowlist + `/as` + impersonation +
-  kill-switch, unit-тесты.
+  владельцев, рольовые меню (uk), dev-allowlist + `/as` + impersonation,
+  unit-тесты.
 
 - **Фаза 2 — Регистрация/подтверждение + управление клиентами.** Надёжное
   уведомление владельцу/менеджеру; рабочее подтверждение (статус меняется, кнопки
@@ -131,8 +131,8 @@ CONTRIBUTING).
 - Доменный слой (alex, Трек A): `db/models`, `db/repositories`, RBAC
   `bot/permissions`, bootstrap владельцев, Alembic.
 - Bot/UI (step, Трек B): `dispatcher`/`middlewares`/`states`/`filters`,
-  `handlers/start` (`/start`→контакт→гейтинг), `handlers/dev` (`/as`, impersonation,
-  kill-switch), `keyboards/`+`texts/` (uk), `main.py`.
+  `handlers/start` (`/start`→контакт→гейтинг), `handlers/dev` (`/as`,
+  impersonation), `keyboards/`+`texts/` (uk), `main.py`.
 
 ### Фаза 2 — Регистрация/подтверждение + клиенты (✅ alex, в `main`)
 - Доменный слой: `repositories/user` (`list_by_status`/`count_by_status`),
@@ -229,9 +229,9 @@ CONTRIBUTING).
   «Склад» и «Приймання» (лист на клиента) с Apps Script.
 - **Сценарии в Telegram:** новый клиент `/start` → уведомление → подтверждение
   меняет статус и убирает кнопки → блокировка закрывает доступ; dev `/as manager`;
-  kill-switch требует второго dev; статистика today/week/month + день; создание
-  ТТН → резерв; отмена возвращает; «відправлено» по трекингу → списание в «Склад»;
-  возврат → «Повернення замовлення».
+  статистика today/week/month + день; создание ТТН → резерв; отмена возвращает;
+  «відправлено» по трекингу → списание в «Склад»; возврат → «Повернення
+  замовлення».
 - **Тесты:** `pytest -q` (permissions, validators, stats-окна, inventory ledger,
   поля ТТН → НП). CI — гейт для merge.
 - **Git-гигиена:** `git ls-files | grep -iE '\.env$|\.png|\.jpe?g|venv|\.db'` →

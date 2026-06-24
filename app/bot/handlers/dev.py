@@ -1,4 +1,4 @@
-"""Dev-only команды: /as, /as_user, kill-switch."""
+"""Dev-only команды: /as, /as_user."""
 
 from __future__ import annotations
 
@@ -71,33 +71,3 @@ async def as_user(message: Message, dev_service: DevService, services: BotServic
     await message.answer(
         f"Увімкнено impersonation для `{target.full_name}` ({target.telegram_id})."
     )
-
-
-@router.message(Command("kill_switch"))
-async def kill_switch(message: Message, dev_service: DevService) -> None:
-    if message.from_user is None:
-        return
-
-    parts = (message.text or "").split(maxsplit=1)
-    action = parts[1].strip().lower() if len(parts) > 1 else ""
-
-    try:
-        if action == "confirm":
-            stop = await dev_service.confirm_kill_switch(message.from_user.id)
-            await message.answer(
-                "Kill-switch активовано. "
-                f"Скасувати можна до {stop.cancel_until.isoformat(timespec='minutes')}."
-            )
-            return
-        if action == "cancel":
-            await dev_service.cancel_kill_switch(message.from_user.id)
-            await message.answer("Kill-switch скасовано.")
-            return
-
-        request = await dev_service.request_kill_switch(message.from_user.id)
-        await message.answer(
-            "Запит на повну зупинку створено. "
-            f"Другий dev має підтвердити до {request.expires_at.isoformat(timespec='minutes')}."
-        )
-    except ValueError as exc:
-        await message.answer(str(exc))

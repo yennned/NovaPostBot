@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import ShipmentStatus, StockMovementType
+from app.db.models.shipment import Shipment
 from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
-from app.services.exceptions import ShipmentActionForbidden, ShipmentNotFound
+from app.services.exceptions import InvalidReturnDecision, ShipmentActionForbidden, ShipmentNotFound
 from app.services.inventory import stock_sheet_key
 from app.sheets import StockDelta, StockSource, build_stock_source
 
@@ -20,6 +21,43 @@ class ReturnDecision:
     accepted_quantity: int
     rejected_quantity: int = 0
     comment: str | None = None
+
+
+def _normalize_return_decisions(
+    shipment: Shipment,
+    decisions: list[ReturnDecision] | None,
+) -> list[ReturnDecision]:
+    if decisions is None:
+        return [
+            ReturnDecision(sku=item.sku, accepted_quantity=item.quantity) for item in shipment.items
+        ]
+
+    by_sku = {item.sku: item for item in shipment.items}
+    aggregated: dict[str, ReturnDecision] = {}
+    for decision in decisions:
+        if decision.sku not in by_sku:
+            raise InvalidReturnDecision(f"невідомий SKU у поверненні: {decision.sku}")
+        if decision.accepted_quantity < 0 or decision.rejected_quantity < 0:
+            raise InvalidReturnDecision(f"кількість не може бути відʼємною: {decision.sku}")
+        current = aggregated.get(decision.sku)
+        if current is None:
+            aggregated[decision.sku] = decision
+            continue
+        aggregated[decision.sku] = ReturnDecision(
+            sku=decision.sku,
+            accepted_quantity=current.accepted_quantity + decision.accepted_quantity,
+            rejected_quantity=current.rejected_quantity + decision.rejected_quantity,
+            comment=decision.comment or current.comment,
+        )
+
+    normalized = list(aggregated.values())
+    for decision in normalized:
+        shipped_qty = by_sku[decision.sku].quantity
+        if decision.accepted_quantity + decision.rejected_quantity > shipped_qty:
+            raise InvalidReturnDecision(
+                f"повернення {decision.sku} перевищує кількість у ТТН: {shipped_qty}"
+            )
+    return normalized
 
 
 async def receive_returned_shipment(
@@ -40,9 +78,7 @@ async def receive_returned_shipment(
         return
 
     by_sku = {item.sku: item for item in shipment.items}
-    actual = decisions or [
-        ReturnDecision(sku=item.sku, accepted_quantity=item.quantity) for item in shipment.items
-    ]
+    actual = _normalize_return_decisions(shipment, decisions)
     deltas: list[StockDelta] = []
     for decision in actual:
         item = by_sku.get(decision.sku)

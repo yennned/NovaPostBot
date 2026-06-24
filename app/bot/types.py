@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
 from app.db.models.enums import UserRole
 from app.db.models.user import User
@@ -13,22 +12,6 @@ from app.db.models.user import User
 class DevSession:
     role_override: UserRole | None = None
     impersonated_user_id: int | None = None
-
-
-@dataclass(slots=True)
-class KillSwitchRequest:
-    requested_by: int
-    requested_at: datetime
-    expires_at: datetime
-    confirmed_by: int | None = None
-
-
-@dataclass(slots=True)
-class KillSwitchStop:
-    requested_by: int
-    confirmed_by: int
-    stopped_at: datetime
-    cancel_until: datetime
 
 
 @dataclass(slots=True)
