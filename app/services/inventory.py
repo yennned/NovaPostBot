@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import UserRole, UserStatus
@@ -12,6 +14,8 @@ from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services.exceptions import PermissionDenied
 from app.sheets import StockRow, StockSource, build_stock_source
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,3 +125,35 @@ async def list_inventory(
         offset=offset,
         categories=categories,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class StockTotals:
+    """Краткая сводка по листу склада клиента: позиции и единицы."""
+
+    positions: int
+    units: int
+
+
+async def stock_totals(client: User, *, reader: StockSource | None = None) -> StockTotals | None:
+    """Свод по листу склада клиента (позиции/единицы). `None` — лист недоступен.
+
+    Чтение Sheets синхронно (gspread) → уводим в поток, чтобы не блокировать луп.
+    Ошибку одного клиента (нет листа, блип НП/Sheets) глотаем — сводка по
+    остальным не должна падать целиком.
+    """
+    source = reader or build_stock_source()
+    try:
+        rows = await asyncio.to_thread(source.read_stock, stock_sheet_key(client))
+    except Exception:
+        # Устойчивость сводки важнее: лист одного клиента может отсутствовать или
+        # Sheets/НП блипнуть — это не должно валить сводку по остальным.
+        logger.warning("inventory.stock_totals_failed", client_id=str(client.id), exc_info=True)
+        return None
+    return StockTotals(positions=len(rows), units=sum(row.quantity for row in rows))
+
+
+async def stock_summary(clients: list[User]) -> list[tuple[User, StockTotals | None]]:
+    """Свод склада по клиентам — лист на клиента (для экрана менеджера «📦 Склад»)."""
+    source = build_stock_source()
+    return [(client, await stock_totals(client, reader=source)) for client in clients]

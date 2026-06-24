@@ -8,6 +8,7 @@ from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.manager_shipments import (
@@ -26,21 +27,80 @@ from app.bot.texts.manager_shipments import (
     search_prompt_text,
 )
 from app.bot.types import EffectiveContext
-from app.db.models.enums import ShipmentStatus, UserRole
+from app.config import get_settings
+from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
+from app.db.models.user import User
 from app.novaposhta.client import NovaPoshtaClient
-from app.services import manager_shipments
+from app.services import inventory, manager_shipments
 from app.services.exceptions import ClientServiceError
 from app.services.returns import ReturnDecision
 
 router = Router(name="manager_shipments")
 
 SHIPMENTS_BUTTON = "📬 Відправлення"
+WAREHOUSE_BUTTON = "📦 Склад"
 _STALE = "Кнопка застаріла, відкрийте розділ заново."
 
 
 def _is_staff(context: EffectiveContext) -> bool:
     role = context.effective_role
     return role in {UserRole.manager, UserRole.owner} or context.is_dev
+
+
+def _book_link(book_id: str, title: str) -> str:
+    return f'🔗 <a href="https://docs.google.com/spreadsheets/d/{book_id}">{title}</a>'
+
+
+@router.message(F.text == WAREHOUSE_BUTTON)
+async def open_warehouse(
+    message: Message,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    """📦 Склад менеджера: посилання на книги + зведення залишків по клієнтах."""
+    if not _is_staff(effective_context):
+        raise SkipHandler()
+    settings = get_settings()
+    lines = ["📦 <b>Склад</b>"]
+
+    links = [
+        _book_link(book_id, title)
+        for book_id, title in (
+            (settings.sheets_stock_book_id, "Книга «Склад»"),
+            (settings.sheets_intake_book_id, "Книга «Приймання»"),
+        )
+        if book_id
+    ]
+    if links:
+        lines += ["", *links]
+
+    clients = (
+        (
+            await db_session.execute(
+                select(User)
+                .where(User.role == UserRole.client, User.status == UserStatus.active)
+                .order_by(User.full_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    lines += ["", "<b>Залишки по клієнтах:</b>"]
+    if not clients:
+        lines.append("• активних клієнтів немає")
+    else:
+        total_positions = total_units = 0
+        for client, totals in await inventory.stock_summary(list(clients)):
+            label = client.full_name or str(client.telegram_id)
+            if totals is None:
+                lines.append(f"• {label} — лист недоступний")
+                continue
+            total_positions += totals.positions
+            total_units += totals.units
+            lines.append(f"• {label} — {totals.positions} поз. / {totals.units} од.")
+        lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
+
+    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 def _default_return_decisions(card) -> dict[str, bool]:

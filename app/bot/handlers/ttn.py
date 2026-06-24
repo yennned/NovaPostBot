@@ -12,7 +12,6 @@ FSM-data (лимит 64 байта). FSM-состояние — `MemoryStorage` 
 
 from __future__ import annotations
 
-import re
 import uuid
 from decimal import Decimal, InvalidOperation
 
@@ -64,6 +63,7 @@ from app.services.exceptions import (
 )
 from app.services.inventory import InventoryItem, list_inventory
 from app.services.shipment import create_shipment, resolve_default_sender_id
+from app.utils.phone import normalize_phone as _normalize_phone
 
 router = Router(name="create_ttn")
 logger = structlog.get_logger(__name__)
@@ -75,7 +75,6 @@ _SUBMITTING: set[int] = set()
 _STALE = "Кнопка застаріла, почніть створення ТТН заново."
 _MAX_WEIGHT = Decimal("1000")
 _RECIPIENT_KINDS = {"p": "person", "o": "organization"}
-_NON_DIGITS = re.compile(r"\D")
 
 
 def _effective_client(context: EffectiveContext):
@@ -85,16 +84,6 @@ def _effective_client(context: EffectiveContext):
 def _profile_uuid(data: dict) -> uuid.UUID | None:
     raw = data.get("sender_profile_id")
     return uuid.UUID(raw) if raw else None
-
-
-def _normalize_phone(raw: str) -> str | None:
-    """0XXXXXXXXX / 380XXXXXXXXX / +380XXXXXXXXX → 380XXXXXXXXX (формат НП)."""
-    digits = _NON_DIGITS.sub("", raw)
-    if len(digits) == 10 and digits.startswith("0"):
-        digits = "38" + digits
-    if len(digits) == 12 and digits.startswith("380"):
-        return digits
-    return None
 
 
 def _valid_edrpou(raw: str) -> bool:
