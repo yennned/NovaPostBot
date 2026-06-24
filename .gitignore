@@ -49,5 +49,8 @@ backups/
 # --- Claude Code (локальные настройки) ---
 .claude/settings.local.json
 
+# --- Локальный compose-override (персистентный dev-стек, не для прода) ---
+docker-compose.override.yml
+
 # --- Дубликаты файл-синка (iCloud/Dropbox: "dispatcher 2.py") ---
 * [0-9].*
