@@ -21,6 +21,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S"]
 "migrations/**" = ["E501"]
+# Утилиты-провижининга: длинные field-mask строки Google Sheets API не дробятся.
+"scripts/**" = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

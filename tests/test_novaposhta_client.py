@@ -148,6 +148,19 @@ async def test_4xx_status_is_error_and_not_retried():
     assert calls["n"] == 1
 
 
+async def test_429_rate_limit_is_transient_and_retried():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, text="slow down")
+
+    client = _client(handler, np_max_retries=3)
+    with pytest.raises(NovaPoshtaUnavailable):  # 429 — временный сбой
+        await client.call(api_key="K", model="Address", method="getCities")
+    assert calls["n"] == 3  # ретраим
+
+
 async def test_non_json_body_raises_error():
     client = _client(lambda r: httpx.Response(200, text="<html>oops</html>"))
     with pytest.raises(NovaPoshtaError):

@@ -15,6 +15,52 @@
 
 ---
 
+## 2026-06-24 · feat/andrey-warehouse-phone-resilience · 0206efb
+- **Сделано:** правки по multi-agent code-review (xhigh) поверх 349da9a:
+  - **HTML-инъекция/крэш** в новом экране 📦 Склад: `client.full_name` (из Telegram/
+    ввода клиента) шёл в сообщение `parse_mode=HTML` без экранирования — `<`/`&`
+    в имени роняли весь экран ошибкой 400. → `html.escape` для имени и book_id;
+    футер «Разом» не печатает 0/0, когда все листы недоступны.
+  - **cache stale-fallback**: возвращаем только совпадения (было `filtered or items`
+    → при отсутствии совпадений показывал ВСЕ відділення города как «найденные»).
+  - **novaposhta client**: 408/429 → `NovaPoshtaUnavailable` (ретраятся + идут в
+    stale-fallback); раньше падали как постоянная ошибка без ретраев.
+  - **inventory.stock_summary**: параметр `reader` (тестируемость) + коммент про
+    последовательное чтение (gspread-сессия не потокобезопасна, клиентов немного).
+  - тесты: stock_summary через reader, no-match fallback → пусто, 429 → retried.
+  - E2E-кролер: 0 мёртвых/ошибочных кнопок по всем ролям (все кнопки кликабельны).
+- **Дальше:** дождаться зелёного CI на PR #45, смержить.
+- **Открытые вопросы (из ревью, отложено):** (1) канонизация телефона при регистрации
+  (`register_contact` хранит сырой Telegram-формат `+380…`, само-правка — `380…`;
+  риск обхода `unique` при разных написаниях одного номера) — отдельной задачей,
+  ломает `test_start_service`; (2) кэш «полного списка» города ограничен `limit=50`
+  в `get_warehouses` → для крупных городов stale-fallback видит лишь первые 50
+  (best-effort, теперь честно отдаёт пусто вне набора).
+
+## 2026-06-24 · feat/andrey-warehouse-phone-resilience · 349da9a
+- **Сделано:** три точечные правки UX/устойчивости, найденные на E2E-прогоне бота:
+  - **НП-довідник, serve-stale-on-error** (`app/novaposhta/cache.py`): при
+    транзиентном `NovaPoshtaUnavailable` на поиске відділення кэш отдаёт ранее
+    закэшированный полный список города и фильтрует локально — пользователь не
+    застревает в середине создания ТТН. Нет полного списка в кэше → ошибка
+    пробрасывается как прежде.
+  - **📦 Склад (manager/owner)** был мёртвой кнопкой (нет хендлера на текст) —
+    добавлен `open_warehouse` в `handlers/manager_shipments`: ссылки на книги
+    «Склад»/«Приймання» + зведення залишків по клиентам. Новый сервис
+    `inventory.stock_totals` / `stock_summary` (чтение Sheets через `asyncio.to_thread`,
+    сбой листа одного клиента не валит сводку).
+  - **Валидация телефона** в ⚙️ Налаштування: `normalize_phone` вынесен в
+    `app/utils/phone` (общий с шагом получателя ТТН), `client_cabinet` отбивает
+    мусор (`Тест ФОП → ❌ Невірний номер…`), значение не сохраняется.
+  - Тесты: `tests/test_phone`, `tests/test_inventory_summary`, +кейсы stale-fallback/
+    reraise в `tests/test_novaposhta_cache`. `ruff check` + `ruff format --check` чистые;
+    локальный прогон — на изолированной БД (см. ниже).
+- **Дальше:** push ветки, PR в `main`, дождаться зелёного CI, смержить.
+- **Открытые вопросы:** локальный `pytest` без override `DATABASE_URL` стирает dev-БД
+  (conftest `drop_all` по `.env`); прогонять на отдельной `novapostbot_test`. Два
+  пред-существующих падения reports/notifications — окружение (.env owner-IDs +
+  date-window), не код.
+
 ## 2026-06-23 · feat/step-phase7-stock-source · phase7-stock-source
 - **Сделано:** полностью закрыта Фаза 7 — seam под будущий CRM/WMS для склада:
   - введён контракт `app/sheets/source.py`: `StockSource`, `StockRow`, `StockDelta`;

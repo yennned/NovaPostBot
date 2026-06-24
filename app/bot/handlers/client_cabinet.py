@@ -54,6 +54,7 @@ from app.services.inventory import list_inventory
 from app.services.shipment import cancel_shipment
 from app.services.shipments import get_shipment_card, list_shipments
 from app.services.stats import get_client_stats
+from app.utils.phone import normalize_phone
 
 router = Router(name="client_cabinet")
 
@@ -828,6 +829,15 @@ async def receive_settings_profile(
     except ValueError:
         await message.answer("Порожнє значення не можна зберегти.")
         return
+    if field == "phone":
+        normalized = normalize_phone(value or "")
+        if normalized is None:
+            # Лишаємось у стані очікування — користувач введе номер ще раз.
+            await message.answer(
+                "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+            )
+            return
+        value = normalized
     client = _effective_client(effective_context)
     if client is None:
         await state.set_state(None)

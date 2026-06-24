@@ -19,6 +19,7 @@ import structlog
 from redis.exceptions import RedisError
 
 from app.config import Settings, get_settings
+from app.novaposhta.exceptions import NovaPoshtaUnavailable
 from app.novaposhta.schemas import City, Warehouse
 
 if TYPE_CHECKING:
@@ -65,9 +66,42 @@ class NPReferenceCache:
         cached = await self._read(key)
         if cached is not None:
             return [Warehouse(**row) for row in cached]
-        warehouses = await loader()
+        try:
+            warehouses = await loader()
+        except NovaPoshtaUnavailable:
+            # Транзиентный сбой довідника НП на шаге поиска: вместо «недоступно»
+            # отдаём ранее закэшированный полный список города и фильтруем локально
+            # (его кладёт первый показ відділень после выбора города). Лучше
+            # частичный результат из кэша, чем тупик в середине создания ТТН.
+            fallback = await self._warehouses_stale_fallback(city_ref, query)
+            if fallback is not None:
+                logger.warning("np_cache.warehouses_stale_fallback", city_ref=city_ref, query=query)
+                return fallback
+            raise
         await self._store(key, warehouses, self._warehouses_ttl)
         return warehouses
+
+    async def _warehouses_stale_fallback(
+        self, city_ref: str, query: str | None
+    ) -> list[Warehouse] | None:
+        """Закэшированный полный список відділень города, отфильтрованный под `query`.
+
+        `None`, если полного списка в кэше нет (тогда зовущий пробросит ошибку).
+        """
+        if not query:
+            return None
+        full = await self._read(f"np:wh:{city_ref}:")
+        if not full:
+            return None
+        items = [Warehouse(**row) for row in full]
+        needle = _norm(query)
+        # Только совпадения (возможно пусто) — НЕ весь список города: иначе поиск
+        # «№5» во время сбоя НП показал бы все відділення как «найденные».
+        return [
+            w
+            for w in items
+            if needle in _norm(w.number or "") or needle in _norm(w.description or "")
+        ]
 
     async def _read(self, key: str) -> list[dict] | None:
         """Прочитать сырые строки из кэша. На miss **или недоступности Redis** —

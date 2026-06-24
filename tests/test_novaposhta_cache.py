@@ -6,6 +6,7 @@ import fakeredis.aioredis
 import pytest
 from app.config import Settings
 from app.novaposhta.cache import NPReferenceCache
+from app.novaposhta.exceptions import NovaPoshtaUnavailable
 from app.novaposhta.schemas import City, Warehouse
 from redis.exceptions import RedisError
 
@@ -176,3 +177,41 @@ async def test_cache_write_failure_is_swallowed():
     # set падает, но пользователь всё равно получает данные от loader (не падаем)
     assert await cache.cities("Київ", loader=loader) == [City(ref="c1", name="Київ")]
     assert calls["n"] == 1
+
+
+async def _failing_loader():
+    raise NovaPoshtaUnavailable("довідник тимчасово недоступний")
+
+
+async def test_warehouses_stale_fallback_filters_cached_full_list():
+    """НП лёг на поиске відділення → отдаём отфильтрованный кэш полного списка."""
+    cache = _cache()
+    full = [
+        Warehouse(ref="w1", number="1", description="Відділення №1: вул. Центральна, 104"),
+        Warehouse(ref="w2", number="2", description="Відділення №2: вул. Інша, 5"),
+    ]
+    loader_full, _ = _counting_loader(full)
+    await cache.warehouses("kyiv", loader=loader_full)  # query=None → кладём полный список
+
+    result = await cache.warehouses("kyiv", loader=_failing_loader, query="1")
+
+    assert [w.ref for w in result] == ["w1"]  # отфильтровано по номеру «1»
+
+
+async def test_warehouses_reraises_when_no_cached_full_list():
+    """Полного списка в кэше нет → транзиентную ошибку пробрасываем как есть."""
+    cache = _cache()
+    with pytest.raises(NovaPoshtaUnavailable):
+        await cache.warehouses("kyiv", loader=_failing_loader, query="1")
+
+
+async def test_warehouses_stale_fallback_returns_empty_on_no_match():
+    """Нет совпадений в кэше → пустой результат, а НЕ весь список города."""
+    cache = _cache()
+    full = [Warehouse(ref="w2", number="2", description="Відділення №2: вул. Інша, 5")]
+    loader_full, _ = _counting_loader(full)
+    await cache.warehouses("kyiv", loader=loader_full)
+
+    result = await cache.warehouses("kyiv", loader=_failing_loader, query="777")
+
+    assert result == []  # не подсовываем неподходящие відділення
