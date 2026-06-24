@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from app.bot.permissions import is_dev as permissions_is_dev
-from app.bot.types import DevSession, EffectiveContext, KillSwitchRequest, KillSwitchStop
+from app.bot.types import DevSession, EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, UserRepository
@@ -32,8 +30,6 @@ class AuditLog(Protocol):
 @dataclass(slots=True)
 class InMemoryDevState:
     sessions: dict[int, DevSession] = field(default_factory=dict)
-    kill_switch_request: KillSwitchRequest | None = None
-    kill_switch_stop: KillSwitchStop | None = None
 
 
 @dataclass(slots=True)
@@ -127,7 +123,7 @@ class DevService:
         self.services = services
 
     def is_dev(self, telegram_id: int) -> bool:
-        return permissions_is_dev(telegram_id)
+        return telegram_id in self.services.dev_ids
 
     def get_session(self, telegram_id: int) -> DevSession:
         return self.services.dev_state.sessions.setdefault(telegram_id, DevSession())
@@ -164,95 +160,6 @@ class DevService:
             await self._actor_user(telegram_id),
             {},
         )
-
-    async def request_kill_switch(
-        self,
-        telegram_id: int,
-        *,
-        now: datetime | None = None,
-    ) -> KillSwitchRequest:
-        now = now or datetime.now(UTC)
-        self.expire_requests(now=now)
-        if self.services.dev_state.kill_switch_stop is not None:
-            raise ValueError("kill-switch уже активирован")
-
-        request = self.services.dev_state.kill_switch_request
-        if request is not None and request.requested_by != telegram_id:
-            return request
-        if request is not None and request.requested_by == telegram_id:
-            raise ValueError("запрос уже создан этим dev")
-
-        request = KillSwitchRequest(
-            requested_by=telegram_id,
-            requested_at=now,
-            expires_at=now + timedelta(hours=1),
-        )
-        self.services.dev_state.kill_switch_request = request
-        await self.services.audit_log.record(
-            "dev_killswitch_request",
-            await self._actor_user(telegram_id),
-            {"expires_at": request.expires_at.isoformat()},
-        )
-        return request
-
-    async def confirm_kill_switch(
-        self,
-        telegram_id: int,
-        *,
-        now: datetime | None = None,
-    ) -> KillSwitchStop:
-        now = now or datetime.now(UTC)
-        self.expire_requests(now=now)
-        request = self.services.dev_state.kill_switch_request
-        if request is None:
-            raise ValueError("активного запроса нет")
-        if request.requested_by == telegram_id:
-            raise ValueError("инициатор не может подтвердить сам")
-
-        stop = KillSwitchStop(
-            requested_by=request.requested_by,
-            confirmed_by=telegram_id,
-            stopped_at=now,
-            cancel_until=now + timedelta(hours=3),
-        )
-        self.services.dev_state.kill_switch_request = None
-        self.services.dev_state.kill_switch_stop = stop
-        await self.services.audit_log.record(
-            "dev_killswitch_stop",
-            await self._actor_user(telegram_id),
-            {
-                "requested_by": stop.requested_by,
-                "cancel_until": stop.cancel_until.isoformat(),
-            },
-        )
-        return stop
-
-    async def cancel_kill_switch(
-        self,
-        telegram_id: int,
-        *,
-        now: datetime | None = None,
-    ) -> KillSwitchStop:
-        now = now or datetime.now(UTC)
-        stop = self.services.dev_state.kill_switch_stop
-        if stop is None:
-            raise ValueError("kill-switch не активирован")
-        if now > stop.cancel_until:
-            raise ValueError("окно отмены истекло")
-
-        self.services.dev_state.kill_switch_stop = None
-        await self.services.audit_log.record(
-            "dev_killswitch_cancel",
-            await self._actor_user(telegram_id),
-            {"stopped_at": stop.stopped_at.isoformat()},
-        )
-        return stop
-
-    def expire_requests(self, *, now: datetime | None = None) -> None:
-        now = now or datetime.now(UTC)
-        request = self.services.dev_state.kill_switch_request
-        if request is not None and now > request.expires_at:
-            self.services.dev_state.kill_switch_request = None
 
 
 def build_effective_context(

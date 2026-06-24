@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 
-import pytest
 from app.bot.services import (
     BotServices,
     DevService,
@@ -90,34 +88,12 @@ def make_dev_service() -> DevService:
     return DevService(services)
 
 
-@pytest.mark.asyncio
-async def test_kill_switch_requires_second_dev_and_can_be_cancelled():
+def test_is_dev_uses_injected_allowlist():
     service = make_dev_service()
-    now = datetime(2026, 6, 17, 8, 0, tzinfo=UTC)
 
-    request = await service.request_kill_switch(1, now=now)
-    assert request.requested_by == 1
-
-    with pytest.raises(ValueError):
-        await service.confirm_kill_switch(1, now=now + timedelta(minutes=5))
-
-    stop = await service.confirm_kill_switch(2, now=now + timedelta(minutes=5))
-    assert stop.confirmed_by == 2
-
-    cancelled = await service.cancel_kill_switch(1, now=now + timedelta(minutes=30))
-    assert cancelled.requested_by == 1
-
-
-@pytest.mark.asyncio
-async def test_kill_switch_request_expires_after_one_hour():
-    service = make_dev_service()
-    now = datetime(2026, 6, 17, 8, 0, tzinfo=UTC)
-
-    await service.request_kill_switch(1, now=now)
-    service.expire_requests(now=now + timedelta(hours=1, minutes=1))
-
-    with pytest.raises(ValueError):
-        await service.confirm_kill_switch(2, now=now + timedelta(hours=1, minutes=2))
+    assert service.is_dev(1) is True
+    assert service.is_dev(2) is True
+    assert service.is_dev(999) is False
 
 
 def test_effective_context_prefers_dev_override_and_impersonation():

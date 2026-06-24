@@ -12,7 +12,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import LowStockAlertRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
 from app.services import duty, notifications, tracking
-from app.services.inventory import InventoryItem, list_inventory
+from app.services.inventory import InventoryItem, get_inventory_snapshot
 from app.services.notifications import Notifier
 from app.sheets import StockSource
 
@@ -150,12 +150,12 @@ async def low_stock_job(
         )
         alerts = 0
         for client in clients:
-            page = await list_inventory(session, client=client, limit=500)
+            items = await get_inventory_snapshot(session, client=client)
             low = await _collect_low_stock_alerts(
                 session,
                 client=client,
                 threshold=current_settings.low_stock_threshold,
-                items=page.items,
+                items=items,
             )
             if not low:
                 continue

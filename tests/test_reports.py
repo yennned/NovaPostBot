@@ -69,6 +69,27 @@ async def test_period_report_aggregates_by_client(db_session: AsyncSession):
     assert report.clients[0].net == 0
 
 
+async def test_period_report_counts_dispatched_and_returned_same_shipment(db_session: AsyncSession):
+    owner = await _owner(db_session, telegram_id=2)
+    client = await _client(db_session, telegram_id=101)
+    now = datetime.now(TZ)
+    await _shipment(
+        db_session,
+        client_id=client.id,
+        status=ShipmentStatus.returned,
+        qty=4,
+        dispatched_at=now,
+        status_changed_at=now,
+    )
+
+    report = await reports.period_report(db_session, actor=owner, period="today")
+
+    assert (report.shipped, report.returns, report.losses) == (4, 4, 0)
+    assert report.net == 0
+    assert report.clients[0].shipped == 4
+    assert report.clients[0].returns == 4
+
+
 async def test_period_report_requires_view_permission(db_session: AsyncSession):
     revoked = await UserRepository(db_session).create(
         telegram_id=10,

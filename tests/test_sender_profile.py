@@ -23,10 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _PHONE = "+380501112233"  # телефон отправителя обязателен при создании профиля
 
 
-async def _user(session: AsyncSession, telegram_id: int, role=UserRole.client):
-    return await UserRepository(session).create(
-        telegram_id=telegram_id, role=role, status=UserStatus.active
-    )
+async def _user(
+    session: AsyncSession,
+    telegram_id: int,
+    role=UserRole.client,
+    status: UserStatus = UserStatus.active,
+):
+    return await UserRepository(session).create(telegram_id=telegram_id, role=role, status=status)
 
 
 def _np_client(routes: dict[tuple[str, str], object], **settings_over) -> NovaPoshtaClient:
@@ -120,6 +123,33 @@ async def test_foreign_client_denied(db_session: AsyncSession):
         await sp.create_profile(
             db_session,
             actor=other,
+            client_id=client.id,
+            name="ФОП",
+            np_api_key="k",
+            sender_phone=_PHONE,
+        )
+
+
+async def test_blocked_client_cannot_manage_own_profiles(db_session: AsyncSession):
+    client = await _user(db_session, 110, status=UserStatus.blocked)
+    with pytest.raises(PermissionDenied):
+        await sp.create_profile(
+            db_session,
+            actor=client,
+            client_id=client.id,
+            name="ФОП",
+            np_api_key="k",
+            sender_phone=_PHONE,
+        )
+
+
+async def test_blocked_manager_cannot_manage_client_profiles(db_session: AsyncSession):
+    client = await _user(db_session, 111)
+    manager = await _user(db_session, 112, role=UserRole.manager, status=UserStatus.blocked)
+    with pytest.raises(PermissionDenied):
+        await sp.create_profile(
+            db_session,
+            actor=manager,
             client_id=client.id,
             name="ФОП",
             np_api_key="k",

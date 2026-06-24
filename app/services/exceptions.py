@@ -80,6 +80,13 @@ class InsufficientStock(ClientServiceError):
         super().__init__(f"{sku}: запрошено {requested}, доступно {available}")
 
 
+class InvalidReturnDecision(ClientServiceError):
+    """Некорректное решение по возврату.
+
+    Неизвестный SKU, отрицательные количества или переприход.
+    """
+
+
 class TtnCreationFailed(ClientServiceError):
     """НП отклонила создание ТТН (или временно недоступна) — ничего не зарезервировано."""
 

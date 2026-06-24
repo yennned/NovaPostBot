@@ -19,12 +19,21 @@ from app.db.repositories.base import BaseRepository
 
 
 class ReportsRepository(BaseRepository):
-    async def shipments_status_changed(self, *, start: datetime, end: datetime) -> list[Shipment]:
+    async def shipments_status_changed(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        statuses: set | None = None,
+    ) -> list[Shipment]:
         """Все ТТН (по всем клиентам) с изменением статуса в окне — для сводок."""
+        conditions = [Shipment.status_changed_at >= start, Shipment.status_changed_at < end]
+        if statuses:
+            conditions.append(Shipment.status.in_(tuple(statuses)))
         stmt = (
             select(Shipment)
             .options(joinedload(Shipment.client), joinedload(Shipment.items))
-            .where(Shipment.status_changed_at >= start, Shipment.status_changed_at < end)
+            .where(*conditions)
             .order_by(Shipment.status_changed_at.desc())
         )
         rows = await self.session.scalars(stmt)
