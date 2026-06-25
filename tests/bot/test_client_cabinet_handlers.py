@@ -222,6 +222,7 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
         cb,
         SimpleNamespace(actor_user=client, effective_user=client),
         db_session,
+        FakeState(),
     )
 
     assert cb.message.edits
@@ -271,11 +272,13 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
         SimpleNamespace(actor_user=client, effective_user=client),
         db_session,
         object(),  # np_client (фейк — реальная отмена замокана)
+        FakeState(),
     )
 
+    # После #49 отмена возвращает в список группы (single-window), а не в карточку.
     assert cb.message.edits
-    assert "Скасовано" in cb.message.edits[0]["text"]
-    assert cb.acks[-1]["text"] == "Відправлення скасовано."
+    assert "Створені" in cb.message.edits[0]["text"]
+    assert cb.acks[-1]["text"] == "ТТН видалено."
 
 
 async def test_open_settings_renders_view(db_session: AsyncSession, monkeypatch):
@@ -316,6 +319,7 @@ async def test_cb_settings_toggle_updates_view(db_session: AsyncSession, monkeyp
         cb,
         SimpleNamespace(actor_user=client, effective_user=client),
         db_session,
+        FakeState(),
     )
 
     assert cb.message.edits
@@ -342,7 +346,9 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
         )
 
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_client_stats", fake_get_client_stats)
-    await cb_stats(cb, SimpleNamespace(actor_user=client, effective_user=client), db_session)
+    await cb_stats(
+        cb, SimpleNamespace(actor_user=client, effective_user=client), db_session, FakeState()
+    )
 
     assert cb.message.edits
     assert "Статистика" in cb.message.edits[0]["text"]
