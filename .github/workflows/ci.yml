@@ -11,6 +11,22 @@ jobs:
   lint-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: novapost
+          POSTGRES_PASSWORD: novapost
+          POSTGRES_DB: novapostbot_test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U novapost -d novapostbot_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
+      DATABASE_URL_DIRECT: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
+      FERNET_KEY: 8LriREApni0MjqknuIDohQH6rnNVIOknKJ6Kl4tuVQ4=
     steps:
       - uses: actions/checkout@v4
 
@@ -42,29 +58,4 @@ jobs:
         run: python -m compileall -q app tests scripts
 
       - name: Pytest
-        run: >
-          python -m pytest
-          tests/test_config.py
-          tests/test_crypto.py
-          tests/test_inventory_summary.py
-          tests/test_jobs.py
-          tests/test_novaposhta_cache.py
-          tests/test_novaposhta_client.py
-          tests/test_novaposhta_mapping.py
-          tests/test_novaposhta_methods.py
-          tests/test_permissions.py
-          tests/test_phone.py
-          tests/test_sla.py
-          tests/test_stock_source.py
-          tests/test_work_schedule.py
-          tests/bot/test_client_keyboards.py
-          tests/bot/test_clients_returns_ui.py
-          tests/bot/test_dev_service.py
-          tests/bot/test_errors_handler.py
-          tests/bot/test_manager_shipments_handlers.py
-          tests/bot/test_manager_shipments_ui.py
-          tests/bot/test_start_handlers.py
-          tests/bot/test_start_service.py
-          tests/bot/test_start_smoke.py
-          tests/bot/test_ttn_cart.py
-          -k "not test_entry_"
+        run: python -m pytest -q

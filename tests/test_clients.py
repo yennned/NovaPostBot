@@ -17,6 +17,7 @@ from app.services.exceptions import (
     TransitionForbidden,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -171,6 +172,40 @@ async def test_update_profile_requires_edit_flag(db_session: AsyncSession):
     with pytest.raises(PermissionDenied):
         await clients.update_client_profile(
             db_session, actor=actor, client_id=client.id, full_name="New"
+        )
+
+
+async def test_update_profile_sheets_error_is_swallowed(db_session: AsyncSession, monkeypatch):
+    """Сбой Sheets (не БД) best-effort: переименование клиента сохраняется."""
+    actor = await _manager(db_session)
+    client = await _client(db_session)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("gspread 503")
+
+    monkeypatch.setattr(clients, "sync_client_sheets", boom)
+
+    card = await clients.update_client_profile(
+        db_session, actor=actor, client_id=client.id, full_name="Нове Імʼя"
+    )
+    assert client.full_name == "Нове Імʼя"
+    assert card.full_name == "Нове Імʼя"
+
+
+async def test_update_profile_db_error_in_sync_propagates(db_session: AsyncSession, monkeypatch):
+    """Ошибку БД из синка НЕ глотаем — иначе сессия в rollback-required, а
+    последующий запрос/commit тихо потеряет уже сфлашенное переименование."""
+    actor = await _manager(db_session)
+    client = await _client(db_session)
+
+    async def boom(*args, **kwargs):
+        raise SQLAlchemyError("conn dropped")
+
+    monkeypatch.setattr(clients, "sync_client_sheets", boom)
+
+    with pytest.raises(SQLAlchemyError):
+        await clients.update_client_profile(
+            db_session, actor=actor, client_id=client.id, full_name="Нове Імʼя"
         )
 
 

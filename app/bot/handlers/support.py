@@ -16,7 +16,7 @@ import uuid
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -26,6 +26,7 @@ from app.bot.notify import BotNotifier
 from app.bot.screen import remember_screen
 from app.bot.states import SupportState
 from app.bot.texts import support as texts
+from app.bot.texts import welcome_text
 from app.bot.types import EffectiveContext
 from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
 from app.db.models.user import User
@@ -94,6 +95,23 @@ def _client_label(client: User) -> str:
     return f"{client.full_name or 'без імені'} ({client.phone or '—'})"
 
 
+async def _exit_chat_to_home(
+    message: Message, ctx: EffectiveContext, text: str, *, default_role: UserRole
+) -> None:
+    """Закрыть чат/ответ и вернуть на головне меню двумя сообщениями.
+
+    Во время чата висит ReplyKeyboardMarkup («Вийти з чату»/«Завершити
+    відповідь»). Inline-разметка home НЕ заменяет reply-клавиатуру, поэтому
+    сначала шлём ReplyKeyboardRemove (гасит залипшую кнопку), затем отдельным
+    сообщением — inline-home.
+    """
+    role = ctx.effective_role or default_role
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
+    user = ctx.effective_user
+    caption = welcome_text(user, role) if user is not None else f"Відкриваю меню {role.value}."
+    await message.answer(caption, reply_markup=build_home_keyboard(role))
+
+
 async def _thread_id_from_state(state: FSMContext) -> uuid.UUID | None:
     data = await state.get_data()
     return _parse_id(data.get("support_thread_id", ""))
@@ -107,8 +125,9 @@ async def client_chat_exit(
     message: Message, effective_context: EffectiveContext, state: FSMContext
 ) -> None:
     await state.clear()
-    role = effective_context.effective_role or UserRole.client
-    await message.answer(texts.chat_exited_text(), reply_markup=build_home_keyboard(role))
+    await _exit_chat_to_home(
+        message, effective_context, texts.chat_exited_text(), default_role=UserRole.client
+    )
 
 
 @router.message(SupportState.client_chatting, F.text)
@@ -123,9 +142,11 @@ async def client_chat_message(
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
     if thread is None or thread.status is SupportThreadStatus.closed:
         await state.clear()
-        await message.answer(
+        await _exit_chat_to_home(
+            message,
+            effective_context,
             texts.thread_unavailable_text(),
-            reply_markup=build_home_keyboard(effective_context.effective_role or UserRole.client),
+            default_role=UserRole.client,
         )
         return
 
@@ -262,8 +283,9 @@ async def staff_reply_exit(
     message: Message, effective_context: EffectiveContext, state: FSMContext
 ) -> None:
     await state.clear()
-    role = effective_context.effective_role or UserRole.manager
-    await message.answer(texts.reply_exited_text(), reply_markup=build_home_keyboard(role))
+    await _exit_chat_to_home(
+        message, effective_context, texts.reply_exited_text(), default_role=UserRole.manager
+    )
 
 
 @router.message(SupportState.manager_replying, F.text)
@@ -276,20 +298,32 @@ async def staff_reply_message(
 ) -> None:
     if not _can_handle_support(effective_context):
         await state.clear()
-        await message.answer(texts.support_unavailable_text())
+        await _exit_chat_to_home(
+            message,
+            effective_context,
+            texts.support_unavailable_text(),
+            default_role=UserRole.manager,
+        )
         return
     thread_id = await _thread_id_from_state(state)
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
     if thread is None or thread.status is SupportThreadStatus.closed:
         await state.clear()
-        await message.answer(
+        await _exit_chat_to_home(
+            message,
+            effective_context,
             texts.thread_unavailable_text(),
-            reply_markup=build_home_keyboard(effective_context.effective_role or UserRole.manager),
+            default_role=UserRole.manager,
         )
         return
     if not _can_access_thread(effective_context, thread):
         await state.clear()
-        await message.answer(texts.thread_forbidden_text())
+        await _exit_chat_to_home(
+            message,
+            effective_context,
+            texts.thread_forbidden_text(),
+            default_role=UserRole.manager,
+        )
         return
     await support.claim_if_waiting(
         db_session, thread=thread, manager=effective_context.effective_user

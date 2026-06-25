@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+from aiogram.types import ReplyKeyboardRemove
 from app.bot import permissions as perm
 from app.bot.handlers.support import (
     cb_open,
+    client_chat_exit,
     client_chat_message,
     client_open,
     staff_open,
+    staff_reply_exit,
     staff_reply_message,
 )
 from app.bot.types import EffectiveContext
@@ -196,6 +199,33 @@ async def test_staff_reply_message_denies_foreign_thread_access(db_session: Asyn
     assert bot.sent == []
     refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
     assert refreshed.assigned_manager_id == assigned.id
+
+
+async def test_client_chat_exit_clears_reply_keyboard(db_session: AsyncSession):
+    client = await _client(db_session)
+    msg = FakeMessage("/exit")
+    state = FakeState()
+
+    await client_chat_exit(msg, _ctx(client, UserRole.client), state)
+
+    assert state.cleared
+    # 1-е сообщение гасит залипшую reply-клавиатуру «Вийти з чату»,
+    assert isinstance(msg.answers[0]["reply_markup"], ReplyKeyboardRemove)
+    # 2-е — inline-home (не reply-клавиатура).
+    assert msg.answers[1]["reply_markup"] is not None
+    assert not isinstance(msg.answers[1]["reply_markup"], ReplyKeyboardRemove)
+
+
+async def test_staff_reply_exit_clears_reply_keyboard(db_session: AsyncSession):
+    manager = await _manager(db_session)
+    msg = FakeMessage("/exit")
+    state = FakeState()
+
+    await staff_reply_exit(msg, _ctx(manager, UserRole.manager), state)
+
+    assert state.cleared
+    assert isinstance(msg.answers[0]["reply_markup"], ReplyKeyboardRemove)
+    assert not isinstance(msg.answers[1]["reply_markup"], ReplyKeyboardRemove)
 
 
 async def test_cb_open_denies_foreign_thread_access(db_session: AsyncSession):

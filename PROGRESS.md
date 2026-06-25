@@ -15,6 +15,54 @@
 
 ---
 
+## 2026-06-25 · fix/pr49-followup · pending
+- **Сделано:** follow-up по код-ревью PR #49 — закрыт **BLOCKER + 4 HIGH**.
+  **(BLOCKER)** CI снова гоняет весь DB-слой: вернул `services: postgres` +
+  `DATABASE_URL`/`DATABASE_URL_DIRECT`/`FERNET_KEY` и `pytest -q` вместо белого
+  списка из ~23 файлов; сохранены новые шаги (`workflow_dispatch`, timeout,
+  Compileall). **(HIGH-1)** Выход из чата поддержки больше не оставляет залипшую
+  reply-клавиатуру: на всех 4 путях (`client_chat_exit`/`staff_reply_exit` +
+  оба `thread_unavailable`) шлём `ReplyKeyboardRemove()`, затем отдельным
+  сообщением inline-home (хелпер `_exit_chat_to_home` в `support.py`).
+  **(HIGH-2)** `stock_sheet_key` продвигается только при подтверждённом
+  переименовании вкладки: `_rename_main_worksheets` → `bool`,
+  `_sync_client_sheets_sync` → `(rename_ok, book_id)`, ключ не двигаем при сбое.
+  **(HIGH-3)** view-book отложен: рантайм-синк больше не зовёт `gc.create()`
+  (скоуп `drive.readonly`), `_sync_view_book` возвращает `None` при пустом
+  `stock_view_book_id`; создание книги вернём через provisioning. **(HIGH-4)**
+  три незащищённых вызова `sync_client_sheets`
+  (`sender_profile`/`clients`/`client_settings`) обёрнуты в best-effort
+  try/except + `logger.warning` — сбой Sheets не валит переименование клиента.
+  Новый `tests/test_client_sheet_sync.py` (3 кейса: rename-ok двигает ключ,
+  rename-fail не двигает, `gc.create` не зовётся). Заодно починены 4 устаревших
+  теста кабинета (`test_client_cabinet_handlers.py`), которые #49 не обновил под
+  новый параметр `state` (их раньше скрывал белый список CI).
+- **Консилиум (8 ревьюеров → adversarial verify → судья Opus 4.8):** вынес
+  вердикт NO-GO с 1 реальным HIGH — добил его. **HIGH:** `except Exception`
+  вокруг `sync_client_sheets` глотал и `SQLAlchemyError`; т.к. sync делает
+  SELECT/flush на сессии вызывающего, сбой БД оставлял сессию в
+  rollback-required, а следующий запрос (`_card`/`get_client_settings`) →
+  `PendingRollbackError` → middleware откатывал всю транзакцию, тихо теряя уже
+  сфлашенное переименование. Добавил `except SQLAlchemyError: raise` перед
+  широким `except` во всех 3 коллерах + 2 регрессионных теста. **MEDIUM
+  (тот же класс, что HIGH-1):** ещё 2 выхода из `staff_reply_message`
+  (`_can_handle_support`/`_can_access_thread`) оставляли залипшую reply-клаву —
+  провёл через `_exit_chat_to_home`; добавил тесты на `ReplyKeyboardRemove`.
+  2 cleanup-сабагента: app-код чист, в тестах убран мёртвый `ShipmentCard`-стаб.
+- **Дальше:** push ветки + PR в `main`. Отложенные хвосты #49 (вне этого PR):
+  MEDIUM — нет «⌂ Головна» в staff-разделах (тупики навигации), COD можно
+  прицепить с нулевой корзиной; LOW — мёртвый
+  `build_role_menu`/`build_cod_amount_kb`/`cod_invalid()`, бэкфилл миграции vs
+  рантайм на whitespace-only именах (`btrim`), чип «today» на кастомной дате,
+  ротация CI `FERNET_KEY` в `secrets`, обёртка `_sync_view_book` (дремлет до
+  provisioning).
+- **Открытые вопросы:** локально 1 тест падает —
+  `test_reports.py::test_period_report_aggregates_by_client` — из-за **+48 мс
+  скоса часов** colima-VM (Postgres) против хоста (Python): `status_changed_at`
+  (PG `now()`) попадает на ~33–48 мс позже строгой границы `< end` (Python
+  `now()`). Доказано: при общих часах (как в GitHub CI) строка попадает в окно
+  3/3 → тест зелёный. Остальные **361 passed**.
+
 ## 2026-06-25 · bot-improvements · pending
 - **Сделано:** старт перевода бота в `single-window` UX: добавлен inline home-dashboard вместо рабочего упора в reply-клавиатуру; для owner убраны отдельные `Звіти` и `Я на зв'язку`, duty оставлен только manager, owner-вход остаётся через `Аналітику`; клиентский кабинет переведён на callback-entrypoints из home (`Товари`/`Відправлення`/`Статистика`/`Налаштування`), статистика получила явный `Обрати дату`, карточка клиента теперь даёт `Видалити ТТН`, а после удаления ТТН скрывается из рабочего списка; поток `Створити ТТН` начал переход на одно окно: поиск товара без листания, цены на кнопках, home/back-кнопки, COD привязан к сумме корзины, `Оголошена вартість` отвязана как отдельная страховая сумма; support переведён на inline-entrypoints из home и получил возврат в `Головна`; owner-staff UX упрощён до одной операции `Видалити менеджера` (снять роль + заблокировать + вернуть треды в очередь) вместо раздельных кнопок блокировки/снятия роли. Добавлены `users.stock_sheet_key` / `users.stock_view_book_id`, Alembic migration, best-effort sync-сервис клиентских Sheets (`app/services/client_sheet_sync.py`), хук синхронизации на смену имени клиента/ФОПа и на ключевые складские события (`create/cancel/dispatched/return`).
 - **Дальше:** дотянуть single-window на оставшиеся manager/owner-разделы, дочистить ТТН-flow после всех текстовых шагов, расширить tests под новый home-dashboard и новую staff/delete-логику, отдельно прогнать DB/bot набор на тестовой БД, досинкать docs по Google Sheets/view-файлам.
