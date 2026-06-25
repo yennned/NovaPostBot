@@ -57,12 +57,12 @@ async def test_open_routes_to_duty_manager(db_session: AsyncSession):
     )
 
     assert result.created and result.routed
-    assert result.notify_owner is False
+    assert result.notify_managers is False
     assert result.thread.status is SupportThreadStatus.open
     assert result.thread.assigned_manager_id == manager.id
 
 
-async def test_open_queues_without_duty_notifies_owner(db_session: AsyncSession):
+async def test_open_queues_without_duty_notifies_managers(db_session: AsyncSession):
     client = await _client(db_session)
 
     result = await support.open_or_get_thread(
@@ -70,11 +70,11 @@ async def test_open_queues_without_duty_notifies_owner(db_session: AsyncSession)
     )
 
     assert result.created and not result.routed
-    assert result.notify_owner is True  # рабочее время без дежурного → владельцу
+    assert result.notify_managers is True  # рабочее время без дежурного → менеджерам
     assert result.thread.status is SupportThreadStatus.waiting
 
 
-async def test_open_queues_outside_hours_without_owner_ping(db_session: AsyncSession):
+async def test_open_queues_outside_hours_without_manager_ping(db_session: AsyncSession):
     client = await _client(db_session)
 
     result = await support.open_or_get_thread(
@@ -82,7 +82,7 @@ async def test_open_queues_outside_hours_without_owner_ping(db_session: AsyncSes
     )
 
     assert result.thread.status is SupportThreadStatus.waiting
-    assert result.notify_owner is False
+    assert result.notify_managers is False
 
 
 async def test_open_returns_existing_active_thread(db_session: AsyncSession):

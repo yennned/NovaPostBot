@@ -7,9 +7,13 @@
 
 from __future__ import annotations
 
+import pytest
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import ReplyKeyboardMarkup
 from app.bot import permissions as perm
 from app.bot.handlers.support import (
+    _can_handle_support,
+    _is_staff,
     cb_open,
     client_chat_exit,
     client_chat_message,
@@ -164,6 +168,26 @@ async def test_staff_open_lists_inbox(db_session: AsyncSession):
     await staff_open(msg, _ctx(manager, UserRole.manager), db_session, FakeState())
     assert msg.answers
     assert "Підтримка" in str(msg.answers[0]["text"])
+
+
+async def _owner(session: AsyncSession, telegram_id: int = 1):
+    return await UserRepository(session).create(
+        telegram_id=telegram_id, role=UserRole.owner, status=UserStatus.active
+    )
+
+
+async def test_owner_has_no_support_access(db_session: AsyncSession):
+    # Поддержка — функция менеджера; владелец её не обрабатывает.
+    owner = await _owner(db_session)
+    ctx = _ctx(owner, UserRole.owner)
+    assert _is_staff(ctx) is False
+    assert _can_handle_support(ctx) is False
+
+
+async def test_staff_open_skips_for_owner(db_session: AsyncSession):
+    owner = await _owner(db_session, telegram_id=2)
+    with pytest.raises(SkipHandler):
+        await staff_open(FakeMessage(), _ctx(owner, UserRole.owner), db_session, FakeState())
 
 
 async def test_staff_open_denies_manager_without_support_permission(db_session: AsyncSession):

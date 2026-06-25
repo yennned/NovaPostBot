@@ -4,10 +4,10 @@
 наличия дежурного ([docs/10-support-duty.md](../../docs/10-support-duty.md)):
 
 - рабочее время + есть дежурный → тред `open`, назначен дежурному (живой чат);
-- рабочее время, дежурного нет → тред `waiting` + сигнал владельцу;
+- рабочее время, дежурного нет → тред `waiting` + сигнал менеджерам (заступить);
 - вне рабочего времени → тред `waiting`, ответ на следующий рабочий день.
 
-Лог всех тредов/сообщений — в Postgres (виден owner/dev), ничего не теряется.
+Лог всех тредов/сообщений — в Postgres (виден dev), ничего не теряется.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class ThreadOpenResult:
     thread: SupportThread
     created: bool
     routed: bool  # назначен живому дежурному (релей идёт сразу)
-    notify_owner: bool  # очередь в рабочее время без дежурного → пинг владельцу
+    notify_managers: bool  # очередь в рабочее время без дежурного → пинг менеджерам
     office_open: bool
 
 
@@ -92,7 +92,7 @@ async def open_or_get_thread(
             thread=existing,
             created=False,
             routed=existing.assigned_manager_id is not None,
-            notify_owner=False,
+            notify_managers=False,
             office_open=contact.office_open,
         )
 
@@ -104,7 +104,7 @@ async def open_or_get_thread(
             status=SupportThreadStatus.open,
         )
         return ThreadOpenResult(
-            thread=thread, created=True, routed=True, notify_owner=False, office_open=True
+            thread=thread, created=True, routed=True, notify_managers=False, office_open=True
         )
 
     thread = await repo.create_thread(
@@ -116,7 +116,7 @@ async def open_or_get_thread(
         thread=thread,
         created=True,
         routed=False,
-        notify_owner=contact.office_open,  # рабочее время без дежурного → владельцу
+        notify_managers=contact.office_open,  # рабочее время без дежурного → менеджерам
         office_open=contact.office_open,
     )
 

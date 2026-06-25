@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from app.bot import permissions as perm
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import ShipmentItemDraft, ShipmentRepository, UserRepository
 from app.services import notifications
@@ -37,6 +38,30 @@ async def test_notify_new_client_goes_to_owners_and_duty_managers(db_session: As
     recipients = {tid for tid, _ in notifier.sent}
     assert recipients == {1, 2}
     assert "Нова заявка" in notifier.sent[0][1]
+
+
+async def test_notify_support_queued_goes_to_support_managers_not_owner(db_session: AsyncSession):
+    users = UserRepository(db_session)
+    # Владелец — поддержку больше НЕ получает.
+    await users.create(telegram_id=1, role=UserRole.owner, status=UserStatus.active)
+    # Менеджер с правом — получает (даже если не на смене).
+    await users.create(telegram_id=2, role=UserRole.manager, status=UserStatus.active)
+    # Менеджер без права на поддержку — не получает.
+    await users.create(
+        telegram_id=3,
+        role=UserRole.manager,
+        status=UserStatus.active,
+        permissions={perm.CAN_HANDLE_SUPPORT: False},
+    )
+
+    notifier = FakeNotifier()
+    await notifications.notify_support_queued_to_managers(
+        db_session, notifier, client_label="Іван (+380001)"
+    )
+
+    recipients = {tid for tid, _ in notifier.sent}
+    assert recipients == {2}
+    assert "черзі" in notifier.sent[0][1]
 
 
 async def test_notify_client_approved(db_session: AsyncSession):
