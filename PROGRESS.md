@@ -37,11 +37,25 @@
   rename-fail не двигает, `gc.create` не зовётся). Заодно починены 4 устаревших
   теста кабинета (`test_client_cabinet_handlers.py`), которые #49 не обновил под
   новый параметр `state` (их раньше скрывал белый список CI).
-- **Дальше:** запустить 2 cleanup-сабагента (мёртвый код + ruff/lint).
-  Отложенные хвосты #49 (вне этого PR): MEDIUM — нет «⌂ Головна» в staff-разделах
-  (тупики навигации), COD можно прицепить с нулевой корзиной; LOW — мёртвый
+- **Консилиум (8 ревьюеров → adversarial verify → судья Opus 4.8):** вынес
+  вердикт NO-GO с 1 реальным HIGH — добил его. **HIGH:** `except Exception`
+  вокруг `sync_client_sheets` глотал и `SQLAlchemyError`; т.к. sync делает
+  SELECT/flush на сессии вызывающего, сбой БД оставлял сессию в
+  rollback-required, а следующий запрос (`_card`/`get_client_settings`) →
+  `PendingRollbackError` → middleware откатывал всю транзакцию, тихо теряя уже
+  сфлашенное переименование. Добавил `except SQLAlchemyError: raise` перед
+  широким `except` во всех 3 коллерах + 2 регрессионных теста. **MEDIUM
+  (тот же класс, что HIGH-1):** ещё 2 выхода из `staff_reply_message`
+  (`_can_handle_support`/`_can_access_thread`) оставляли залипшую reply-клаву —
+  провёл через `_exit_chat_to_home`; добавил тесты на `ReplyKeyboardRemove`.
+  2 cleanup-сабагента: app-код чист, в тестах убран мёртвый `ShipmentCard`-стаб.
+- **Дальше:** push ветки + PR в `main`. Отложенные хвосты #49 (вне этого PR):
+  MEDIUM — нет «⌂ Головна» в staff-разделах (тупики навигации), COD можно
+  прицепить с нулевой корзиной; LOW — мёртвый
   `build_role_menu`/`build_cod_amount_kb`/`cod_invalid()`, бэкфилл миграции vs
-  рантайм на whitespace-only именах (`btrim`), чип «today» на кастомной дате.
+  рантайм на whitespace-only именах (`btrim`), чип «today» на кастомной дате,
+  ротация CI `FERNET_KEY` в `secrets`, обёртка `_sync_view_book` (дремлет до
+  provisioning).
 - **Открытые вопросы:** локально 1 тест падает —
   `test_reports.py::test_period_report_aggregates_by_client` — из-за **+48 мс
   скоса часов** colima-VM (Postgres) против хоста (Python): `status_changed_at`
