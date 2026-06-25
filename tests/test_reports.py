@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -88,6 +88,27 @@ async def test_period_report_counts_dispatched_and_returned_same_shipment(db_ses
     assert report.net == 0
     assert report.clients[0].shipped == 4
     assert report.clients[0].returns == 4
+
+
+async def test_period_report_custom_day_bounds(db_session: AsyncSession):
+    owner = await _owner(db_session, telegram_id=3)
+    client = await _client(db_session, telegram_id=102)
+    target = datetime(2026, 6, 20, 12, 0, tzinfo=TZ)
+    await _shipment(
+        db_session,
+        client_id=client.id,
+        status=ShipmentStatus.dispatched,
+        qty=5,
+        dispatched_at=target,
+        status_changed_at=target,
+    )
+
+    same_day = await reports.period_report(db_session, actor=owner, day=target.date())
+    assert same_day.shipped == 5
+    assert same_day.period == "day"  # текст покажет конкретную дату, не пресет
+
+    other_day = await reports.period_report(db_session, actor=owner, day=date(2026, 6, 19))
+    assert other_day.shipped == 0
 
 
 async def test_period_report_requires_view_permission(db_session: AsyncSession):

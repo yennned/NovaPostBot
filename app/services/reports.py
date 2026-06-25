@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -93,9 +93,14 @@ class ManagerSupportStat:
     closed_count: int
 
 
-def _bounds(period: str, settings: Settings) -> tuple[datetime, datetime]:
+def _bounds(
+    period: str, settings: Settings, *, day: date | None = None
+) -> tuple[datetime, datetime]:
     tz = ZoneInfo(settings.timezone)
     now = datetime.now(tz)
+    if day is not None:
+        start = datetime.combine(day, time.min, tzinfo=tz)
+        return start, start + timedelta(days=1)
     if period == "week":
         start = datetime.combine((now - timedelta(days=now.weekday())).date(), time.min, tzinfo=tz)
     elif period == "month":
@@ -131,11 +136,12 @@ async def period_report(
     *,
     actor: User,
     period: str = "today",
+    day: date | None = None,
     settings: Settings | None = None,
 ) -> PeriodReport:
     _require_reports(actor, settings)
     cfg = settings or get_settings()
-    start, end = _bounds(period, cfg)
+    start, end = _bounds(period, cfg, day=day)
     repo = ReportsRepository(session)
     dispatched = await repo.shipments_dispatched(start=start, end=end)
     returns_and_losses = await repo.shipments_status_changed(
@@ -182,7 +188,7 @@ async def period_report(
     ]
     clients.sort(key=lambda c: c.net, reverse=True)
     return PeriodReport(
-        period=period,
+        period="day" if day is not None else period,
         start=start,
         end=end,
         shipped=sum(c.shipped for c in clients),
@@ -197,11 +203,12 @@ async def financial_report(
     *,
     actor: User,
     period: str = "today",
+    day: date | None = None,
     settings: Settings | None = None,
 ) -> FinancialReport:
     _require_owner(actor, settings)
     cfg = settings or get_settings()
-    start, end = _bounds(period, cfg)
+    start, end = _bounds(period, cfg, day=day)
     shipments = await ReportsRepository(session).shipments_dispatched(start=start, end=end)
 
     fee_total = sum(
@@ -218,7 +225,7 @@ async def financial_report(
         if s.sla_met is False
     ]
     return FinancialReport(
-        period=period,
+        period="day" if day is not None else period,
         start=start,
         end=end,
         dispatched_count=len(shipments),
@@ -233,11 +240,12 @@ async def manager_support_stats(
     *,
     actor: User,
     period: str = "today",
+    day: date | None = None,
     settings: Settings | None = None,
 ) -> list[ManagerSupportStat]:
     _require_owner(actor, settings)
     cfg = settings or get_settings()
-    start, end = _bounds(period, cfg)
+    start, end = _bounds(period, cfg, day=day)
     repo = ReportsRepository(session)
     open_counts = await repo.open_thread_counts()
     closed_counts = await repo.closed_thread_counts(start=start, end=end)

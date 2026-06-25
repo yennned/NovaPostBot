@@ -55,6 +55,7 @@ from app.services.inventory import list_inventory
 from app.services.shipment import cancel_shipment
 from app.services.shipments import get_shipment_card, list_shipments
 from app.services.stats import get_client_stats
+from app.utils.dates import USER_DATE_HINT, parse_user_date
 from app.utils.phone import normalize_phone
 
 router = Router(name="client_cabinet")
@@ -961,15 +962,9 @@ async def receive_stats_date(
     effective_context: EffectiveContext,
     db_session: AsyncSession,
 ) -> None:
-    raw = (message.text or "").strip()
-    try:
-        if "-" in raw:
-            day = date.fromisoformat(raw)
-        else:
-            dd, mm, yyyy = raw.split(".")
-            day = date.fromisoformat(f"{yyyy}-{mm}-{dd}")
-    except ValueError:
-        await message.answer("❌ Невірна дата. Використайте ДД.ММ.РРРР або РРРР-ММ-ДД.")
+    day = parse_user_date(message.text)
+    if day is None:
+        await message.answer(f"❌ Невірна дата. Використайте {USER_DATE_HINT}.")
         return
     await state.set_state(None)
     client = _effective_client(effective_context)

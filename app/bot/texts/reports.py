@@ -16,6 +16,13 @@ from app.utils.timefmt import fmt_dt
 _PERIOD_LABELS = {"today": "сьогодні", "week": "тиждень", "month": "місяць"}
 
 
+def _period_label(report: PeriodReport) -> str:
+    """Заголовочная метка периода: пресет или конкретная дата (при выборе дня)."""
+    if report.period in _PERIOD_LABELS:
+        return _PERIOD_LABELS[report.period]
+    return report.start.strftime("%d.%m.%Y")
+
+
 def _esc(value: str) -> str:
     return html.escape(value)
 
@@ -30,7 +37,7 @@ def _local(value: datetime | None) -> str:
 
 def period_report_text(report: PeriodReport) -> str:
     lines = [
-        f"📊 <b>Звіт</b> · {_PERIOD_LABELS.get(report.period, report.period)}",
+        f"📊 <b>Звіт</b> · {_period_label(report)}",
         f"Відправлено: {report.shipped} · Повернення: {report.returns} · Втрати: {report.losses}",
         f"<b>Чисті продажі: {report.net}</b>",
     ]

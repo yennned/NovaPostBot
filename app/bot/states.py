@@ -40,6 +40,18 @@ class StaffState(StatesGroup):
     waiting_for_add = State()  # ввод телефона или Telegram-ID нового менеджера
 
 
+class ReportsState(StatesGroup):
+    """Отчёты «📊 Звіти» (менеджер): ручной ввод даты отчёта."""
+
+    waiting_for_date = State()
+
+
+class AnalyticsState(StatesGroup):
+    """Аналитика «📈 Аналітика» (владелец): ручной ввод даты."""
+
+    waiting_for_date = State()
+
+
 class CreateTtnState(StatesGroup):
     """FSM создания ТТН (Express-картка, Фаза 4 PR 9). Длинные значения — в FSM-data.
 
