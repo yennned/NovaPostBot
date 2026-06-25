@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -321,10 +322,15 @@ async def update_client_profile(
         )
         if full_name is not None:
             # Sheets — best-effort: сбой синка не должен валить переименование клиента.
+            # Но ошибку БД (sync делает SELECT/flush на этой же сессии) НЕ глотаем —
+            # иначе сессия в rollback-required, и следующий запрос/commit потеряет
+            # уже сфлашенное переименование. Пробрасываем → middleware откатит явно.
             try:
                 await sync_client_sheets(
                     session, client=user, previous_sheet_key=previous_sheet_key
                 )
+            except SQLAlchemyError:
+                raise
             except Exception:
                 logger.warning(
                     "client_profile_sheet_sync_failed", user_id=str(user.id), exc_info=True

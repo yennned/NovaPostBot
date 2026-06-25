@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import UserRole, UserStatus
@@ -170,12 +171,16 @@ async def update_self_profile(
         )
         if full_name is not None:
             # Sheets — best-effort: сбой синка не должен валить self-service апдейт.
+            # Ошибку БД не глотаем (см. clients.update_client_profile) —
+            # пробрасываем, чтобы не оставить сессию в rollback-required.
             try:
                 await sync_client_sheets(
                     session,
                     client=client,
                     previous_sheet_key=previous_sheet_key,
                 )
+            except SQLAlchemyError:
+                raise
             except Exception:
                 logger.warning(
                     "client_self_profile_sheet_sync_failed",

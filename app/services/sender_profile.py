@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -239,8 +240,12 @@ async def update_profile(
             client = await UserRepository(session).get_by_id(profile.client_id)
             if client is not None:
                 # Sheets — best-effort: сбой синка не должен валить апдейт профиля.
+                # Ошибку БД не глотаем (см. clients.update_client_profile) —
+                # пробрасываем, чтобы не оставить сессию в rollback-required.
                 try:
                     await sync_client_sheets(session, client=client)
+                except SQLAlchemyError:
+                    raise
                 except Exception:
                     logger.warning(
                         "sender_profile_sheet_sync_failed",
