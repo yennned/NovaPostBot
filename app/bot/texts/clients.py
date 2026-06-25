@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from zoneinfo import ZoneInfo
-
 from app.bot.texts.client_cabinet import shipment_card_text
 from app.db.models.enums import UserStatus
 from app.services.clients import ClientCard, ClientListItem
@@ -17,9 +15,7 @@ from app.services.exceptions import (
     TransitionForbidden,
 )
 from app.services.manager_returns import ManagerReturnCard, ManagerReturnPage
-
-# Часовой пояс отображения — Europe/Kyiv (см. CLAUDE.md «Базовые правила»).
-_KYIV = ZoneInfo("Europe/Kyiv")
+from app.utils.timefmt import to_local
 
 STATUS_LABELS: dict[UserStatus, str] = {
     UserStatus.pending: "Очікують",
@@ -57,7 +53,7 @@ def client_card_text(card: ClientCard) -> str:
         f"Статус: {STATUS_LABELS[card.status]}\n"
         f"ФОП: {card.sender_profiles_count}"
         + (f" (дефолт: {card.default_sender_name})" if card.default_sender_name else "")
-        + f"\nЗареєстровано: {card.created_at.astimezone(_KYIV):%Y-%m-%d %H:%M}"
+        + f"\nЗареєстровано: {to_local(card.created_at):%Y-%m-%d %H:%M}"
     )
 
 

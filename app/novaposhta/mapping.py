@@ -9,8 +9,12 @@
 - `PaymentMethod = Cash` — захардкожено, клиенту не показывается.
 - `PayerType` — выбор клиента (`Recipient` по умолч. / `Sender`).
 - `Cost` — страховая (оцінкова) сумма.
-- COD → `BackwardDeliveryData=[{PayerType:Recipient, CargoType:Money,
-  RedeliveryString:<сумма>}]`; передоплата → поле не отправляется.
+- COD (накладений платіж) → `AfterpaymentOnGoodsCost=<сумма>` — услуга
+  «Контроль оплати» (NovaPay) для ФОП/юр-особи; передоплата → поле не шлём.
+  НЕ `BackwardDeliveryData{CargoType:Money}` — то классическая Післяплата для
+  фіз-осіб, на наших ФОП-ключах недоступна («Передана послуга Післяплата
+  недоступна»). Скалярная форма не требует номера счёта — НП маршрутизирует по
+  договору NovaPay (боем подтверждено на ключе ФОП).
 Полагаемся на стандартный контракт НП v2.0 (ServiceType=WarehouseWarehouse,
 отправитель/получатель — по Ref'ам контрагентов).
 """
@@ -68,14 +72,11 @@ def to_save_props(draft: TTNDraft) -> dict[str, Any]:
     if draft.parcel.volume_general is not None:
         props["VolumeGeneral"] = money(draft.parcel.volume_general)
     if draft.cod_amount is not None:
-        # Накладений платіж: комиссию платит отримувач.
-        props["BackwardDeliveryData"] = [
-            {
-                "PayerType": "Recipient",
-                "CargoType": "Money",
-                "RedeliveryString": money(draft.cod_amount),
-            }
-        ]
+        # Накладений платіж через «Контроль оплати» (NovaPay): отримувач платить
+        # за товар, кошти йдуть на бізнес-рахунок ФОП за договором. Скалярна
+        # форма (без номера рахунку) — НП сам маршрутизує. Взаимоисключающа с
+        # BackwardDeliveryData{CargoType:Money} (класична Післяплата) — её не шлём.
+        props["AfterpaymentOnGoodsCost"] = money(draft.cod_amount)
     return props
 
 
@@ -144,5 +145,8 @@ def to_price_props(
         "SeatsAmount": str(seats_amount),
     }
     if cod_amount is not None:
+        # Оценка комиссии COD. NB: save идёт через «Контроль оплати»
+        # (AfterpaymentOnGoodsCost), а тут RedeliveryCalculate — это лишь
+        # орієнтовний прогноз НП (фактичну комісію NovaPay підтверджує менеджер).
         props["RedeliveryCalculate"] = {"CargoType": "Money", "Amount": money(cod_amount)}
     return props

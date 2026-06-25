@@ -9,6 +9,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from app.bot.keyboards.common import nav_footer
 from app.db.models.support import SupportThread
 
 PAGE_SIZE = 6
@@ -24,7 +25,7 @@ def build_client_start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💬 Почати чат", callback_data="sup:start")],
-            [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
+            *nav_footer(),
         ]
     )
 
@@ -61,13 +62,13 @@ def build_inbox_kb(
     nav: list[InlineKeyboardButton] = []
     if offset > 0:
         nav.append(
-            InlineKeyboardButton(text="◀️", callback_data=f"sup:inbox:{max(offset - limit, 0)}")
+            InlineKeyboardButton(text="◀", callback_data=f"sup:inbox:{max(offset - limit, 0)}")
         )
     if offset + limit < total:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"sup:inbox:{offset + limit}"))
+        nav.append(InlineKeyboardButton(text="▶", callback_data=f"sup:inbox:{offset + limit}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
+    rows.extend(nav_footer())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -85,6 +86,5 @@ def build_thread_kb(
                 InlineKeyboardButton(text="✅ Закрити", callback_data=f"sup:close:{thread.id}"),
             ]
         )
-    rows.append([InlineKeyboardButton(text="◀️ До списку", callback_data=f"sup:inbox:{offset}")])
-    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
+    rows.extend(nav_footer(back=f"sup:inbox:{offset}", back_label="До списку"))
     return InlineKeyboardMarkup(inline_keyboard=rows)

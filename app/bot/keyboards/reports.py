@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.keyboards.common import nav_footer
+
 PERIOD_LABELS = {"today": "Сьогодні", "week": "Тиждень", "month": "Місяць"}
 
 
@@ -16,4 +18,4 @@ def build_period_kb(prefix: str, active: str) -> InlineKeyboardMarkup:
         )
         for period, label in PERIOD_LABELS.items()
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[row])
+    return InlineKeyboardMarkup(inline_keyboard=[row, *nav_footer()])

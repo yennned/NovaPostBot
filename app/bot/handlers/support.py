@@ -16,17 +16,16 @@ import uuid
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.bot.keyboards import support as kb
-from app.bot.keyboards.menus import build_home_keyboard
+from app.bot.keyboards.menus import build_role_menu
 from app.bot.notify import BotNotifier
 from app.bot.screen import remember_screen
 from app.bot.states import SupportState
 from app.bot.texts import support as texts
-from app.bot.texts import welcome_text
 from app.bot.types import EffectiveContext
 from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
 from app.db.models.user import User
@@ -98,18 +97,14 @@ def _client_label(client: User) -> str:
 async def _exit_chat_to_home(
     message: Message, ctx: EffectiveContext, text: str, *, default_role: UserRole
 ) -> None:
-    """Закрыть чат/ответ и вернуть на головне меню двумя сообщениями.
+    """Закрыть чат/ответ и вернуть нижнюю панель меню роли.
 
-    Во время чата висит ReplyKeyboardMarkup («Вийти з чату»/«Завершити
-    відповідь»). Inline-разметка home НЕ заменяет reply-клавиатуру, поэтому
-    сначала шлём ReplyKeyboardRemove (гасит залипшую кнопку), затем отдельным
-    сообщением — inline-home.
+    Во время чата висела ReplyKeyboardMarkup («Вийти з чату»/«Завершити
+    відповідь»). Новая reply-панель роли заменяет её одним сообщением — НЕ
+    ReplyKeyboardRemove, иначе нижнее меню исчезнет до наступного /start.
     """
     role = ctx.effective_role or default_role
-    await message.answer(text, reply_markup=ReplyKeyboardRemove())
-    user = ctx.effective_user
-    caption = welcome_text(user, role) if user is not None else f"Відкриваю меню {role.value}."
-    await message.answer(caption, reply_markup=build_home_keyboard(role))
+    await message.answer(text, reply_markup=build_role_menu(role))
 
 
 async def _thread_id_from_state(state: FSMContext) -> uuid.UUID | None:

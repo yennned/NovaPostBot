@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.keyboards.common import category_chips
 from app.services.client_settings import (
     NOTIFY_APPROVED,
     NOTIFY_LOW_STOCK,
@@ -54,20 +55,16 @@ def _nav_row(
     return row
 
 
-def build_inventory_kb(page: InventoryPage) -> InlineKeyboardMarkup:
+def build_inventory_kb(
+    page: InventoryPage, *, active_category: str | None = None
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:psearch"),
             InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:pclear"),
         ]
     ]
-    if page.categories:
-        category_row = [InlineKeyboardButton(text="Всі", callback_data="cab:pcat:all")]
-        category_row.extend(
-            InlineKeyboardButton(text=label, callback_data=f"cab:pcat:{idx}")
-            for idx, label in enumerate(page.categories[:3])
-        )
-        rows.append(category_row)
+    rows.extend(category_chips(page.categories, prefix="cab:pcat", active=active_category))
     for item in page.items:
         price = f"{item.price:.2f} ₴" if item.price is not None else "—"
         name = item.name[:18]
@@ -75,7 +72,7 @@ def build_inventory_kb(page: InventoryPage) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{item.sku} · {category}{name} · {price} · {item.available} шт",
+                    text=f"{category}{name} · {price} · {item.available} шт",
                     callback_data=f"cab:products:{page.offset}",
                 )
             ]

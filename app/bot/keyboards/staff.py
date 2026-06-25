@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.keyboards.common import nav_footer
 from app.db.models.enums import UserStatus
 from app.services.staff import StaffCard, StaffPage
 
@@ -31,15 +32,16 @@ def build_list_kb(page: StaffPage) -> InlineKeyboardMarkup:
     if page.offset > 0:
         nav.append(
             InlineKeyboardButton(
-                text="◀️", callback_data=f"stf:list:{max(page.offset - page.limit, 0)}"
+                text="◀", callback_data=f"stf:list:{max(page.offset - page.limit, 0)}"
             )
         )
     if page.offset + page.limit < page.total:
         nav.append(
-            InlineKeyboardButton(text="▶️", callback_data=f"stf:list:{page.offset + page.limit}")
+            InlineKeyboardButton(text="▶", callback_data=f"stf:list:{page.offset + page.limit}")
         )
     if nav:
         rows.append(nav)
+    rows.extend(nav_footer())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -57,7 +59,7 @@ def build_card_kb(card: StaffCard) -> InlineKeyboardMarkup:
     rows.append(
         [InlineKeyboardButton(text="🗑 Видалити менеджера", callback_data=f"stf:delete:{card.id}")]
     )
-    rows.append([InlineKeyboardButton(text="◀️ До списку", callback_data="stf:list:0")])
+    rows.extend(nav_footer(back="stf:list:0", back_label="До списку"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -69,6 +71,6 @@ def build_delete_confirm_kb(card: StaffCard) -> InlineKeyboardMarkup:
                     text="✅ Так, видалити", callback_data=f"stf:deleteok:{card.id}"
                 )
             ],
-            [InlineKeyboardButton(text="◀️ Скасувати", callback_data=f"stf:card:{card.id}")],
+            *nav_footer(back=f"stf:card:{card.id}", back_label="Скасувати"),
         ]
     )

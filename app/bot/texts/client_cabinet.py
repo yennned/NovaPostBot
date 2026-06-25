@@ -11,6 +11,7 @@ from app.services.inventory import InventoryItem, InventoryPage
 from app.services.sender_profile import SenderProfileView
 from app.services.shipments import ShipmentCard, ShipmentPage
 from app.services.stats import ClientStatsSnapshot
+from app.utils.timefmt import fmt_dt
 
 _STATUS_LABELS = {
     ShipmentStatus.created: "Створено",
@@ -40,7 +41,7 @@ def _money(value: Decimal | None) -> str:
 
 
 def _fmt_dt(value: datetime) -> str:
-    return value.strftime("%d.%m.%Y %H:%M")
+    return fmt_dt(value, "%d.%m.%Y %H:%M")
 
 
 def products_text(page: InventoryPage) -> str:

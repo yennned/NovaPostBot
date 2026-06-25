@@ -122,7 +122,7 @@ async def _show_inventory(
     await state.update_data(product_categories=page.categories)
     await target.answer(
         products_text(page),
-        reply_markup=build_inventory_kb(page),
+        reply_markup=build_inventory_kb(page, active_category=category),
         parse_mode="HTML",
     )
     await _remember_if_possible(state, target)
@@ -151,7 +151,7 @@ async def _edit_inventory(
     await state.update_data(product_categories=page.categories)
     await message.edit_text(
         products_text(page),
-        reply_markup=build_inventory_kb(page),
+        reply_markup=build_inventory_kb(page, active_category=category),
         parse_mode="HTML",
     )
     await remember_screen(state, message)
@@ -276,7 +276,7 @@ async def _edit_inventory_screen(
         bot,
         state,
         text=products_text(page),
-        reply_markup=build_inventory_kb(page),
+        reply_markup=build_inventory_kb(page, active_category=category),
         parse_mode="HTML",
     )
 
@@ -531,7 +531,7 @@ async def cb_product_category(
             await callback.answer(_STALE_BUTTON, show_alert=True)
             return
         categories = (await state.get_data()).get("product_categories", [])
-        if idx >= len(categories):
+        if idx < 0 or idx >= len(categories):
             await callback.answer(_STALE_BUTTON, show_alert=True)
             return
         await state.update_data(product_category=categories[idx])

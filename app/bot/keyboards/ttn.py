@@ -9,18 +9,22 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.keyboards.common import category_chips, home_button
 from app.services.inventory import InventoryPage
 
 TTN_PAGE_SIZE = 6
 
-# Пресеты габаритов: токен → подпись. Габариты «Власних розмірів» в Фазе 4 не
-# собираем (домен create_shipment их не несёт) — только пресет-метка на ТТН.
+# Пресеты «коробок»: токен → подпись (с тиром веса). Габариты «Власних розмірів»
+# не собираем — только пресет-метка на ТТН. Выбор коробки подставляет вес
+# (верхняя граница тира, см. SIZE_DEFAULT_WEIGHT) — клиенту достаточно выбрать
+# коробку, чтобы появилась «Далі»; «⚖️ Вказати вагу» остаётся точным override.
 SIZE_PRESETS: dict[str, str] = {
-    "s": "Стандарт (S)",
-    "m": "Середня (M)",
-    "l": "Велика (L)",
+    "s": "Мала (до 2 кг)",
+    "m": "Середня (до 10 кг)",
+    "l": "Велика (до 30 кг)",
 }
-DEFAULT_SIZE_TOKEN = "s"  # noqa: S105 — это пресет габаритов, не секрет
+SIZE_DEFAULT_WEIGHT: dict[str, str] = {"s": "2", "m": "10", "l": "30"}
+DEFAULT_SIZE_TOKEN = "s"  # noqa: S105 — это пресет коробки, не секрет
 
 
 def _nav_row(offset: int, total: int, limit: int) -> list[InlineKeyboardButton]:
@@ -35,14 +39,21 @@ def _nav_row(offset: int, total: int, limit: int) -> list[InlineKeyboardButton]:
     return row
 
 
-def build_cart_picker_kb(page: InventoryPage, *, cart_count: int) -> InlineKeyboardMarkup:
-    """Список товаров для набора корзины (по индексу страницы; sku — в FSM-data)."""
+def build_cart_picker_kb(
+    page: InventoryPage, *, cart_count: int, active_category: str | None = None
+) -> InlineKeyboardMarkup:
+    """Список товаров для набора корзины (по индексу страницы; sku — в FSM-data).
+
+    Браузинг как в «Товари»: сначала чипы категорий (`cab:ttn:pcat:*`), потом
+    товары. Артикул в подписи не показываем — выбор идёт по индексу.
+    """
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:ttn:search"),
             InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:ttn:searchclear"),
         ]
     ]
+    rows.extend(category_chips(page.categories, prefix="cab:ttn:pcat", active=active_category))
     for idx, item in enumerate(page.items):
         prefix = "🚫 " if item.available <= 0 else ""
         category = f"{item.category[:10]} · " if item.category else ""
@@ -50,10 +61,7 @@ def build_cart_picker_kb(page: InventoryPage, *, cart_count: int) -> InlineKeybo
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=(
-                        f"{prefix}{item.sku} · {category}{item.name[:16]} · "
-                        f"{price} · {item.available} шт"
-                    ),
+                    text=(f"{prefix}{category}{item.name[:16]} · {price} · {item.available} шт"),
                     callback_data=f"cab:ttn:pick:{idx}",
                 )
             ]
@@ -281,20 +289,15 @@ def build_payment_edit_kb(current: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_cod_amount_kb() -> InlineKeyboardMarkup:
-    """Под prompt суммы COD — быстрый «= вартість товарів» + назад."""
+def build_cancel_kb() -> InlineKeyboardMarkup:
+    """Клавиатура под prompt текстового ввода: вихід у меню + «Скасувати»."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="= вартість товарів", callback_data="cab:ttn:codeq")],
-            [InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")],
+            [
+                home_button(),
+                InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel"),
+            ]
         ]
-    )
-
-
-def build_cancel_kb() -> InlineKeyboardMarkup:
-    """Минимальная клавиатура под prompt текстового ввода — только «Скасувати»."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]]
     )
 
 
@@ -311,7 +314,9 @@ def build_city_results_kb(cities: list[dict]) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")])
+    rows.append(
+        [home_button(), InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -345,5 +350,7 @@ def build_warehouse_results_kb(warehouses: list[dict], *, offset: int) -> Inline
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔎 Знайти за №", callback_data="cab:ttn:whfind")])
-    rows.append([InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")])
+    rows.append(
+        [home_button(), InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)

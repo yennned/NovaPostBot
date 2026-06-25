@@ -380,6 +380,59 @@ def test_cart_review_text_escapes_html():
     assert "&lt;x&gt;" in out
 
 
+# ----------------------------------------------------------- параметри посилки (коробки)
+
+
+async def test_size_select_sets_default_weight():
+    # Выбор коробки подставляет вес (верхняя граница тира) → активирует «Далі».
+    state = FakeState(size_token="s")  # без weight
+    cb = FakeCallback("cab:ttn:sz:l")
+    await h.cb_size(cb, state)
+    assert state._data["size_token"] == "l"
+    assert state._data["weight"] == "30"  # Велика (до 30 кг)
+
+
+async def test_show_parcel_defaults_weight_so_dali_available():
+    # Вход на экран без веса → дефолтная коробка+вес (frictionless «Далі» с порога).
+    state = FakeState()
+    msg = FakeMessage()
+    await h._show_parcel(msg, state, edit=False)
+    assert state._data["size_token"] == "s"
+    assert state._data["weight"] == "2"  # Мала (до 2 кг)
+
+
+# ----------------------------------------------------------- COD-гард (анти cod_amount=None)
+
+
+async def test_set_payment_cod_zero_price_blocked():
+    # Корзина без цены → COD ставить нельзя (иначе cod_amount=None упадёт на submit).
+    state = FakeState(cart={"A": {"qty": 1, "name": "A", "price": None}}, payment_method="prepay")
+    cb = FakeCallback("cab:ttn:setpm:cod")
+    await h.cb_set_payment(cb, None, None, None, state)
+    assert cb.acks[-1]["show_alert"] is True
+    assert state._data.get("payment_method") == "prepay"
+    assert "cod_amount" not in state._data
+
+
+# ----------------------------------------------------------- фильтр-категория в пикере
+
+
+async def test_pick_category_sets_filter(monkeypatch):
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 5)]))
+    state = FakeState(ttn_categories=["Кава", "Чай"], cart={})
+    cb = FakeCallback("cab:ttn:pcat:1")
+    await h.cb_pick_category(cb, _ctx(_CLIENT), None, state)
+    assert state._data["ttn_category"] == "Чай"
+
+
+async def test_pick_category_all_clears_filter(monkeypatch):
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 5)]))
+    state = FakeState(ttn_categories=["Кава"], ttn_category="Кава", cart={})
+    cb = FakeCallback("cab:ttn:pcat:all")
+    await h.cb_pick_category(cb, _ctx(_CLIENT), None, state)
+    assert state._data["ttn_category"] is None
+
+
 # ===================== PR 9b: отримувач + адреса =====================
 
 

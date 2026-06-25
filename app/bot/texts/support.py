@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
-from app.config import get_settings
 from app.db.models.support import SupportThread
 from app.services.support import DutyContact
+from app.utils.timefmt import to_local as _local
 
 _SENDER_LABELS = {"client": "Клієнт", "manager": "Менеджер", "owner": "Менеджер", "dev": "Менеджер"}
 _MAX_MESSAGES = 15
@@ -16,10 +14,6 @@ _MAX_MESSAGES = 15
 
 def _esc(value: str) -> str:
     return html.escape(value)
-
-
-def _local(value: datetime) -> datetime:
-    return value.astimezone(ZoneInfo(get_settings().timezone))
 
 
 def _window_str(contact: DutyContact) -> str | None:

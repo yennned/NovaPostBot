@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.keyboards.common import nav_footer
 from app.bot.texts.clients import STATUS_LABELS, client_list_button
 from app.db.models.enums import UserStatus
 from app.services.clients import ClientCard, ClientPage
@@ -65,14 +66,15 @@ def build_clients_list_kb(page: ClientPage, token: str) -> InlineKeyboardMarkup:
     nav: list[InlineKeyboardButton] = []
     if page.offset > 0:
         prev_offset = max(0, page.offset - page.limit)
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"cl:list:{token}:{prev_offset}"))
+        nav.append(InlineKeyboardButton(text="◀", callback_data=f"cl:list:{token}:{prev_offset}"))
     if page.offset + page.limit < page.total:
         next_offset = page.offset + page.limit
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"cl:list:{token}:{next_offset}"))
+        nav.append(InlineKeyboardButton(text="▶", callback_data=f"cl:list:{token}:{next_offset}"))
     if nav:
         rows.append(nav)
 
     rows.append([InlineKeyboardButton(text="🔎 Пошук", callback_data=f"cl:search:{token}")])
+    rows.extend(nav_footer())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -106,7 +108,7 @@ def build_client_card_kb(card: ClientCard, token: str) -> InlineKeyboardMarkup:
             )
         ]
     )
-    rows.append([InlineKeyboardButton(text="⬅️ До списку", callback_data=f"cl:list:{token}:0")])
+    rows.extend(nav_footer(back=f"cl:list:{token}:0", back_label="До списку"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -124,7 +126,7 @@ def build_edit_fields_kb(token: str, client_id) -> InlineKeyboardMarkup:
                     text="Телефон", callback_data=f"cl:editf:phone:{token}:{client_id}"
                 )
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cl:card:{token}:{client_id}")],
+            *nav_footer(back=f"cl:card:{token}:{client_id}", back_label="Назад"),
         ]
     )
 
@@ -145,7 +147,7 @@ def build_client_returns_kb(page: ManagerReturnPage, token: str) -> InlineKeyboa
     if page.offset > 0:
         nav.append(
             InlineKeyboardButton(
-                text="◀️",
+                text="◀",
                 callback_data=(
                     f"cl:returns:{token}:{page.client_id}:{max(page.offset - page.limit, 0)}"
                 ),
@@ -154,20 +156,13 @@ def build_client_returns_kb(page: ManagerReturnPage, token: str) -> InlineKeyboa
     if page.offset + page.limit < page.total:
         nav.append(
             InlineKeyboardButton(
-                text="▶️",
+                text="▶",
                 callback_data=f"cl:returns:{token}:{page.client_id}:{page.offset + page.limit}",
             )
         )
     if nav:
         rows.append(nav)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ До клієнта",
-                callback_data=f"cl:card:{token}:{page.client_id}",
-            )
-        ]
-    )
+    rows.extend(nav_footer(back=f"cl:card:{token}:{page.client_id}", back_label="До клієнта"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -182,12 +177,10 @@ def build_return_card_kb(card: ManagerReturnCard, token: str, offset: int) -> In
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ До повернень",
-                callback_data=f"cl:returns:{token}:{card.client_id}:{offset}",
-            )
-        ]
+    rows.extend(
+        nav_footer(
+            back=f"cl:returns:{token}:{card.client_id}:{offset}",
+            back_label="До повернень",
+        )
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
