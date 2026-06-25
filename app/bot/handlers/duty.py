@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -25,7 +25,7 @@ DUTY_BUTTON = "🟢 Я на зв'язку"
 
 
 def _is_staff(context: EffectiveContext) -> bool:
-    return context.effective_role in {UserRole.manager, UserRole.owner} or context.is_dev
+    return context.effective_role is UserRole.manager or context.is_dev
 
 
 def _can_handle_support(context: EffectiveContext) -> bool:
@@ -36,8 +36,6 @@ def _can_handle_support(context: EffectiveContext) -> bool:
         return True
     if user.status is not UserStatus.active:
         return False
-    if context.effective_role is UserRole.owner:
-        return True
     if context.effective_role is UserRole.manager:
         return permissions.has_permission(user, permissions.CAN_HANDLE_SUPPORT)
     return False
@@ -67,3 +65,34 @@ async def open_shift(
         await message.answer(str(exc))
         return
     await message.answer(texts.on_duty_text(result))
+
+
+@router.callback_query(F.data == "home:duty")
+async def open_shift_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer("Кнопка застаріла, відкрийте /start ще раз.", show_alert=True)
+        return
+    if not _is_staff(effective_context):
+        await callback.answer(texts.duty_unavailable_text(), show_alert=True)
+        return
+    if not _can_handle_support(effective_context):
+        await callback.answer(texts.duty_unavailable_text(), show_alert=True)
+        return
+    user = effective_context.effective_user
+    if user is None:
+        await callback.answer(texts.not_staff_text(), show_alert=True)
+        return
+    try:
+        result = await duty.go_on_duty(db_session, user=user)
+    except OfficeClosed as exc:
+        await callback.answer(texts.office_closed_text(exc), show_alert=True)
+        return
+    except ClientServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text(texts.on_duty_text(result))
+    await callback.answer()

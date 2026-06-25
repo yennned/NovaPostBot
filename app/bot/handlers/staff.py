@@ -1,8 +1,8 @@
 """Хендлеры управления персоналом (👔 Персонал, owner-only, Фаза 6).
 
 Владелец/dev: список менеджеров, карточка с per-flag правами (тоглы из реестра
-`permissions.PERMISSION_FLAGS`), найм по телефону/Telegram-ID, блокировка и снятие
-роли. Все мутации идут через `services/staff` (RBAC + audit).
+`permissions.PERMISSION_FLAGS`), найм по телефону/Telegram-ID и удаление
+менеджера. Все мутации идут через `services/staff` (RBAC + audit).
 """
 
 from __future__ import annotations
@@ -189,22 +189,8 @@ async def _status_action(
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data.startswith("stf:block:"))
-async def cb_block(
-    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
-) -> None:
-    await _status_action(callback, effective_context, db_session, staff.block_manager)
-
-
-@router.callback_query(F.data.startswith("stf:unblock:"))
-async def cb_unblock(
-    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
-) -> None:
-    await _status_action(callback, effective_context, db_session, staff.unblock_manager)
-
-
-@router.callback_query(F.data.startswith("stf:demote:"))
-async def cb_demote(
+@router.callback_query(F.data.startswith("stf:delete:"))
+async def cb_delete(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
 ) -> None:
     if callback.message is None or not _is_owner(effective_context):
@@ -222,15 +208,15 @@ async def cb_demote(
         await callback.answer(_STALE, show_alert=True)
         return
     await callback.message.edit_text(
-        texts.demote_confirm_text(card),
-        reply_markup=kb.build_demote_confirm_kb(card),
+        texts.delete_confirm_text(card),
+        reply_markup=kb.build_delete_confirm_kb(card),
         parse_mode="HTML",
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("stf:demoteok:"))
-async def cb_demote_ok(
+@router.callback_query(F.data.startswith("stf:deleteok:"))
+async def cb_delete_ok(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
 ) -> None:
     if callback.message is None or not _is_owner(effective_context):
@@ -241,14 +227,16 @@ async def cb_demote_ok(
         await callback.answer(_STALE, show_alert=True)
         return
     try:
-        await staff.demote_manager(
-            db_session, actor=_actor(effective_context), manager_id=manager_id
+        await staff.delete_manager(
+            db_session,
+            actor=_actor(effective_context),
+            manager_id=manager_id,
         )
         await db_session.commit()
     except ClientServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    await callback.answer("Роль знято")
+    await callback.answer("Менеджера видалено")
     await _render_list(
         callback.message, db_session, effective_context, offset=0, query=None, edit=True
     )
@@ -263,6 +251,28 @@ async def cb_add(
         return
     await state.set_state(StaffState.waiting_for_add)
     await callback.message.answer(texts.add_prompt_text(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "home:staff")
+async def staff_open_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None or not _is_owner(effective_context):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.clear()
+    await _render_list(
+        callback.message,
+        db_session,
+        effective_context,
+        offset=0,
+        query=None,
+        edit=True,
+    )
     await callback.answer()
 
 

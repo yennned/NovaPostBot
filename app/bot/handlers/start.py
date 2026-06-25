@@ -5,11 +5,12 @@ from __future__ import annotations
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards import build_contact_keyboard, build_role_menu
+from app.bot.keyboards import build_contact_keyboard, build_home_keyboard
 from app.bot.notify import BotNotifier
+from app.bot.screen import remember_screen
 from app.bot.services import StartService
 from app.bot.states import StartStates
 from app.bot.texts import (
@@ -50,7 +51,7 @@ async def _render_home(message: Message, context: EffectiveContext) -> None:
 
     await message.answer(
         "\n".join(parts),
-        reply_markup=build_role_menu(context.effective_role),
+        reply_markup=build_home_keyboard(context.effective_role),
     )
 
 
@@ -81,7 +82,7 @@ async def start_command(
         return
 
     role = effective_context.effective_role or user.role
-    await message.answer(welcome_text(user, role), reply_markup=build_role_menu(role))
+    await message.answer(welcome_text(user, role), reply_markup=build_home_keyboard(role))
 
 
 @router.message(StartStates.waiting_for_contact, F.contact)
@@ -126,9 +127,48 @@ async def receive_contact(
     if result.user.status is UserStatus.active:
         await message.answer(
             welcome_text(result.user, result.user.role),
-            reply_markup=build_role_menu(result.user.role),
+            reply_markup=build_home_keyboard(result.user.role),
         )
         return
 
     text = registered_pending_text(result.user) if result.created else pending_text(result.user)
     await message.answer(text, reply_markup=build_contact_keyboard())
+
+
+@router.callback_query(F.data == "home:open")
+async def home_callback(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer("Кнопка застаріла, відкрийте /start ще раз.", show_alert=True)
+        return
+    await state.clear()
+    if effective_context.effective_role is None:
+        await callback.message.edit_text(dev_help_text())
+        await callback.answer()
+        return
+
+    banner = dev_mode_banner(
+        effective_context.effective_role,
+        impersonated=effective_context.effective_user is not None
+        and effective_context.actor_user is not None
+        and effective_context.effective_user.telegram_id
+        != effective_context.actor_user.telegram_id,
+    )
+    parts: list[str] = []
+    if effective_context.is_dev:
+        parts.append(banner)
+    if effective_context.effective_user is not None:
+        parts.append(
+            welcome_text(effective_context.effective_user, effective_context.effective_role)
+        )
+    else:
+        parts.append(f"Відкриваю меню {effective_context.effective_role.value}.")
+    await callback.message.edit_text(
+        "\n".join(parts),
+        reply_markup=build_home_keyboard(effective_context.effective_role),
+    )
+    await remember_screen(state, callback.message)
+    await callback.answer()

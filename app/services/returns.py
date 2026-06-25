@@ -5,14 +5,18 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment
 from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.exceptions import InvalidReturnDecision, ShipmentActionForbidden, ShipmentNotFound
 from app.services.inventory import stock_sheet_key
 from app.sheets import StockDelta, StockSource, build_stock_source
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,3 +137,7 @@ async def receive_returned_shipment(
             "rejected_quantity": rejected_total,
         },
     )
+    try:
+        await sync_client_sheets(session, client=shipment.client)
+    except Exception:
+        logger.warning("return_sheet_sync_failed", shipment_id=str(shipment.id), exc_info=True)

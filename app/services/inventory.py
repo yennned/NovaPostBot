@@ -48,12 +48,12 @@ def _require_active_client(client: User) -> None:
 def stock_sheet_key(client: User) -> str:
     """Ключ листа склада.
 
-    Пока используем имя клиента как основной идентификатор листа; если ПІБ ещё
-    нет, fallback — Telegram ID. Этого достаточно до появления отдельного mapping
-    слоя CRM/WMS в поздних фазах.
+    Предпочитаем персистентное поле `users.stock_sheet_key`, чтобы смена ПІБ не
+    ломала связь с Sheets между чтением и следующей синхронизацией. Fallback —
+    старое поведение для обратной совместимости и данных до миграции.
     """
 
-    return client.full_name or str(client.telegram_id)
+    return client.stock_sheet_key or client.full_name or str(client.telegram_id)
 
 
 def _build_items(rows: list[StockRow], reserved: dict[str, int]) -> list[InventoryItem]:

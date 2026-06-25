@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from app.bot import permissions as perm
-from app.bot.handlers.staff import cb_flag, staff_add_input, staff_open
+from app.bot.handlers.staff import cb_delete_ok, cb_flag, staff_add_input, staff_open
 from app.bot.types import EffectiveContext
-from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
+from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
+from app.db.repositories import SupportRepository, UserRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -109,3 +109,33 @@ async def test_cb_flag_toggles_permission(db_session: AsyncSession):
     refreshed = await UserRepository(db_session).get_by_id(manager.id)
     assert refreshed.permissions.get(flag_key) is False  # было on по умолчанию → выключили
     assert cb.message.edits  # карточка перерисована
+
+
+async def test_cb_delete_ok_removes_manager_from_staff(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    manager = await _manager(db_session)
+    client = await UserRepository(db_session).create(
+        telegram_id=200,
+        full_name="Клієнт",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+    await UserRepository(db_session).set_duty(manager, on_duty=True, duty_since=None)
+    thread = await SupportRepository(db_session).create_thread(
+        client_id=client.id,
+        assigned_manager_id=manager.id,
+        status=SupportThreadStatus.open,
+    )
+    cb = FakeCallback(data=f"stf:deleteok:{manager.id}")
+
+    await cb_delete_ok(cb, _owner_ctx(owner), db_session)
+
+    refreshed = await UserRepository(db_session).get_by_id(manager.id)
+    thread_refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
+    assert refreshed.role is UserRole.client
+    assert refreshed.status is UserStatus.blocked
+    assert refreshed.on_duty is False
+    assert thread_refreshed.status is SupportThreadStatus.waiting
+    assert thread_refreshed.assigned_manager_id is None
+    assert cb.message.edits
+    assert cb.acks[-1]["text"] == "Менеджера видалено"

@@ -25,10 +25,11 @@ from app.config import Settings, get_settings
 from app.db.models.enums import OrgType, UserRole, UserStatus
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
-from app.db.repositories import AuditRepository, SenderProfileRepository
+from app.db.repositories import AuditRepository, SenderProfileRepository, UserRepository
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaAuthError, NovaPoshtaValidationError
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.exceptions import (
     PermissionDenied,
     SenderProfileIncomplete,
@@ -231,6 +232,10 @@ async def update_profile(
             affected_entity=f"sender_profile:{profile.id}",
             after={k: ("***" if k == "np_api_key" else v) for k, v in changes.items()},
         )
+        if "name" in changes:
+            client = await UserRepository(session).get_by_id(profile.client_id)
+            if client is not None:
+                await sync_client_sheets(session, client=client)
     return _view(profile)
 
 

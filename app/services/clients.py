@@ -19,6 +19,7 @@ from app.config import Settings
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, SenderProfileRepository, UserRepository
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
@@ -294,6 +295,7 @@ async def update_client_profile(
 
     before = {"full_name": user.full_name, "phone": user.phone}
     changed = False
+    previous_sheet_key = user.stock_sheet_key
     if full_name is not None and full_name != user.full_name:
         user.full_name = full_name
         changed = True
@@ -314,4 +316,6 @@ async def update_client_profile(
             before=before,
             after={"full_name": user.full_name, "phone": user.phone},
         )
+        if full_name is not None:
+            await sync_client_sheets(session, client=user, previous_sheet_key=previous_sheet_key)
     return await _card(session, user)

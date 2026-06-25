@@ -69,10 +69,13 @@ def build_inventory_kb(page: InventoryPage) -> InlineKeyboardMarkup:
         )
         rows.append(category_row)
     for item in page.items:
+        price = f"{item.price:.2f} ₴" if item.price is not None else "—"
+        name = item.name[:18]
+        category = f"{item.category[:10]} · " if item.category else ""
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{item.sku} · {item.available} шт",
+                    text=f"{item.sku} · {category}{name} · {price} · {item.available} шт",
                     callback_data=f"cab:products:{page.offset}",
                 )
             ]
@@ -80,6 +83,7 @@ def build_inventory_kb(page: InventoryPage) -> InlineKeyboardMarkup:
     nav = _nav_row("cab:products", offset=page.offset, total=page.total, limit=page.limit)
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -113,6 +117,7 @@ def build_shipments_kb(page: ShipmentPage, bucket: str) -> InlineKeyboardMarkup:
     )
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -128,7 +133,7 @@ def build_shipment_card_kb(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="❌ Скасувати",
+                    text="🗑 Видалити ТТН",
                     callback_data=f"cab:cancel:{bucket}:{offset}:{shipment_id}",
                 )
             ]
@@ -141,6 +146,7 @@ def build_shipment_card_kb(
             )
         ]
     )
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -163,7 +169,14 @@ def build_stats_kb(selected: str) -> InlineKeyboardMarkup:
         )
         for shift in range(3)
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[row, days_row])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            row,
+            days_row,
+            [InlineKeyboardButton(text="📅 Обрати дату", callback_data="cab:statspick")],
+            [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
+        ]
+    )
 
 
 def build_settings_kb(view: ClientSettingsView) -> InlineKeyboardMarkup:
@@ -196,6 +209,7 @@ def build_settings_kb(view: ClientSettingsView) -> InlineKeyboardMarkup:
                     callback_data="cab:set:profiles",
                 )
             ],
+            [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -212,6 +226,7 @@ def build_sender_profiles_kb(profiles: list[SenderProfileView]) -> InlineKeyboar
         for profile in profiles
     ]
     rows.append([InlineKeyboardButton(text="◀ До налаштувань", callback_data="cab:set:back")])
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -254,4 +269,5 @@ def build_sender_profile_kb(profile: SenderProfileView) -> InlineKeyboardMarkup:
             ]
         )
     rows.append([InlineKeyboardButton(text="◀ До списку ФОП", callback_data="cab:set:profiles")])
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

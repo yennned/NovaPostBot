@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -17,10 +18,13 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import TrackingStatus
 from app.novaposhta.tracking import map_tracking_status
 from app.services import notifications
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.inventory import stock_sheet_key
 from app.services.notifications import Notifier
 from app.sheets import StockDelta, StockSource, build_stock_source
 from app.utils.sla import sla_met
+
+logger = structlog.get_logger(__name__)
 
 NONSTANDARD_STATUSES = {
     ShipmentStatus.returning,
@@ -176,6 +180,10 @@ async def _apply_dispatch_stock(
             quantity_after=-item.quantity,
             comment=f"Списання по ТТН {shipment.ttn_number or '—'}",
         )
+    try:
+        await sync_client_sheets(session, client=shipment.client)
+    except Exception:
+        logger.warning("tracking_sheet_sync_failed", shipment_id=str(shipment.id), exc_info=True)
 
 
 def _chunked(items: list[str], *, size: int) -> list[list[str]]:

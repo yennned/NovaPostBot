@@ -21,8 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.bot.keyboards import support as kb
-from app.bot.keyboards.menus import build_role_menu
+from app.bot.keyboards.menus import build_home_keyboard
 from app.bot.notify import BotNotifier
+from app.bot.screen import remember_screen
 from app.bot.states import SupportState
 from app.bot.texts import support as texts
 from app.bot.types import EffectiveContext
@@ -107,7 +108,7 @@ async def client_chat_exit(
 ) -> None:
     await state.clear()
     role = effective_context.effective_role or UserRole.client
-    await message.answer(texts.chat_exited_text(), reply_markup=build_role_menu(role))
+    await message.answer(texts.chat_exited_text(), reply_markup=build_home_keyboard(role))
 
 
 @router.message(SupportState.client_chatting, F.text)
@@ -124,7 +125,7 @@ async def client_chat_message(
         await state.clear()
         await message.answer(
             texts.thread_unavailable_text(),
-            reply_markup=build_role_menu(effective_context.effective_role or UserRole.client),
+            reply_markup=build_home_keyboard(effective_context.effective_role or UserRole.client),
         )
         return
 
@@ -159,6 +160,37 @@ async def client_open(
     await message.answer(
         texts.duty_card_text(contact), reply_markup=kb.build_client_start_kb(), parse_mode="HTML"
     )
+
+
+@router.callback_query(F.data == "home:support_client")
+async def client_open_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    client = _client_user(effective_context)
+    if client is None or callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.clear()
+    existing = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    if existing is not None:
+        await callback.message.edit_text(
+            texts.client_resume_text(),
+            reply_markup=kb.build_client_start_kb(),
+        )
+        await remember_screen(state, callback.message)
+        await callback.answer()
+        return
+    contact = await support.get_duty_contact(db_session)
+    await callback.message.edit_text(
+        texts.duty_card_text(contact),
+        reply_markup=kb.build_client_start_kb(),
+        parse_mode="HTML",
+    )
+    await remember_screen(state, callback.message)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "sup:start")
@@ -231,7 +263,7 @@ async def staff_reply_exit(
 ) -> None:
     await state.clear()
     role = effective_context.effective_role or UserRole.manager
-    await message.answer(texts.reply_exited_text(), reply_markup=build_role_menu(role))
+    await message.answer(texts.reply_exited_text(), reply_markup=build_home_keyboard(role))
 
 
 @router.message(SupportState.manager_replying, F.text)
@@ -252,7 +284,7 @@ async def staff_reply_message(
         await state.clear()
         await message.answer(
             texts.thread_unavailable_text(),
-            reply_markup=build_role_menu(effective_context.effective_role or UserRole.manager),
+            reply_markup=build_home_keyboard(effective_context.effective_role or UserRole.manager),
         )
         return
     if not _can_access_thread(effective_context, thread):
@@ -290,6 +322,32 @@ async def staff_open(
         return
     await state.clear()
     await _show_inbox(message, db_session, effective_context, offset=0, query=None, edit=False)
+
+
+@router.callback_query(F.data == "home:support_staff")
+async def staff_open_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None or not _is_staff(effective_context):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    if not _can_handle_support(effective_context):
+        await callback.answer(texts.support_unavailable_text(), show_alert=True)
+        return
+    await state.clear()
+    await _show_inbox(
+        callback.message,
+        db_session,
+        effective_context,
+        offset=0,
+        query=None,
+        edit=True,
+    )
+    await remember_screen(state, callback.message)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("sup:inbox:"))

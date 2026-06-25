@@ -137,7 +137,7 @@ async def test_block_clears_duty_and_threads_then_unblock(db_session: AsyncSessi
     assert back.status is UserStatus.active
 
 
-async def test_demote_manager_clears_role_duty_threads(db_session: AsyncSession):
+async def test_delete_manager_blocks_demotes_and_clears_threads(db_session: AsyncSession):
     owner = await _owner(db_session)
     manager = await _manager(db_session)
     client = await _client(db_session)
@@ -146,10 +146,13 @@ async def test_demote_manager_clears_role_duty_threads(db_session: AsyncSession)
         client_id=client.id, assigned_manager_id=manager.id, status=SupportThreadStatus.open
     )
 
-    await staff.demote_manager(db_session, actor=owner, manager_id=manager.id)
+    await staff.delete_manager(db_session, actor=owner, manager_id=manager.id)
 
     assert manager.role is UserRole.client
+    assert manager.status is UserStatus.blocked
     assert manager.on_duty is False
+    assert manager.permissions == {}
     refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
     assert refreshed.status is SupportThreadStatus.waiting
-    assert "manager_demoted" in await _audit_actions(db_session)
+    assert refreshed.assigned_manager_id is None
+    assert "manager_deleted" in await _audit_actions(db_session)

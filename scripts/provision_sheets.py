@@ -36,8 +36,9 @@ from app.db.models.user import User
 from google.oauth2.service_account import Credentials
 from sqlalchemy import select
 
-# Канонический порядок колонок — строго как append/чтение в app/sheets/inventory.py.
-STOCK_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна"]
+# Первые 5 колонок остаются каноническими для runtime-чтения/append в
+# app/sheets/inventory.py; `Резерв`/`Доступно` — вычисляемые UI-колонки.
+STOCK_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна", "Резерв", "Доступно"]
 INTAKE_HEADERS = [
     "Дата",
     "Артикул",

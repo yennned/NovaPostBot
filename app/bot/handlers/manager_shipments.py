@@ -110,6 +110,68 @@ async def open_warehouse(
     await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
+@router.callback_query(F.data == "home:warehouse")
+async def open_warehouse_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    if not _is_staff(effective_context):
+        raise SkipHandler()
+    settings = get_settings()
+    lines = ["📦 <b>Склад</b>"]
+
+    links = [
+        _book_link(book_id, title)
+        for book_id, title in (
+            (settings.sheets_stock_book_id, "Книга «Склад»"),
+            (settings.sheets_intake_book_id, "Книга «Приймання»"),
+        )
+        if book_id
+    ]
+    if links:
+        lines += ["", *links]
+
+    clients = (
+        (
+            await db_session.execute(
+                select(User)
+                .where(User.role == UserRole.client, User.status == UserStatus.active)
+                .order_by(User.full_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    lines += ["", "<b>Залишки по клієнтах:</b>"]
+    if not clients:
+        lines.append("• активних клієнтів немає")
+    else:
+        total_positions = total_units = 0
+        read_ok = False
+        for client, totals in await inventory.stock_summary(list(clients)):
+            label = html.escape(client.full_name or str(client.telegram_id))
+            if totals is None:
+                lines.append(f"• {label} — лист недоступний")
+                continue
+            read_ok = True
+            total_positions += totals.positions
+            total_units += totals.units
+            lines.append(f"• {label} — {totals.positions} поз. / {totals.units} од.")
+        if read_ok:
+            lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
+        else:
+            lines += ["", "⚠️ Залишки тимчасово недоступні (немає доступу до листів)."]
+
+    await callback.message.edit_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+    )
+    await callback.answer()
+
+
 def _default_return_decisions(card) -> dict[str, bool]:
     return {item.sku: True for item in card.shipment.items}
 
@@ -207,6 +269,34 @@ async def open_queue(
         )
     except ClientServiceError as exc:
         await message.answer(str(exc))
+
+
+@router.callback_query(F.data == "home:manager_shipments")
+async def open_queue_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    if not _is_staff(effective_context):
+        raise SkipHandler()
+    await state.clear()
+    await state.update_data(manager_shipment_query=None, manager_shipment_bucket="created")
+    try:
+        await _edit_queue(
+            callback.message,
+            session=db_session,
+            context=effective_context,
+            state=state,
+            bucket="created",
+        )
+    except ClientServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("mq:list:"))

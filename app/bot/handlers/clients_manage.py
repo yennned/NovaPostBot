@@ -105,6 +105,30 @@ async def open_clients(
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+@router.callback_query(F.data == "home:clients")
+async def open_clients_home(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    actor = effective_context.actor_user
+    if actor is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        text, kb = await _list_payload(db_session, actor, "pending", 0)
+    except PermissionDenied:
+        await callback.answer("Недостатньо прав для розділу «Клієнти».", show_alert=True)
+        return
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("cl:list:"))
 async def cb_list(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession

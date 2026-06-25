@@ -22,7 +22,10 @@ _STATUS_MARK = {"open": "🟢", "waiting": "🟡", "closed": "⚪"}
 
 def build_client_start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="💬 Почати чат", callback_data="sup:start")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Почати чат", callback_data="sup:start")],
+            [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
+        ]
     )
 
 
@@ -64,6 +67,7 @@ def build_inbox_kb(
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"sup:inbox:{offset + limit}"))
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -82,4 +86,5 @@ def build_thread_kb(
             ]
         )
     rows.append([InlineKeyboardButton(text="◀️ До списку", callback_data=f"sup:inbox:{offset}")])
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

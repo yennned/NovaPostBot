@@ -33,7 +33,6 @@ from app.bot.keyboards.ttn import (
     build_cart_picker_kb,
     build_cart_review_kb,
     build_city_results_kb,
-    build_cod_amount_kb,
     build_parcel_kb,
     build_payer_edit_kb,
     build_payment_edit_kb,
@@ -44,6 +43,7 @@ from app.bot.keyboards.ttn import (
     build_warehouse_results_kb,
 )
 from app.bot.notify import BotNotifier
+from app.bot.screen import edit_stored_screen, remember_screen
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as texts
 from app.bot.types import EffectiveContext
@@ -122,6 +122,8 @@ async def start_create_ttn(
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
+    *,
+    edit: bool = False,
 ) -> None:
     """Вход в поток: ранний резолв ФОП (configured/validated), затем кошик."""
     client = _effective_client(effective_context)
@@ -151,11 +153,12 @@ async def start_create_ttn(
         sender_profile_id=str(sender_profile_id),
         cart={},
         cart_offset=0,
+        ttn_query=None,
         size_token=DEFAULT_SIZE_TOKEN,
         nonce=uuid.uuid4().hex,
     )
     try:
-        await _show_picker(message, db_session, client, state, offset=0, edit=False)
+        await _show_picker(message, db_session, client, state, offset=0, edit=edit)
     except PermissionDenied as exc:
         await message.answer(str(exc))
 
@@ -172,7 +175,10 @@ async def _show_picker(
     offset: int,
     edit: bool,
 ) -> None:
-    page = await list_inventory(session, client=client, limit=TTN_PAGE_SIZE, offset=offset)
+    query = (await state.get_data()).get("ttn_query")
+    page = await list_inventory(
+        session, client=client, query=query, limit=TTN_PAGE_SIZE, offset=offset
+    )
     await state.update_data(cart_offset=page.offset)
     data = await state.get_data()
     cart_count = len(data.get("cart", {}))
@@ -182,6 +188,8 @@ async def _show_picker(
         await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await target.answer(text, reply_markup=kb, parse_mode="HTML")
+    if edit and isinstance(target, Message):
+        await remember_screen(state, target)
 
 
 async def _show_stepper(message: Message, state: FSMContext, *, edit: bool) -> None:
@@ -201,6 +209,8 @@ async def _show_stepper(message: Message, state: FSMContext, *, edit: bool) -> N
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    if edit:
+        await remember_screen(state, message)
 
 
 def _cart_lines(cart: dict) -> list[tuple[str, int, Decimal | None]]:
@@ -216,6 +226,7 @@ async def _show_cart(message: Message, state: FSMContext) -> None:
     text = texts.cart_review_text(_cart_lines(cart))
     kb = build_cart_review_kb(list(cart.keys()))
     await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await remember_screen(state, message)
 
 
 async def _show_parcel(message: Message, state: FSMContext, *, edit: bool = True) -> None:
@@ -227,6 +238,8 @@ async def _show_parcel(message: Message, state: FSMContext, *, edit: bool = True
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    if edit:
+        await remember_screen(state, message)
 
 
 def _cart_total(cart: dict) -> Decimal:
@@ -243,8 +256,7 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
     updates: dict = {}
     cart = data.get("cart", {})
     if data.get("insured_amount") is None:
-        total = _cart_total(cart)
-        updates["insured_amount"] = f"{total:f}" if total > 0 else "0"
+        updates["insured_amount"] = "0"
     if data.get("description") is None:
         names = list(dict.fromkeys(e["name"] for e in cart.values()))
         updates["description"] = (", ".join(names)[:100]) or "Товари"
@@ -252,6 +264,9 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
         updates["payment_method"] = "prepay"
     if data.get("payer_type") is None:
         updates["payer_type"] = "Recipient"
+    if data.get("payment_method") == "cod":
+        total = _cart_total(cart)
+        updates["cod_amount"] = f"{total:f}" if total > 0 else None
     if updates:
         await state.update_data(**updates)
         data = await state.get_data()
@@ -325,6 +340,8 @@ async def _show_card(
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    if edit:
+        await remember_screen(state, message)
 
 
 # ------------------------------------------------------------------- кошик: набор
@@ -358,6 +375,70 @@ async def cb_page(
     await callback.answer()
 
 
+@router.callback_query(F.data == "cab:ttn:search")
+async def cb_search_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.set_state(CreateTtnState.entering_item_search)
+    await callback.message.answer("Введіть SKU, назву або категорію товару.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cab:ttn:searchclear")
+async def cb_search_clear(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    await state.update_data(ttn_query=None)
+    await state.set_state(CreateTtnState.picking_items)
+    await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
+    await callback.answer("Пошук скинуто.")
+
+
+@router.message(CreateTtnState.entering_item_search, F.text, ~F.text.startswith("/"))
+async def receive_item_search(
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    client = _effective_client(effective_context)
+    if client is None:
+        await message.answer("Авторизуйтесь через /start.")
+        return
+    await state.update_data(ttn_query=(message.text or "").strip())
+    await state.set_state(CreateTtnState.picking_items)
+    query = (await state.get_data()).get("ttn_query")
+    page = await list_inventory(
+        db_session,
+        client=client,
+        query=query,
+        limit=TTN_PAGE_SIZE,
+        offset=0,
+    )
+    await state.update_data(cart_offset=page.offset)
+    data = await state.get_data()
+    if not await edit_stored_screen(
+        bot,
+        state,
+        text=texts.cart_picker_text(page, cart_count=len(data.get("cart", {}))),
+        reply_markup=build_cart_picker_kb(page, cart_count=len(data.get("cart", {}))),
+        parse_mode="HTML",
+    ):
+        await _show_picker(message, db_session, client, state, offset=0, edit=False)
+
+
 @router.callback_query(F.data.startswith("cab:ttn:pick:"))
 async def cb_pick(
     callback: CallbackQuery,
@@ -378,7 +459,13 @@ async def cb_pick(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     offset = (await state.get_data()).get("cart_offset", 0)
-    page = await list_inventory(db_session, client=client, limit=TTN_PAGE_SIZE, offset=offset)
+    page = await list_inventory(
+        db_session,
+        client=client,
+        query=(await state.get_data()).get("ttn_query"),
+        limit=TTN_PAGE_SIZE,
+        offset=offset,
+    )
     if idx < 0 or idx >= len(page.items):
         await callback.answer(_STALE, show_alert=True)
         return
@@ -465,7 +552,7 @@ async def cb_qty_num(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(CreateTtnState.entering_qty, F.text, ~F.text.startswith("/"))
-async def receive_qty(message: Message, state: FSMContext) -> None:
+async def receive_qty(message: Message, bot: Bot, state: FSMContext) -> None:
     pending = (await state.get_data()).get("pending")
     if pending is None:
         await state.set_state(CreateTtnState.picking_items)
@@ -482,7 +569,23 @@ async def receive_qty(message: Message, state: FSMContext) -> None:
     pending["qty"] = qty
     await state.update_data(pending=pending)
     await state.set_state(CreateTtnState.picking_items)
-    await _show_stepper(message, state, edit=False)
+    item = InventoryItem(
+        sku=pending["sku"],
+        name=pending["name"],
+        category=None,
+        stock=pending["available"],
+        reserved=0,
+        available=pending["available"],
+        price=Decimal(pending["price"]) if pending["price"] is not None else None,
+    )
+    if not await edit_stored_screen(
+        bot,
+        state,
+        text=texts.stepper_text(item, pending["qty"]),
+        reply_markup=build_stepper_kb(qty=pending["qty"], available=pending["available"]),
+        parse_mode="HTML",
+    ):
+        await _show_stepper(message, state, edit=False)
 
 
 @router.callback_query(F.data == "cab:ttn:qok")
@@ -660,15 +763,28 @@ async def cb_weight_prompt(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(CreateTtnState.entering_weight, F.text, ~F.text.startswith("/"))
-async def receive_weight(message: Message, state: FSMContext) -> None:
+async def receive_weight(message: Message, bot: Bot, state: FSMContext) -> None:
     weight = _parse_weight(message.text or "")
     if weight is None:
         await message.answer(texts.weight_invalid_text())
         return
-    # Экран параметрів — новым сообщением (текстовый ввод нельзя редактировать как inline).
     await state.update_data(weight=weight)
     await state.set_state(CreateTtnState.picking_parcel)
-    await _show_parcel(message, state, edit=False)
+    data = await state.get_data()
+    if not await edit_stored_screen(
+        bot,
+        state,
+        text=texts.parcel_text(
+            weight=data.get("weight"),
+            size_token=data.get("size_token", DEFAULT_SIZE_TOKEN),
+        ),
+        reply_markup=build_parcel_kb(
+            size_token=data.get("size_token", DEFAULT_SIZE_TOKEN),
+            weight_set=bool(data.get("weight")),
+        ),
+        parse_mode="HTML",
+    ):
+        await _show_parcel(message, state, edit=False)
 
 
 # ----------------------------------------------------------------- тип отримувача
@@ -751,6 +867,7 @@ async def receive_recipient_phone(message: Message, state: FSMContext) -> None:
 @router.message(CreateTtnState.entering_city_query, F.text, ~F.text.startswith("/"))
 async def receive_city_query(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -782,11 +899,18 @@ async def receive_city_query(
         return
     serial = [{"ref": c.ref, "name": c.name, "area": c.area} for c in cities]
     await state.update_data(cities=serial)
-    await message.answer(
-        texts.city_results_text(query),
+    if not await edit_stored_screen(
+        bot,
+        state,
+        text=texts.city_results_text(query),
         reply_markup=build_city_results_kb(serial),
         parse_mode="HTML",
-    )
+    ):
+        await message.answer(
+            texts.city_results_text(query),
+            reply_markup=build_city_results_kb(serial),
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data.startswith("cab:ttn:city:"))
@@ -860,6 +984,8 @@ async def _show_warehouses(message: Message, state: FSMContext, *, offset: int, 
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    if edit:
+        await remember_screen(state, message)
 
 
 @router.callback_query(F.data.startswith("cab:ttn:whpage:"))
@@ -890,6 +1016,7 @@ async def cb_wh_find(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(CreateTtnState.entering_warehouse_query, F.text, ~F.text.startswith("/"))
 async def receive_warehouse_query(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -927,7 +1054,15 @@ async def receive_warehouse_query(
         return
     serial = [{"ref": w.ref, "number": w.number, "description": w.description} for w in whs]
     await state.update_data(warehouses=serial, wh_offset=0)
-    await _show_warehouses(message, state, offset=0, edit=False)
+    city_name = data.get("recipient_city_name", "")
+    if not await edit_stored_screen(
+        bot,
+        state,
+        text=texts.warehouse_results_text(city_name, total=len(serial)),
+        reply_markup=build_warehouse_results_kb(serial, offset=0),
+        parse_mode="HTML",
+    ):
+        await _show_warehouses(message, state, offset=0, edit=False)
 
 
 @router.callback_query(F.data.startswith("cab:ttn:wh:"))
@@ -1103,6 +1238,7 @@ async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(CreateTtnState.editing_field, F.text, ~F.text.startswith("/"))
 async def receive_edit(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -1144,13 +1280,6 @@ async def receive_edit(
             await message.answer(texts.description_invalid())
             return
         updates["description"] = raw[:100]
-    elif field == "cod":
-        amount = _parse_money(raw, positive=True)
-        if amount is None:
-            await message.answer(texts.cod_invalid())
-            return
-        updates["cod_amount"] = amount
-        updates["payment_method"] = "cod"
     else:
         await state.set_state(CreateTtnState.summary)
         await message.answer(_STALE)
@@ -1162,9 +1291,24 @@ async def receive_edit(
     if client is None:
         await message.answer("Авторизуйтесь через /start.")
         return
-    await _show_card(
-        message, state, session=db_session, client=client, np_client=np_client, edit=False
-    )
+    data = await _ensure_card_defaults(state)
+    price = await _card_price(db_session, client, data, np_client, force=True)
+    await state.update_data(price_cache=price)
+    if not await edit_stored_screen(
+        bot,
+        state,
+        text=texts.card_text(data, price),
+        reply_markup=build_card_kb(is_org=data.get("recipient_kind") == "organization"),
+        parse_mode="HTML",
+    ):
+        await _show_card(
+            message,
+            state,
+            session=db_session,
+            client=client,
+            np_client=np_client,
+            edit=False,
+        )
 
 
 @router.callback_query(F.data.startswith("cab:ttn:setsz:"))
@@ -1243,39 +1387,21 @@ async def cb_set_payment(
         ):
             await callback.answer()
     elif mode == "cod":
-        # payment_method=cod выставим только после ввода суммы (иначе COD без суммы).
-        await state.update_data(edit_field="cod")
-        await state.set_state(CreateTtnState.editing_field)
-        await callback.message.answer(texts.cod_amount_prompt(), reply_markup=build_cod_amount_kb())
-        await callback.answer()
+        total = _cart_total((await state.get_data()).get("cart", {}))
+        await state.update_data(
+            payment_method="cod",
+            cod_amount=(f"{total:f}" if total > 0 else None),
+        )
+        if await _back_to_card(
+            callback,
+            state,
+            session=db_session,
+            np_client=np_client,
+            effective_context=effective_context,
+        ):
+            await callback.answer("Накладений платіж привʼязано до суми кошика.")
     else:
         await callback.answer(_STALE, show_alert=True)
-
-
-@router.callback_query(F.data == "cab:ttn:codeq")
-async def cb_cod_equal(
-    callback: CallbackQuery,
-    effective_context: EffectiveContext,
-    db_session: AsyncSession,
-    np_client: NovaPoshtaClient,
-    state: FSMContext,
-) -> None:
-    if callback.message is None:
-        await callback.answer(_STALE, show_alert=True)
-        return
-    insured = (await state.get_data()).get("insured_amount") or "0"
-    if Decimal(insured) <= 0:
-        await callback.answer("Вартість товарів — 0, введіть суму вручну.", show_alert=True)
-        return
-    await state.update_data(cod_amount=insured, payment_method="cod")
-    if await _back_to_card(
-        callback,
-        state,
-        session=db_session,
-        np_client=np_client,
-        effective_context=effective_context,
-    ):
-        await callback.answer("Суму COD прирівняно до вартості.")
 
 
 # ----------------------------------------------------------------- відправлення ТТН
@@ -1397,7 +1523,7 @@ async def cb_again(
         await callback.answer(_STALE, show_alert=True)
         return
     await callback.answer()
-    await start_create_ttn(callback.message, state, effective_context, db_session)
+    await start_create_ttn(callback.message, state, effective_context, db_session, edit=True)
 
 
 @router.message(F.text == "🚚 Створити ТТН")
@@ -1409,6 +1535,20 @@ async def open_create_ttn(
 ) -> None:
     """Reply-кнопка меню клиента → вход в поток создания ТТН."""
     await start_create_ttn(message, state, effective_context, db_session)
+
+
+@router.callback_query(F.data == "home:ttn")
+async def open_create_ttn_home(
+    callback: CallbackQuery,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await start_create_ttn(callback.message, state, effective_context, db_session, edit=True)
+    await callback.answer()
 
 
 # --------------------------------------------------------------------- скасування

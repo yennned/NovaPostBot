@@ -266,7 +266,7 @@ async def test_receive_qty_validates_range():
     state = FakeState(pending={"sku": "S", "name": "X", "available": 5, "price": "100", "qty": 1})
     await state.set_state(CreateTtnState.entering_qty)
     msg = FakeMessage(text="99")
-    await h.receive_qty(msg, state)
+    await h.receive_qty(msg, object(), state)
     assert "1–5" in msg.answers[-1]["text"]  # отклонено
     assert state.state == CreateTtnState.entering_qty
 
@@ -275,7 +275,7 @@ async def test_receive_qty_accepts():
     state = FakeState(pending={"sku": "S", "name": "X", "available": 5, "price": "100", "qty": 1})
     await state.set_state(CreateTtnState.entering_qty)
     msg = FakeMessage(text="3")
-    await h.receive_qty(msg, state)
+    await h.receive_qty(msg, object(), state)
     assert state._data["pending"]["qty"] == 3
     assert state.state == CreateTtnState.picking_items
 
@@ -322,7 +322,7 @@ async def test_receive_weight_invalid():
     state = FakeState(size_token="s")
     await state.set_state(CreateTtnState.entering_weight)
     msg = FakeMessage(text="abc")
-    await h.receive_weight(msg, state)
+    await h.receive_weight(msg, object(), state)
     assert "Невірна вага" in msg.answers[-1]["text"]
     assert "weight" not in state._data
     assert state.state == CreateTtnState.entering_weight
@@ -332,7 +332,7 @@ async def test_receive_weight_accepts_comma():
     state = FakeState(size_token="s")
     await state.set_state(CreateTtnState.entering_weight)
     msg = FakeMessage(text="2,5")
-    await h.receive_weight(msg, state)
+    await h.receive_weight(msg, object(), state)
     assert state._data["weight"] == "2.5"
     assert state.state == CreateTtnState.picking_parcel
 
@@ -476,7 +476,7 @@ async def test_city_query_shows_results(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Київ")
-    await h.receive_city_query(msg, state, _ctx(_CLIENT), None, object(), object())
+    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
     assert state._data["cities"][0]["ref"] == "c1"
     assert msg.answers[-1]["reply_markup"] is not None
 
@@ -486,7 +486,7 @@ async def test_city_query_not_found(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Хххх")
-    await h.receive_city_query(msg, state, _ctx(_CLIENT), None, object(), object())
+    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
     assert "cities" not in state._data
     assert "Нічого не знайшли" in msg.answers[-1]["text"]
 
@@ -579,7 +579,7 @@ async def test_card_computes_defaults(monkeypatch):
     state = _card_state()
     cb = FakeCallback("cab:ttn:wh:0")
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
-    assert state._data["insured_amount"] == "300"  # 150 × 2
+    assert state._data["insured_amount"] == "0"
     assert state._data["description"] == "Кава"
     assert state._data["payment_method"] == "prepay"
     assert state._data["payer_type"] == "Recipient"
@@ -665,7 +665,7 @@ async def test_receive_edit_name_updates_and_renders(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state(edit_field="name")
     msg = FakeMessage(text="Петренко Петро")
-    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
     assert state._data["recipient_name"] == "Петренко Петро"
     assert state.state == CreateTtnState.summary
     assert msg.answers  # карточка перерисована
@@ -675,7 +675,7 @@ async def test_receive_edit_phone_invalid_stays(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state(edit_field="phone")
     msg = FakeMessage(text="not-a-phone")
-    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
     assert state._data["recipient_phone"] == "380671234567"  # не изменился
 
 
@@ -683,25 +683,24 @@ async def test_receive_edit_weight_updates(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state(edit_field="weight")
     msg = FakeMessage(text="3,2")
-    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
     assert state._data["weight"] == "3.2"
 
 
-async def test_receive_edit_cod_sets_payment(monkeypatch):
+async def test_receive_edit_insured_sets_value(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
-    state = _card_state(edit_field="cod")
+    state = _card_state(edit_field="insured")
     msg = FakeMessage(text="500")
-    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
-    assert state._data["cod_amount"] == "500"
-    assert state._data["payment_method"] == "cod"
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
+    assert state._data["insured_amount"] == "500"
 
 
-async def test_receive_edit_cod_zero_rejected(monkeypatch):
+async def test_receive_edit_insured_invalid_rejected(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
-    state = _card_state(edit_field="cod")
-    msg = FakeMessage(text="0")
-    await h.receive_edit(msg, state, _ctx(_CLIENT), None, object())
-    assert "cod_amount" not in state._data
+    state = _card_state(edit_field="insured", insured_amount="300")
+    msg = FakeMessage(text="abc")
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
+    assert state._data["insured_amount"] == "300"
 
 
 async def test_set_size_updates_and_returns(monkeypatch):
@@ -730,22 +729,22 @@ async def test_set_payment_prepay_clears_cod(monkeypatch):
     assert state._data["cod_amount"] is None
 
 
-async def test_set_payment_cod_prompts_amount():
+async def test_set_payment_cod_uses_cart_total(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state()
     cb = FakeCallback("cab:ttn:setpm:cod")
     await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
-    assert state.state == CreateTtnState.editing_field
-    assert state._data["edit_field"] == "cod"
-    # payment_method ещё НЕ cod — выставится после ввода суммы
-    assert state._data.get("payment_method") != "cod"
+    assert state._data["payment_method"] == "cod"
+    assert state._data["cod_amount"] == "300"
+    assert state.state == CreateTtnState.summary
 
 
-async def test_cod_equal_uses_insured(monkeypatch):
+async def test_set_payment_cod_not_linked_to_insured(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state(insured_amount="450")
-    cb = FakeCallback("cab:ttn:codeq")
-    await h.cb_cod_equal(cb, _ctx(_CLIENT), None, object(), state)
-    assert state._data["cod_amount"] == "450"
+    cb = FakeCallback("cab:ttn:setpm:cod")
+    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["cod_amount"] == "300"
     assert state._data["payment_method"] == "cod"
 
 
@@ -868,13 +867,15 @@ async def test_submit_success_render_failure_does_not_raise(monkeypatch):
 async def test_again_forwards_to_entry(monkeypatch):
     spy: dict = {}
 
-    async def fake_start(message, state, ctx, session):
+    async def fake_start(message, state, ctx, session, *, edit=False):
         spy["called"] = True
+        spy["edit"] = edit
 
     monkeypatch.setattr(h, "start_create_ttn", fake_start)
     cb = FakeCallback("cab:ttn:again")
     await h.cb_again(cb, _ctx(_CLIENT), None, FakeState())
     assert spy.get("called") is True
+    assert spy.get("edit") is True
     assert cb.acks  # callback подтверждён
 
 
