@@ -235,36 +235,8 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
     cb = FakeCallback(data=f"cab:cancel:created:0:{shipment_id}")
 
     async def fake_cancel_shipment(session, *, client, shipment_id, np_client):
-        return ShipmentCard(
-            id=shipment_id,
-            ttn_number="TTN-888",
-            recipient_name="Іван",
-            recipient_phone="+380001",
-            recipient_city="Київ",
-            recipient_warehouse="Відділення 1",
-            status=ShipmentStatus.cancelled,
-            created_at=datetime.now(UTC),
-            status_changed_at=datetime.now(UTC),
-            dispatched_at=None,
-            sla_deadline=None,
-            sla_met=None,
-            payment_method="cod",
-            payer_type="recipient",
-            cod_amount=Decimal("500.00"),
-            insured_amount=Decimal("700.00"),
-            fee_amount=Decimal("21.00"),
-            fee_free=False,
-            items=[
-                ShipmentItemView(
-                    sku="SKU-1",
-                    name="Кава",
-                    category="Кава",
-                    quantity=2,
-                    unit_price=Decimal("100.00"),
-                )
-            ],
-            can_cancel=False,
-        )
+        # Хендлер не использует возврат — после отмены ререндерит список группы.
+        return None
 
     monkeypatch.setattr("app.bot.handlers.client_cabinet.cancel_shipment", fake_cancel_shipment)
     await cb_cancel_shipment(
