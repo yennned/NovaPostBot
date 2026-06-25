@@ -5,14 +5,13 @@ from __future__ import annotations
 import html
 from datetime import datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
-from app.config import get_settings
 from app.services.reports import (
     FinancialReport,
     ManagerSupportStat,
     PeriodReport,
 )
+from app.utils.timefmt import fmt_dt
 
 _PERIOD_LABELS = {"today": "сьогодні", "week": "тиждень", "month": "місяць"}
 
@@ -26,9 +25,7 @@ def _money(value: Decimal) -> str:
 
 
 def _local(value: datetime | None) -> str:
-    if value is None:
-        return "—"
-    return f"{value.astimezone(ZoneInfo(get_settings().timezone)):%d.%m %H:%M}"
+    return fmt_dt(value) if value is not None else "—"
 
 
 def period_report_text(report: PeriodReport) -> str:

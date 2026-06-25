@@ -6,6 +6,7 @@ from datetime import datetime
 
 from app.bot.texts.client_cabinet import shipment_card_text
 from app.services.manager_shipments import ManagerShipmentCard, ManagerShipmentPage
+from app.utils.timefmt import fmt_dt
 
 
 def queue_text(page: ManagerShipmentPage) -> str:
@@ -77,4 +78,4 @@ def action_done_text(action: str) -> str:
 
 
 def _fmt(value: datetime) -> str:
-    return value.strftime("%d.%m %H:%M")
+    return fmt_dt(value)
