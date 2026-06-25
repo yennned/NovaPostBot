@@ -394,6 +394,11 @@ async def cb_clear(
     except IndexError:
         await callback.answer(_STALE, show_alert=True)
         return
+    data = await state.get_data()
+    if not data.get("manager_shipment_query"):
+        # Нечего сбрасывать — не редактируем (иначе «message is not modified»).
+        await callback.answer("Активного пошуку немає.")
+        return
     await state.update_data(manager_shipment_query=None)
     await _edit_queue(
         callback.message,
@@ -403,7 +408,7 @@ async def cb_clear(
         bucket=bucket,
         offset=0,
     )
-    await callback.answer()
+    await callback.answer("Пошук скинуто.")
 
 
 @router.message(ManagerShipmentState.waiting_for_search, F.text, ~F.text.startswith("/"))
