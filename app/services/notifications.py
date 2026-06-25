@@ -10,6 +10,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import permissions
 from app.config import Settings, get_settings
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.models.shipment import Shipment
@@ -193,37 +194,44 @@ async def _manager_recipient_ids(session: AsyncSession) -> set[int]:
     return recipient_ids
 
 
-async def _owner_recipient_ids(
+async def _support_manager_recipient_ids(
     session: AsyncSession,
     *,
     settings: Settings | None = None,
 ) -> set[int]:
+    """Активные менеджеры с правом обрабатывать поддержку (`can_handle_support`)."""
     current_settings = settings or get_settings()
-    recipient_ids: set[int] = set(current_settings.owner_telegram_ids)
-    for owner in await UserRepository(session).list_by_role(UserRole.owner):
-        if owner.status is UserStatus.active:
-            recipient_ids.add(owner.telegram_id)
+    recipient_ids: set[int] = set()
+    for manager in await UserRepository(session).list_by_role(UserRole.manager):
+        if manager.status is UserStatus.active and permissions.has_permission(
+            manager, permissions.CAN_HANDLE_SUPPORT, current_settings
+        ):
+            recipient_ids.add(manager.telegram_id)
     return recipient_ids
 
 
-async def notify_support_queued_to_owner(
+async def notify_support_queued_to_managers(
     session: AsyncSession,
     notifier: Notifier,
     *,
     client_label: str,
     settings: Settings | None = None,
 ) -> None:
-    """Обращение в очереди в рабочее время без дежурного — срочный сигнал владельцу.
+    """Обращение в очереди в рабочее время без дежурного — сигнал менеджерам.
 
+    Поддержка — функция менеджера (не владельца): пингуем всех активных менеджеров
+    с правом `can_handle_support`, чтобы кто-то заступил «🟢 Я на зв'язку» и ответил.
     `client_label` передаётся строкой (а не ORM-объектом): хендлер формирует её до
     commit, чтобы пуш после commit не упёрся в expired-атрибуты.
     """
     text = (
         "⚠️ Звернення клієнта в черзі, але немає чергового менеджера.\n"
         f"Клієнт: {html.escape(client_label)}.\n"
-        "Призначте чергового або відповідайте через «💬 Підтримка»."
+        "Заступіть на зв'язок «🟢 Я на зв'язку» або відповідайте через «💬 Підтримка»."
     )
-    await _send_many(notifier, await _owner_recipient_ids(session, settings=settings), text)
+    await _send_many(
+        notifier, await _support_manager_recipient_ids(session, settings=settings), text
+    )
 
 
 async def _notification_enabled(
