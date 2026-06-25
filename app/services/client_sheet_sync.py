@@ -73,7 +73,7 @@ async def sync_client_sheets(
         )
         for item in snapshot
     ]
-    book_id = await asyncio.to_thread(
+    rename_ok, book_id = await asyncio.to_thread(
         _sync_client_sheets_sync,
         cfg,
         source_key,
@@ -84,7 +84,10 @@ async def sync_client_sheets(
         (default_profile.name if default_profile is not None else None),
         rows,
     )
-    client.stock_sheet_key = target_key
+    # Продвигаем ключ только при подтверждённом переименовании вкладок: иначе PG
+    # указывал бы на лист с новым именем, которого в «Складі» нет → пустой остаток.
+    if rename_ok:
+        client.stock_sheet_key = target_key
     if book_id and client.stock_view_book_id != book_id:
         client.stock_view_book_id = book_id
     await session.flush()
@@ -99,29 +102,40 @@ def _sync_client_sheets_sync(
     client_label: str,
     sender_name: str | None,
     rows: list[ViewRow],
-) -> str | None:
+) -> tuple[bool, str | None]:
     client = SheetsClient(settings)
     gc = client._authorize()
-    _rename_main_worksheets(gc, settings, previous_sheet_key or source_key, target_key)
-    return _sync_view_book(
+    rename_ok = _rename_main_worksheets(gc, settings, previous_sheet_key or source_key, target_key)
+    book_id = _sync_view_book(
         gc,
         stock_view_book_id=stock_view_book_id,
         client_label=client_label,
         sender_name=sender_name,
         rows=rows,
     )
+    return rename_ok, book_id
 
 
-def _rename_main_worksheets(gc, settings: Settings, source_key: str, target_key: str) -> None:
+def _rename_main_worksheets(gc, settings: Settings, source_key: str, target_key: str) -> bool:
+    """Переименовать вкладки клиента в «Складі»/«Приёмке». Вернуть успех.
+
+    Успех (True) — переименовывать нечего или переименование подтверждено. Если
+    исходной вкладки нет (вероятно, уже переименована или книга без неё) — это не
+    провал, пропускаем. Реальная ошибка (`update_title` упал: коллизия имени, 5xx,
+    права) → False, чтобы вызывающий не продвигал `stock_sheet_key`.
+    """
     if not source_key or source_key == target_key:
-        return
+        return True
+    ok = True
     for book_id in (settings.sheets_stock_book_id, settings.sheets_intake_book_id):
         if not book_id:
             continue
         try:
             book = gc.open_by_key(book_id)
-            ws = book.worksheet(source_key)
-            ws.update_title(target_key)
+            titles = {ws.title for ws in book.worksheets()}
+            if source_key not in titles:
+                continue
+            book.worksheet(source_key).update_title(target_key)
         except Exception:
             logger.warning(
                 "client_sheet_rename_failed",
@@ -130,6 +144,8 @@ def _rename_main_worksheets(gc, settings: Settings, source_key: str, target_key:
                 target_key=target_key,
                 exc_info=True,
             )
+            ok = False
+    return ok
 
 
 def _sync_view_book(
@@ -139,11 +155,13 @@ def _sync_view_book(
     client_label: str,
     sender_name: str | None,
     rows: list[ViewRow],
-) -> str:
-    if stock_view_book_id:
-        book = gc.open_by_key(stock_view_book_id)
-    else:
-        book = gc.create(f"{client_label} · Перегляд складу")
+) -> str | None:
+    # View-book отложен: рантайм-сервис-аккаунт имеет только drive.readonly, а
+    # gc.create() требует Drive write → 403. Книгу создаёт provisioning (полный
+    # drive + share клиенту); пока id не задан — синк строк пропускаем.
+    if not stock_view_book_id:
+        return None
+    book = gc.open_by_key(stock_view_book_id)
     if not book.worksheets():
         ws = book.add_worksheet(title=_VIEW_TAB, rows=1000, cols=10)
     else:

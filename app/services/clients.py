@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -27,6 +28,8 @@ from app.services.exceptions import (
     PhoneAlreadyTaken,
     TransitionForbidden,
 )
+
+logger = structlog.get_logger(__name__)
 
 # Per-flag права (ключи в `users.permissions`). Канонический источник —
 # `app/bot/permissions.py`; здесь — алиасы для обратной совместимости вызовов
@@ -317,5 +320,13 @@ async def update_client_profile(
             after={"full_name": user.full_name, "phone": user.phone},
         )
         if full_name is not None:
-            await sync_client_sheets(session, client=user, previous_sheet_key=previous_sheet_key)
+            # Sheets — best-effort: сбой синка не должен валить переименование клиента.
+            try:
+                await sync_client_sheets(
+                    session, client=user, previous_sheet_key=previous_sheet_key
+                )
+            except Exception:
+                logger.warning(
+                    "client_profile_sheet_sync_failed", user_id=str(user.id), exc_info=True
+                )
     return await _card(session, user)

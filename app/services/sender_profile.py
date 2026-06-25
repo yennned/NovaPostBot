@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -36,6 +37,8 @@ from app.services.exceptions import (
     SenderProfileKeyInvalid,
     SenderProfileNotFound,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +238,15 @@ async def update_profile(
         if "name" in changes:
             client = await UserRepository(session).get_by_id(profile.client_id)
             if client is not None:
-                await sync_client_sheets(session, client=client)
+                # Sheets — best-effort: сбой синка не должен валить апдейт профиля.
+                try:
+                    await sync_client_sheets(session, client=client)
+                except Exception:
+                    logger.warning(
+                        "sender_profile_sheet_sync_failed",
+                        profile_id=str(profile.id),
+                        exc_info=True,
+                    )
     return _view(profile)
 
 

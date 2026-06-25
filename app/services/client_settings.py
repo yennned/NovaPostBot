@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import UserRole, UserStatus
@@ -20,6 +21,8 @@ from app.services.exceptions import (
     PermissionDenied,
     PhoneAlreadyTaken,
 )
+
+logger = structlog.get_logger(__name__)
 
 NOTIFY_APPROVED = "notify_registration_approved"
 NOTIFY_SHIPMENT_STATUS = "notify_shipment_status"
@@ -166,9 +169,17 @@ async def update_self_profile(
             after={"full_name": client.full_name, "phone": client.phone},
         )
         if full_name is not None:
-            await sync_client_sheets(
-                session,
-                client=client,
-                previous_sheet_key=previous_sheet_key,
-            )
+            # Sheets — best-effort: сбой синка не должен валить self-service апдейт.
+            try:
+                await sync_client_sheets(
+                    session,
+                    client=client,
+                    previous_sheet_key=previous_sheet_key,
+                )
+            except Exception:
+                logger.warning(
+                    "client_self_profile_sheet_sync_failed",
+                    user_id=str(client.id),
+                    exc_info=True,
+                )
     return await get_client_settings(session, client=client)
