@@ -406,9 +406,7 @@ async def test_show_parcel_defaults_weight_so_dali_available():
 
 async def test_set_payment_cod_zero_price_blocked():
     # Корзина без цены → COD ставить нельзя (иначе cod_amount=None упадёт на submit).
-    state = FakeState(
-        cart={"A": {"qty": 1, "name": "A", "price": None}}, payment_method="prepay"
-    )
+    state = FakeState(cart={"A": {"qty": 1, "name": "A", "price": None}}, payment_method="prepay")
     cb = FakeCallback("cab:ttn:setpm:cod")
     await h.cb_set_payment(cb, None, None, None, state)
     assert cb.acks[-1]["show_alert"] is True
