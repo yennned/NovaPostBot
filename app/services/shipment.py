@@ -33,6 +33,7 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
 from app.services import inventory, notifications, shipments
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.exceptions import (
     InsufficientStock,
     SenderDispatchNotConfigured,
@@ -273,6 +274,10 @@ async def create_shipment(
             )
         except Exception:
             logger.warning("shipment_push_failed", shipment_id=str(shipment.id))
+    try:
+        await sync_client_sheets(session, client=client, reader=reader)
+    except Exception:
+        logger.warning("shipment_sheet_sync_failed", shipment_id=str(shipment.id), exc_info=True)
     # Перечитываем с joinedload(items) — иначе `_to_card` ленивой загрузкой
     # коллекции упадёт в async (MissingGreenlet).
     fresh = await repo.get_by_id(shipment.id)
@@ -328,5 +333,13 @@ async def cancel_shipment(
             quantity_before=0,
             quantity_after=item.quantity,
             comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
+        )
+    try:
+        await sync_client_sheets(session, client=client)
+    except Exception:
+        logger.warning(
+            "shipment_cancel_sheet_sync_failed",
+            shipment_id=str(shipment.id),
+            exc_info=True,
         )
     return card

@@ -50,7 +50,11 @@ def cart_picker_text(page: InventoryPage, *, cart_count: int) -> str:
     if not page.items:
         parts.append("\nНа залишку поки немає позицій.")
     else:
-        parts.append(f"\nДоступно позицій: {page.total}. Натисніть товар, щоб додати в кошик.")
+        parts.append(
+            f"\nДоступно позицій: {page.total}. "
+            "Шукайте за SKU/назвою/категорією або натисніть товар, "
+            "щоб додати в кошик."
+        )
     if cart_count:
         parts.append(f"🧺 У кошику: {cart_count} поз.")
     return "\n".join(parts)
@@ -163,7 +167,7 @@ def search_unavailable_text() -> str:
 
 
 def insured_prompt() -> str:
-    return "Введіть оголошену вартість у гривнях (напр. 1200):"
+    return "Введіть оголошену вартість (страхову суму) у гривнях, напр. 1200:"
 
 
 def insured_invalid() -> str:
@@ -176,10 +180,6 @@ def description_prompt() -> str:
 
 def description_invalid() -> str:
     return "❌ Порожній опис. Введіть текст."
-
-
-def cod_amount_prompt() -> str:
-    return "Введіть суму накладеного платежу (грн), або «= вартість товарів»:"
 
 
 def cod_invalid() -> str:
@@ -233,12 +233,12 @@ def card_text(data: dict, price: dict) -> str:
             f"⚖️ Вага: {data.get('weight', '')} кг",
             f"📐 Габарити: {size_label}",
             f"📝 Опис: {html.escape(data.get('description', ''))}",
-            f"💰 Оголошена вартість: {data.get('insured_amount', '0')} ₴",
+            f"🛡 Оголошена вартість: {data.get('insured_amount', '0')} ₴",
             f"💳 Оплата: {payment}",
         ]
     )
     if data.get("cod_amount"):
-        lines.append(f"   Сума накладеного платежу: {data['cod_amount']} ₴")
+        lines.append(f"   Накладений платіж: {data['cod_amount']} ₴")
     lines.append(f"🧾 Платник доставки: {payer}")
     lines.append("─────────────")
     if price.get("unavailable"):

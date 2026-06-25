@@ -55,6 +55,25 @@ async def open_analytics(
         await message.answer(str(exc))
 
 
+@router.callback_query(F.data == "home:analytics")
+async def open_analytics_home(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    if (
+        callback.message is None
+        or not _is_owner(effective_context)
+        or effective_context.effective_user is None
+    ):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        await _show(callback.message, db_session, effective_context, period="today", edit=True)
+    except ClientServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("an:p:"))
 async def cb_period(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession

@@ -14,6 +14,7 @@ from app.db.repositories import (
     SenderProfileRepository,
     UserRepository,
 )
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.exceptions import (
     InvalidNotificationSetting,
     PermissionDenied,
@@ -145,6 +146,7 @@ async def update_self_profile(
     repo = UserRepository(session)
     before = {"full_name": client.full_name, "phone": client.phone}
     changed = False
+    previous_sheet_key = client.stock_sheet_key
     if full_name is not None and full_name != client.full_name:
         client.full_name = full_name
         changed = True
@@ -163,4 +165,10 @@ async def update_self_profile(
             before=before,
             after={"full_name": client.full_name, "phone": client.phone},
         )
+        if full_name is not None:
+            await sync_client_sheets(
+                session,
+                client=client,
+                previous_sheet_key=previous_sheet_key,
+            )
     return await get_client_settings(session, client=client)

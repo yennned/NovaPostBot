@@ -311,22 +311,25 @@ async def unblock_manager(
     )
 
 
-async def demote_manager(
+async def delete_manager(
     session: AsyncSession, *, actor: User, manager_id: uuid.UUID, settings: Settings | None = None
 ) -> None:
-    """Снять роль менеджера: дежурство сброшено, открытые треды → в очередь, роль → client."""
+    """Удалить менеджера из персонала: снять роль, закрыть доступ, вернуть треды в очередь."""
     _require_owner(actor, settings)
     users = UserRepository(session)
     manager = await _get_manager(users, manager_id)
     _require_can_manage(actor, manager, settings)
+    before_status = manager.status
     await users.set_duty(manager, on_duty=False, duty_date=manager.duty_date, duty_since=None)
     await SupportRepository(session).unassign_open_for_manager(manager.id)
+    if manager.status is not UserStatus.blocked:
+        await users.update_status(manager, UserStatus.blocked)
     await users.update_role(manager, UserRole.client)
     await users.set_permissions(manager, {})
     await AuditRepository(session).log(
-        "manager_demoted",
+        "manager_deleted",
         user_id=actor.id,
         affected_entity=f"user:{manager.id}",
-        before={"role": UserRole.manager},
-        after={"role": UserRole.client},
+        before={"role": UserRole.manager, "status": before_status},
+        after={"role": UserRole.client, "status": UserStatus.blocked},
     )

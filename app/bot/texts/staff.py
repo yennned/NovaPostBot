@@ -50,10 +50,10 @@ def card_text(card: StaffCard) -> str:
     return "\n".join(lines)
 
 
-def demote_confirm_text(card: StaffCard) -> str:
+def delete_confirm_text(card: StaffCard) -> str:
     return (
-        f"Зняти роль менеджера з <b>{_esc(card.full_name or str(card.telegram_id))}</b>?\n"
-        "Доступ до меню менеджера закриється, відкриті звернення повернуться в чергу."
+        f"Видалити менеджера <b>{_esc(card.full_name or str(card.telegram_id))}</b>?\n"
+        "Ми заблокуємо доступ, знімемо роль менеджера, а відкриті звернення повернуться в чергу."
     )
 
 

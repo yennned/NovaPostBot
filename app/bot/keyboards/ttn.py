@@ -37,13 +37,23 @@ def _nav_row(offset: int, total: int, limit: int) -> list[InlineKeyboardButton]:
 
 def build_cart_picker_kb(page: InventoryPage, *, cart_count: int) -> InlineKeyboardMarkup:
     """Список товаров для набора корзины (по индексу страницы; sku — в FSM-data)."""
-    rows: list[list[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:ttn:search"),
+            InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:ttn:searchclear"),
+        ]
+    ]
     for idx, item in enumerate(page.items):
         prefix = "🚫 " if item.available <= 0 else ""
+        category = f"{item.category[:10]} · " if item.category else ""
+        price = f"{item.price:.2f} ₴" if item.price is not None else "—"
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{prefix}{item.sku} · {item.name[:22]} · {item.available} шт",
+                    text=(
+                        f"{prefix}{item.sku} · {category}{item.name[:16]} · "
+                        f"{price} · {item.available} шт"
+                    ),
                     callback_data=f"cab:ttn:pick:{idx}",
                 )
             ]
@@ -53,7 +63,12 @@ def build_cart_picker_kb(page: InventoryPage, *, cart_count: int) -> InlineKeybo
         rows.append(nav)
     cart_label = f"🧺 Кошик ({cart_count})" if cart_count else "🧺 Кошик порожній"
     rows.append([InlineKeyboardButton(text=cart_label, callback_data="cab:ttn:cart")])
-    rows.append([InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⌂ Головна", callback_data="home:open"),
+            InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -92,7 +107,12 @@ def build_cart_review_kb(skus: list[str]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="➕ Додати ще товар", callback_data="cab:ttn:page:0")])
     if skus:
         rows.append([InlineKeyboardButton(text="➡️ Далі: параметри", callback_data="cab:ttn:next")])
-    rows.append([InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⌂ Головна", callback_data="home:open"),
+            InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -116,6 +136,7 @@ def build_parcel_kb(*, size_token: str, weight_set: bool) -> InlineKeyboardMarku
     rows.append(
         [
             InlineKeyboardButton(text="◀ Назад", callback_data="cab:ttn:cart"),
+            InlineKeyboardButton(text="⌂ Головна", callback_data="home:open"),
             InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel"),
         ]
     )
@@ -176,7 +197,10 @@ def build_card_kb(*, is_org: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✏️ Платник", callback_data="cab:ttn:edit:payer"),
             ],
             [InlineKeyboardButton(text="🔄 Перерахувати ціну", callback_data="cab:ttn:recompute")],
-            [InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")],
+            [
+                InlineKeyboardButton(text="⌂ Головна", callback_data="home:open"),
+                InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel"),
+            ],
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -193,7 +217,8 @@ def build_success_kb() -> InlineKeyboardMarkup:
     """Экран успеха: создать ещё одну ТТН."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚚 Створити ще одну", callback_data="cab:ttn:again")]
+            [InlineKeyboardButton(text="🚚 Створити ще одну", callback_data="cab:ttn:again")],
+            [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
         ]
     )
 

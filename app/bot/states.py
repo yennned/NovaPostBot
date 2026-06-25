@@ -15,6 +15,7 @@ class ClientManageState(StatesGroup):
 class ClientCabinetState(StatesGroup):
     waiting_for_product_search = State()
     waiting_for_shipment_search = State()
+    waiting_for_stats_date = State()
     waiting_for_settings_profile = State()
     waiting_for_sender_profile_edit = State()
 
@@ -47,6 +48,7 @@ class CreateTtnState(StatesGroup):
     """
 
     picking_items = State()  # просмотр товаров/набор корзины (callbacks)
+    entering_item_search = State()  # текстовый поиск товара в рамках создания ТТН
     entering_qty = State()  # текстовый ввод количества для выбранной позиции
     picking_parcel = State()  # экран «Параметри посилки» (вага+габарити)
     entering_weight = State()  # текстовый ввод веса

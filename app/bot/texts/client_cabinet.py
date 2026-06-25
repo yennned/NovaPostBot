@@ -50,8 +50,9 @@ def products_text(page: InventoryPage) -> str:
     if not page.items:
         parts.append("Позицій поки немає.")
     else:
-        for item in page.items:
-            parts.append(_inventory_line(item))
+        parts.append(
+            "Оберіть товар кнопкою нижче. У списку показано лише доступний залишок і ціну."
+        )
     return "\n".join(parts)
 
 
@@ -59,8 +60,7 @@ def _inventory_line(item: InventoryItem) -> str:
     category = f" · {item.category}" if item.category else ""
     return (
         f"• <b>{item.sku}</b> — {item.name}{category}\n"
-        f"  Доступно: <b>{item.available}</b> · Резерв: {item.reserved} · "
-        f"Всього: {item.stock} · Ціна: {_money(item.price)}"
+        f"  Доступно: <b>{item.available}</b> · Ціна: {_money(item.price)}"
     )
 
 

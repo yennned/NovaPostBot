@@ -25,8 +25,8 @@ from app.db.repositories import AuditRepository, UserRepository
 from app.services.exceptions import OfficeClosed, PermissionDenied
 from app.utils.work_schedule import current_window_end, is_open, next_window_start
 
-# Дежурят менеджеры и владельцы (у владельца тоже есть «🟢 Я на зв'язку»).
-DUTY_ROLES = frozenset({UserRole.manager, UserRole.owner})
+# Дежурят только менеджеры.
+DUTY_ROLES = frozenset({UserRole.manager})
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,7 @@ async def go_on_duty(
     """
     cfg = settings or get_settings()
     if user.role not in DUTY_ROLES:
-        raise PermissionDenied("чергування доступне лише менеджеру або власнику")
+        raise PermissionDenied("чергування доступне лише менеджеру")
     if user.status is not UserStatus.active:
         raise PermissionDenied("обліковий запис неактивний")
 

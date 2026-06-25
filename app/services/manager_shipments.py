@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole
@@ -20,9 +21,12 @@ from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.services import clients, notifications, shipments
+from app.services.client_sheet_sync import sync_client_sheets
 from app.services.exceptions import ShipmentActionForbidden, ShipmentNotFound, TtnCancelFailed
 from app.services.notifications import Notifier
 from app.services.returns import ReturnDecision, receive_returned_shipment
+
+logger = structlog.get_logger(__name__)
 
 QUEUE_BUCKETS = {
     "created": {ShipmentStatus.created},
@@ -236,6 +240,14 @@ async def cancel_shipment(
         before=before,
         after={"status": shipment.status.value},
     )
+    try:
+        await sync_client_sheets(session, client=shipment.client)
+    except Exception:
+        logger.warning(
+            "manager_cancel_sheet_sync_failed",
+            shipment_id=str(shipment.id),
+            exc_info=True,
+        )
     return _to_card(shipment)
 
 

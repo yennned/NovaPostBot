@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.types.base import TelegramObject
@@ -24,6 +24,7 @@ from app.bot.keyboards.client import (
     build_shipments_kb,
     build_stats_kb,
 )
+from app.bot.screen import edit_stored_screen, remember_screen
 from app.bot.states import ClientCabinetState
 from app.bot.texts.client_cabinet import (
     product_search_prompt,
@@ -73,6 +74,11 @@ def _effective_client(context: EffectiveContext):
     return context.effective_user or context.actor_user
 
 
+async def _remember_if_possible(state: FSMContext, target: Message | TelegramObject) -> None:
+    if isinstance(target, Message):
+        await remember_screen(state, target)
+
+
 def _normalize_edit_value(field: str, raw: str) -> str | None:
     value = raw.strip()
     if not value:
@@ -119,6 +125,7 @@ async def _show_inventory(
         reply_markup=build_inventory_kb(page),
         parse_mode="HTML",
     )
+    await _remember_if_possible(state, target)
 
 
 async def _edit_inventory(
@@ -147,6 +154,7 @@ async def _edit_inventory(
         reply_markup=build_inventory_kb(page),
         parse_mode="HTML",
     )
+    await remember_screen(state, message)
 
 
 async def _show_shipments(
@@ -177,6 +185,7 @@ async def _show_shipments(
         reply_markup=build_shipments_kb(page, bucket),
         parse_mode="HTML",
     )
+    await _remember_if_possible(state, target)
 
 
 async def _edit_shipments(
@@ -206,6 +215,7 @@ async def _edit_shipments(
         reply_markup=build_shipments_kb(page, bucket),
         parse_mode="HTML",
     )
+    await remember_screen(state, message)
 
 
 async def _show_settings(
@@ -237,6 +247,111 @@ async def _edit_settings(
     await message.edit_text(
         settings_text(view),
         reply_markup=build_settings_kb(view),
+        parse_mode="HTML",
+    )
+
+
+async def _edit_inventory_screen(
+    bot: Bot,
+    state: FSMContext,
+    session: AsyncSession,
+    context: EffectiveContext,
+    *,
+    offset: int = 0,
+) -> bool:
+    client = _effective_client(context)
+    if client is None:
+        return False
+    query, category = await _product_filters(state)
+    page = await list_inventory(
+        session,
+        client=client,
+        query=query,
+        category=category,
+        limit=PRODUCTS_PAGE_SIZE,
+        offset=offset,
+    )
+    await state.update_data(product_categories=page.categories)
+    return await edit_stored_screen(
+        bot,
+        state,
+        text=products_text(page),
+        reply_markup=build_inventory_kb(page),
+        parse_mode="HTML",
+    )
+
+
+async def _edit_shipments_screen(
+    bot: Bot,
+    state: FSMContext,
+    session: AsyncSession,
+    context: EffectiveContext,
+    *,
+    bucket: str,
+    offset: int = 0,
+) -> bool:
+    client = _effective_client(context)
+    if client is None:
+        return False
+    query, _ = await _shipment_filters(state)
+    page = await list_shipments(
+        session,
+        client=client,
+        bucket=bucket,
+        query=query,
+        limit=SHIPMENTS_PAGE_SIZE,
+        offset=offset,
+    )
+    await state.update_data(shipment_bucket=bucket)
+    return await edit_stored_screen(
+        bot,
+        state,
+        text=shipments_text(page, bucket),
+        reply_markup=build_shipments_kb(page, bucket),
+        parse_mode="HTML",
+    )
+
+
+async def _edit_stats_screen(
+    bot: Bot,
+    state: FSMContext,
+    snapshot,
+    *,
+    selected: str,
+) -> bool:
+    return await edit_stored_screen(
+        bot,
+        state,
+        text=stats_text(snapshot),
+        reply_markup=build_stats_kb(selected),
+        parse_mode="HTML",
+    )
+
+
+async def _edit_settings_screen(
+    bot: Bot,
+    state: FSMContext,
+    view,
+) -> bool:
+    return await edit_stored_screen(
+        bot,
+        state,
+        text=settings_text(view),
+        reply_markup=build_settings_kb(view),
+        parse_mode="HTML",
+    )
+
+
+async def _edit_sender_profile_screen(
+    bot: Bot,
+    state: FSMContext,
+    profile,
+) -> bool:
+    return await edit_stored_screen(
+        bot,
+        state,
+        text=sender_profile_text(profile),
+        reply_markup=build_sender_profile_kb(profile),
         parse_mode="HTML",
     )
 
@@ -311,6 +426,27 @@ async def open_products(
         await _show_inventory(message, db_session, effective_context, state=state)
     except PermissionDenied as exc:
         await message.answer(str(exc))
+
+
+@router.callback_query(F.data == "home:products")
+async def open_products_home(
+    callback: CallbackQuery,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(product_query=None, product_category=None)
+    try:
+        await _edit_inventory(callback.message, db_session, effective_context, state=state)
+    except PermissionDenied as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await remember_screen(state, callback.message)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cab:products:"))
@@ -416,6 +552,7 @@ async def cb_product_category(
 @router.message(ClientCabinetState.waiting_for_product_search, F.text, ~F.text.startswith("/"))
 async def receive_product_search(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -423,7 +560,8 @@ async def receive_product_search(
     await state.update_data(product_query=message.text, product_category=None)
     await state.set_state(None)
     try:
-        await _show_inventory(message, db_session, effective_context, state=state)
+        if not await _edit_inventory_screen(bot, state, db_session, effective_context):
+            await _show_inventory(message, db_session, effective_context, state=state)
     except PermissionDenied as exc:
         await message.answer(str(exc))
 
@@ -447,6 +585,33 @@ async def open_shipments(
         )
     except PermissionDenied as exc:
         await message.answer(str(exc))
+
+
+@router.callback_query(F.data == "home:shipments")
+async def open_shipments_home(
+    callback: CallbackQuery,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(shipment_query=None, shipment_bucket="created")
+    try:
+        await _edit_shipments(
+            callback.message,
+            db_session,
+            effective_context,
+            state=state,
+            bucket="created",
+        )
+    except PermissionDenied as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await remember_screen(state, callback.message)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cab:shipments:"))
@@ -530,6 +695,7 @@ async def cb_shipment_clear(
 @router.message(ClientCabinetState.waiting_for_shipment_search, F.text, ~F.text.startswith("/"))
 async def receive_shipment_search(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -538,20 +704,26 @@ async def receive_shipment_search(
     await state.update_data(shipment_query=message.text, shipment_bucket=bucket)
     await state.set_state(None)
     try:
-        await _show_shipments(
-            message,
-            db_session,
-            effective_context,
-            state=state,
-            bucket=bucket,
-        )
+        if not await _edit_shipments_screen(
+            bot, state, db_session, effective_context, bucket=bucket
+        ):
+            await _show_shipments(
+                message,
+                db_session,
+                effective_context,
+                state=state,
+                bucket=bucket,
+            )
     except PermissionDenied as exc:
         await message.answer(str(exc))
 
 
 @router.callback_query(F.data.startswith("cab:shipment:"))
 async def cb_shipment_card(
-    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -590,6 +762,7 @@ async def cb_shipment_card(
         ),
         parse_mode="HTML",
     )
+    await remember_screen(state, callback.message)
     await callback.answer()
 
 
@@ -599,6 +772,7 @@ async def cb_cancel_shipment(
     effective_context: EffectiveContext,
     db_session: AsyncSession,
     np_client: NovaPoshtaClient,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -620,8 +794,11 @@ async def cb_cancel_shipment(
         return
     try:
         # NP-aware отмена: удаляет ТТН в НП, затем снимает резерв (release у статуса).
-        card = await cancel_shipment(
-            db_session, client=client, shipment_id=shipment_id, np_client=np_client
+        await cancel_shipment(
+            db_session,
+            client=client,
+            shipment_id=shipment_id,
+            np_client=np_client,
         )
     except ShipmentActionForbidden:
         await callback.answer("Це відправлення вже не можна скасувати.", show_alert=True)
@@ -634,17 +811,17 @@ async def cb_cancel_shipment(
     except (PermissionDenied, ShipmentNotFound) as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    await callback.message.edit_text(
-        shipment_card_text(card),
-        reply_markup=build_shipment_card_kb(
-            bucket,
-            offset,
-            card.id,
-            can_cancel=card.can_cancel,
-        ),
-        parse_mode="HTML",
+    await state.update_data(shipment_bucket=bucket)
+    await _edit_shipments(
+        callback.message,
+        db_session,
+        effective_context,
+        state=state,
+        bucket=bucket,
+        offset=offset,
     )
-    await callback.answer("Відправлення скасовано.")
+    await remember_screen(state, callback.message)
+    await callback.answer("ТТН видалено.")
 
 
 @router.message(F.text == STATS_BUTTON)
@@ -671,9 +848,41 @@ async def open_stats(
     )
 
 
+@router.callback_query(F.data == "home:stats")
+async def open_stats_home(
+    callback: CallbackQuery,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        snapshot = await get_client_stats(db_session, client=client)
+    except PermissionDenied as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text(
+        stats_text(snapshot),
+        reply_markup=build_stats_kb("today"),
+        parse_mode="HTML",
+    )
+    await remember_screen(state, callback.message)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("cab:stats:"))
 async def cb_stats(
-    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -697,12 +906,16 @@ async def cb_stats(
         reply_markup=build_stats_kb(period),
         parse_mode="HTML",
     )
+    await remember_screen(state, callback.message)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cab:statsday:"))
 async def cb_stats_day(
-    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -726,7 +939,54 @@ async def cb_stats_day(
         reply_markup=build_stats_kb("today"),
         parse_mode="HTML",
     )
+    await remember_screen(state, callback.message)
     await callback.answer()
+
+
+@router.callback_query(F.data == "cab:statspick")
+async def cb_stats_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.set_state(ClientCabinetState.waiting_for_stats_date)
+    await callback.message.answer("Введіть дату у форматі ДД.ММ.РРРР або РРРР-ММ-ДД.")
+    await callback.answer()
+
+
+@router.message(ClientCabinetState.waiting_for_stats_date, F.text, ~F.text.startswith("/"))
+async def receive_stats_date(
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    raw = (message.text or "").strip()
+    try:
+        if "-" in raw:
+            day = date.fromisoformat(raw)
+        else:
+            dd, mm, yyyy = raw.split(".")
+            day = date.fromisoformat(f"{yyyy}-{mm}-{dd}")
+    except ValueError:
+        await message.answer("❌ Невірна дата. Використайте ДД.ММ.РРРР або РРРР-ММ-ДД.")
+        return
+    await state.set_state(None)
+    client = _effective_client(effective_context)
+    if client is None:
+        await message.answer("Спочатку авторизуйтесь через /start.")
+        return
+    try:
+        snapshot = await get_client_stats(db_session, client=client, day=day)
+    except PermissionDenied as exc:
+        await message.answer(str(exc))
+        return
+    if not await _edit_stats_screen(bot, state, snapshot, selected="today"):
+        await message.answer(
+            stats_text(snapshot),
+            reply_markup=build_stats_kb("today"),
+            parse_mode="HTML",
+        )
 
 
 @router.message(F.text == SETTINGS_BUTTON)
@@ -741,6 +1001,26 @@ async def open_settings(
         await _show_settings(message, db_session, effective_context)
     except PermissionDenied as exc:
         await message.answer(str(exc))
+
+
+@router.callback_query(F.data == "home:settings")
+async def open_settings_home(
+    callback: CallbackQuery,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    try:
+        await _edit_settings(callback.message, db_session, effective_context)
+    except PermissionDenied as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await remember_screen(state, callback.message)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "cab:set:back")
@@ -759,6 +1039,7 @@ async def cb_settings_back(
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
+    await remember_screen(state, callback.message)
     await callback.answer()
 
 
@@ -767,6 +1048,7 @@ async def cb_settings_toggle(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -790,6 +1072,7 @@ async def cb_settings_toggle(
         reply_markup=build_settings_kb(view),
         parse_mode="HTML",
     )
+    await remember_screen(state, callback.message)
     await callback.answer("Налаштування оновлено.")
 
 
@@ -815,6 +1098,7 @@ async def cb_settings_edit_prompt(callback: CallbackQuery, state: FSMContext) ->
 )
 async def receive_settings_profile(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -857,11 +1141,12 @@ async def receive_settings_profile(
         return
     await state.update_data(settings_field=None)
     await state.set_state(None)
-    await message.answer(
-        settings_text(view),
-        reply_markup=build_settings_kb(view),
-        parse_mode="HTML",
-    )
+    if not await _edit_settings_screen(bot, state, view):
+        await message.answer(
+            settings_text(view),
+            reply_markup=build_settings_kb(view),
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "cab:set:profiles")
@@ -869,6 +1154,7 @@ async def cb_sender_profiles(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -878,6 +1164,7 @@ async def cb_sender_profiles(
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
+    await remember_screen(state, callback.message)
     await callback.answer()
 
 
@@ -886,6 +1173,7 @@ async def cb_sender_profile_card(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -905,6 +1193,7 @@ async def cb_sender_profile_card(
     except (PermissionDenied, SenderProfileNotFound) as exc:
         await callback.answer(str(exc), show_alert=True)
         return
+    await remember_screen(state, callback.message)
     await callback.answer()
 
 
@@ -913,6 +1202,7 @@ async def cb_sender_profile_default(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
+    state: FSMContext,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
@@ -940,6 +1230,7 @@ async def cb_sender_profile_default(
         reply_markup=build_sender_profile_kb(profile),
         parse_mode="HTML",
     )
+    await remember_screen(state, callback.message)
     await callback.answer("Основний профіль оновлено.")
 
 
@@ -975,6 +1266,7 @@ async def cb_sender_profile_edit_prompt(callback: CallbackQuery, state: FSMConte
 )
 async def receive_sender_profile_edit(
     message: Message,
+    bot: Bot,
     state: FSMContext,
     effective_context: EffectiveContext,
     db_session: AsyncSession,
@@ -1009,8 +1301,9 @@ async def receive_sender_profile_edit(
         return
     await state.update_data(sender_profile_id=None, sender_profile_field=None)
     await state.set_state(None)
-    await message.answer(
-        sender_profile_text(profile),
-        reply_markup=build_sender_profile_kb(profile),
-        parse_mode="HTML",
-    )
+    if not await _edit_sender_profile_screen(bot, state, profile):
+        await message.answer(
+            sender_profile_text(profile),
+            reply_markup=build_sender_profile_kb(profile),
+            parse_mode="HTML",
+        )

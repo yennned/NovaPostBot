@@ -86,6 +86,15 @@ async def test_go_on_duty_requires_staff_role(db_session: AsyncSession):
         await duty.go_on_duty(db_session, user=client, settings=_settings(), now=_at(22, 10))
 
 
+async def test_go_on_duty_denies_owner(db_session: AsyncSession):
+    owner = await UserRepository(db_session).create(
+        telegram_id=501, role=UserRole.owner, status=UserStatus.active
+    )
+
+    with pytest.raises(PermissionDenied):
+        await duty.go_on_duty(db_session, user=owner, settings=_settings(), now=_at(22, 10))
+
+
 async def test_current_duty_managers_orders_latest_first(db_session: AsyncSession):
     repo = UserRepository(db_session)
     early = await _manager(db_session, telegram_id=11)

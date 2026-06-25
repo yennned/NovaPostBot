@@ -54,25 +54,19 @@ def build_card_kb(card: StaffCard) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    if card.status is UserStatus.blocked:
-        rows.append(
-            [InlineKeyboardButton(text="🔓 Розблокувати", callback_data=f"stf:unblock:{card.id}")]
-        )
-    else:
-        rows.append(
-            [InlineKeyboardButton(text="🚫 Заблокувати", callback_data=f"stf:block:{card.id}")]
-        )
-    rows.append([InlineKeyboardButton(text="⬇️ Зняти роль", callback_data=f"stf:demote:{card.id}")])
+    rows.append(
+        [InlineKeyboardButton(text="🗑 Видалити менеджера", callback_data=f"stf:delete:{card.id}")]
+    )
     rows.append([InlineKeyboardButton(text="◀️ До списку", callback_data="stf:list:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_demote_confirm_kb(card: StaffCard) -> InlineKeyboardMarkup:
+def build_delete_confirm_kb(card: StaffCard) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Так, зняти роль", callback_data=f"stf:demoteok:{card.id}"
+                    text="✅ Так, видалити", callback_data=f"stf:deleteok:{card.id}"
                 )
             ],
             [InlineKeyboardButton(text="◀️ Скасувати", callback_data=f"stf:card:{card.id}")],
