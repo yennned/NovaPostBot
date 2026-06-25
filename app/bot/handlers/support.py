@@ -298,7 +298,12 @@ async def staff_reply_message(
 ) -> None:
     if not _can_handle_support(effective_context):
         await state.clear()
-        await message.answer(texts.support_unavailable_text())
+        await _exit_chat_to_home(
+            message,
+            effective_context,
+            texts.support_unavailable_text(),
+            default_role=UserRole.manager,
+        )
         return
     thread_id = await _thread_id_from_state(state)
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
@@ -313,7 +318,12 @@ async def staff_reply_message(
         return
     if not _can_access_thread(effective_context, thread):
         await state.clear()
-        await message.answer(texts.thread_forbidden_text())
+        await _exit_chat_to_home(
+            message,
+            effective_context,
+            texts.thread_forbidden_text(),
+            default_role=UserRole.manager,
+        )
         return
     await support.claim_if_waiting(
         db_session, thread=thread, manager=effective_context.effective_user
