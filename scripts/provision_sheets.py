@@ -34,11 +34,22 @@ from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from google.oauth2.service_account import Credentials
+from gspread.utils import ValueInputOption
 from sqlalchemy import select
 
-# Первые 5 колонок остаются каноническими для runtime-чтения/append в
-# app/sheets/inventory.py; `Резерв`/`Доступно` — вычисляемые UI-колонки.
+# Колонки листа «Склад». Бот ЧИТАЕТ/append первые 5 (Артикул..Ціна). Резерв (F) пишет
+# бот из Postgres (reserved по открытым ТТН) через client_sheet_sync.write_reserved;
+# Доступно (G) — ARRAYFORMULA =Кількість−Резерв (см. write_available_formula).
 STOCK_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна", "Резерв", "Доступно"]
+# Первые 5 — каноничны для чтения. Передаём как expected_headers
+# (= app/sheets/client._STOCK_EXPECTED_HEADERS), иначе панель-итог справа (пустые
+# заголовки колонок-разрыва) валит get_all_records при повторном прогоне.
+STOCK_READ_HEADERS = STOCK_HEADERS[:5]
+# Панель «Зведення» справа от данных (0-based колонки): тонкий разрыв, лейблы, значения.
+PANEL_GAP_COL = len(STOCK_HEADERS)  # F — разрыв сразу после данных
+PANEL_LABEL_COL = PANEL_GAP_COL + 1  # G — лейблы
+PANEL_VALUE_COL = PANEL_GAP_COL + 2  # H — значения/селекторы (дропдауны)
+_PANEL_VALUE_A1 = chr(ord("A") + PANEL_VALUE_COL)  # «H» — для формул-ссылок на селекторы
 INTAKE_HEADERS = [
     "Дата",
     "Артикул",
@@ -85,6 +96,9 @@ CATEGORY_PALETTE = [
     _rgb(0.96, 0.85, 0.90),
     _rgb(0.93, 0.93, 0.80),
 ]
+# Панель «Зведення»: подзаголовки секций и подсветка ячеек-селекторов (дропдаунов).
+SUBHEADER_BG = _rgb(0.30, 0.42, 0.58)
+PICK_BG = _rgb(1.0, 0.97, 0.80)
 
 
 def _grid(sid: int, r0: int, r1: int, c0: int, c1: int) -> dict:
@@ -287,17 +301,18 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
     «0.00» показал бы «259,00», а gspread.get_all_records прочитал бы это как 25900
     (×100) и сломал цену боту. Только выравнивание + очистка формата (голые числа).
     """
-    records = ws.get_all_records(default_blank="")
-    n = len(records)
+    records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
+    n = sum(1 for r in records if r.get("Артикул"))  # без «фантом»-строк панели справа
     last = n + 1
     sid = ws.id
+    ncol = len(STOCK_HEADERS)  # 7: A-E данные + Резерв(F)/Доступно(G)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
 
     reqs = _clear_dynamic(sheet_meta, sid)
     reqs.append(
         {
             "repeatCell": {
-                "range": _grid(sid, 0, 1, 0, 5),
+                "range": _grid(sid, 0, 1, 0, ncol),
                 "cell": {
                     "userEnteredFormat": {
                         "backgroundColor": HEADER_BG,
@@ -323,7 +338,7 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
             {
                 "addBanding": {
                     "bandedRange": {
-                        "range": _grid(sid, 0, last, 0, 5),
+                        "range": _grid(sid, 0, last, 0, ncol),
                         "rowProperties": {
                             "headerColor": HEADER_BG,
                             "firstBandColor": _rgb(1, 1, 1),
@@ -348,6 +363,15 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
             "repeatCell": {
                 "range": _grid(sid, 1, 1000, 4, 5),  # E: Ціна
                 "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+                "fields": "userEnteredFormat(numberFormat,horizontalAlignment)",
+            }
+        }
+    )
+    reqs.append(
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 1000, 5, ncol),  # F: Резерв, G: Доступно
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
                 "fields": "userEnteredFormat(numberFormat,horizontalAlignment)",
             }
         }
@@ -379,7 +403,7 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
             reqs.append(
                 _cf_rule(ccol, "TEXT_EQ", cat, CATEGORY_PALETTE[i % len(CATEGORY_PALETTE)], None)
             )
-    reqs.append({"setBasicFilter": {"filter": {"range": _grid(sid, 0, max(last, 2), 0, 5)}}})
+    reqs.append({"setBasicFilter": {"filter": {"range": _grid(sid, 0, max(last, 2), 0, ncol)}}})
     # защита залишків (warningOnly), как было в provision
     reqs.append(
         {
@@ -403,7 +427,7 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
                             "sheetId": sid,
                             "dimension": "COLUMNS",
                             "startIndex": 0,
-                            "endIndex": 5,
+                            "endIndex": len(STOCK_HEADERS),
                         }
                     }
                 }
@@ -411,6 +435,19 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
         }
     )
     return n
+
+
+def write_available_formula(ws: Any) -> None:
+    """Доступно (G) = Кількість − Резерв одной ARRAYFORMULA (авто по всем строкам).
+
+    Резерв (F) пишет бот из Postgres (client_sheet_sync.write_reserved). Пустой F → 0,
+    тогда Доступно = Кількість. Локаль книги с запятой → разделитель аргументов «;».
+    """
+    ws.update(
+        values=[['=ARRAYFORMULA(IF(A2:A="";"";D2:D-F2:F))']],
+        range_name="G2",
+        value_input_option=ValueInputOption.user_entered,
+    )
 
 
 def _to_decimal(raw) -> Decimal:
@@ -422,7 +459,7 @@ def _to_decimal(raw) -> Decimal:
 
 def build_summary(book: Any, data_ws: Any) -> None:
     """Лист «📊 Зведення»: KPI (с валютой — бот его НЕ читает) + живой pivot по категориям."""
-    records = data_ws.get_all_records(default_blank="")
+    records = data_ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     positions = sum(1 for r in records if r.get("Артикул") and r.get("Назва"))
     units = sum(int(_to_decimal(r.get("Кількість", 0))) for r in records)
     value = sum(_to_decimal(r.get("Кількість", 0)) * _to_decimal(r.get("Ціна", 0)) for r in records)
@@ -528,6 +565,240 @@ def build_summary(book: Any, data_ws: Any) -> None:
     book.batch_update({"requests": reqs})
 
 
+def side_summary_cells() -> list[list[str]]:
+    """Значения панели «Зведення» (I1:J18): лейбл + формула/селектор (USER_ENTERED).
+
+    Три секции (формулы, не статичные числа → пересчёт живьём при правке остатка
+    ботом/приёмкой/руками; открытые диапазоны авто-захватывают новые строки):
+      • Всього — позиції/одиниці/вартість по всьому листу;
+      • За категорією — фільтр по ячейке-селектору J7 (дропдаун «Всі»+категорії);
+      • За товаром — фільтр по ячейке-селектору J13 (дропдаун артикулів A2:A).
+    Книга в локали с запятой → разделитель аргументов «;».
+    """
+    cat = f"${_PANEL_VALUE_A1}$7"  # ячейка выбора категории (селектор)
+    sku = f"${_PANEL_VALUE_A1}$13"  # ячейка выбора товара (Артикул)
+    return [
+        ["📊 Зведення", ""],
+        ["Позицій", "=COUNTA(A2:A)"],
+        ["Одиниць", "=SUM(D2:D)"],
+        ["Вартість, ₴", "=SUMPRODUCT(D2:D;E2:E)"],
+        ["", ""],
+        ["За категорією", ""],
+        ["Категорія", "Всі"],
+        ["Позицій", f'=IF({cat}="Всі";COUNTA(A2:A);COUNTIF(C2:C;{cat}))'],
+        ["Одиниць", f'=IF({cat}="Всі";SUM(D2:D);SUMIF(C2:C;{cat};D2:D))'],
+        [
+            "Вартість, ₴",
+            f'=IF({cat}="Всі";SUMPRODUCT(D2:D;E2:E);SUMPRODUCT((C2:C={cat})*D2:D*E2:E))',
+        ],
+        ["", ""],
+        ["За товаром", ""],
+        ["Артикул", ""],
+        ["Назва", f'=IFERROR(VLOOKUP({sku};A2:E;2;0);"")'],
+        ["Категорія", f'=IFERROR(VLOOKUP({sku};A2:E;3;0);"")'],
+        ["Кількість", f'=IF({sku}="";"";SUMIF(A2:A;{sku};D2:D))'],
+        ["Ціна, ₴", f'=IFERROR(VLOOKUP({sku};A2:E;5;0);"")'],
+        [
+            "Вартість, ₴",
+            f'=IF({sku}="";"";SUMIF(A2:A;{sku};D2:D)*IFERROR(VLOOKUP({sku};A2:E;5;0);0))',
+        ],
+    ]
+
+
+def write_side_summary(book: Any, ws: Any) -> None:
+    """Интерактивная панель «Зведення» СПРАВА вплотную к данным (колонки G–H).
+
+    Справа (а не внизу) → строки растут вниз (`appendRow` приёмки/бота) и панель их
+    не задевает: итог автоматический и никогда не «сползает», без правки Apps Script.
+    Дропдауны (Data Validation) в ячейках-селекторах H7 (категорія) и H13 (артикул);
+    подсчёты — формулы из `side_summary_cells`. Бот читает A:E с `expected_headers`,
+    лишние колонки справа чтение не ломают (см. app/sheets/client.py).
+    """
+    sid = ws.id
+    lbl, val, end = PANEL_LABEL_COL, PANEL_VALUE_COL, PANEL_VALUE_COL + 1
+    panel_range = f"{chr(ord('A') + lbl)}1:{_PANEL_VALUE_A1}18"
+    records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
+    cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
+    safe_title = ws.title.replace("'", "''")
+    sku_range = f"='{safe_title}'!$A$2:$A$1000"
+
+    # Снимаем прежние merge баннеров ДО записи (иначе запись их «закрытых» ячеек упадёт
+    # при повторном прогоне). unmergeCells на не-смерженном диапазоне — безопасный no-op.
+    book.batch_update(
+        {
+            "requests": [
+                {"unmergeCells": {"range": _grid(sid, r, r + 1, lbl, end)}} for r in (0, 5, 11)
+            ]
+        }
+    )
+    # raw=True по умолчанию → формулы стали бы текстом; форсим USER_ENTERED.
+    ws.update(
+        values=side_summary_cells(),
+        range_name=panel_range,
+        value_input_option=ValueInputOption.user_entered,
+    )
+
+    border = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
+
+    def _col_width(idx: int, px: int) -> dict:
+        return {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sid,
+                    "dimension": "COLUMNS",
+                    "startIndex": idx,
+                    "endIndex": idx + 1,
+                },
+                "properties": {"pixelSize": px},
+                "fields": "pixelSize",
+            }
+        }
+
+    def _bg(r0: int, r1: int, color: dict) -> dict:
+        return {
+            "repeatCell": {
+                "range": _grid(sid, r0, r1, lbl, end),
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        }
+
+    def _banner(r0: int, color: dict, font_size: int) -> dict:
+        return {
+            "repeatCell": {
+                "range": _grid(sid, r0, r0 + 1, lbl, end),
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": color,
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "textFormat": {
+                            "bold": True,
+                            "foregroundColor": HEADER_FG,
+                            "fontSize": font_size,
+                        },
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+            }
+        }
+
+    def _numfmt(r0: int, r1: int, ntype: str, pattern: str) -> dict:
+        return {
+            "repeatCell": {
+                "range": _grid(sid, r0, r1, val, end),
+                "cell": {
+                    "userEnteredFormat": {"numberFormat": {"type": ntype, "pattern": pattern}}
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
+
+    def _align_left(r0: int, r1: int) -> dict:
+        return {
+            "repeatCell": {
+                "range": _grid(sid, r0, r1, val, end),
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "LEFT"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
+            }
+        }
+
+    reqs = [
+        _col_width(PANEL_GAP_COL, 22),  # разрыв-разделитель (тонкий)
+        _col_width(lbl, 150),  # лейблы
+        _col_width(val, 124),  # значения/селекторы
+        # база: лейблы bold слева, значения справа, всё по центру вертикали
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 18, lbl, val),
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "LEFT",
+                        "verticalAlignment": "MIDDLE",
+                    }
+                },
+                "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 18, val, end),
+                "cell": {
+                    "userEnteredFormat": {
+                        "horizontalAlignment": "RIGHT",
+                        "verticalAlignment": "MIDDLE",
+                    }
+                },
+                "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment)",
+            }
+        },
+        # карточки-фон под строками результатов (всього / категорія / товар)
+        _bg(1, 4, BAND2),
+        _bg(7, 10, BAND2),
+        _bg(13, 18, BAND2),
+        # merge баннера и подзаголовков секций
+        {"mergeCells": {"range": _grid(sid, 0, 1, lbl, end), "mergeType": "MERGE_ALL"}},
+        {"mergeCells": {"range": _grid(sid, 5, 6, lbl, end), "mergeType": "MERGE_ALL"}},
+        {"mergeCells": {"range": _grid(sid, 11, 12, lbl, end), "mergeType": "MERGE_ALL"}},
+        _banner(0, HEADER_BG, 11),
+        _banner(5, SUBHEADER_BG, 10),
+        _banner(11, SUBHEADER_BG, 10),
+        # ячейки-селекторы (дропдауны): подсветка + значение по левому краю
+        _bg(6, 7, PICK_BG),
+        _bg(12, 13, PICK_BG),
+        _align_left(6, 7),
+        _align_left(12, 13),
+        # форматы чисел: ціле (позиції/одиниці/кількість), валюта (вартість/ціна)
+        _numfmt(1, 3, "NUMBER", "#,##0"),
+        _numfmt(3, 4, "CURRENCY", "#,##0.00 ₴"),
+        _numfmt(7, 9, "NUMBER", "#,##0"),
+        _numfmt(9, 10, "CURRENCY", "#,##0.00 ₴"),
+        _numfmt(15, 16, "NUMBER", "#,##0"),
+        _numfmt(16, 18, "CURRENCY", "#,##0.00 ₴"),
+        # дропдаун категорій: «Всі» + наявні категорії
+        {
+            "setDataValidation": {
+                "range": _grid(sid, 6, 7, val, end),
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": v} for v in ["Всі", *cats]],
+                    },
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        },
+        # дропдаун товара: артикули з A2:A
+        {
+            "setDataValidation": {
+                "range": _grid(sid, 12, 13, val, end),
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_RANGE",
+                        "values": [{"userEnteredValue": sku_range}],
+                    },
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        },
+        {
+            "updateBorders": {
+                "range": _grid(sid, 0, 18, lbl, end),
+                "top": border,
+                "bottom": border,
+                "left": border,
+                "right": border,
+                "innerHorizontal": border,
+                "innerVertical": border,
+            }
+        },
+    ]
+    book.batch_update({"requests": reqs})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--share", default="", help="email(ы) через запятую — дать доступ writer")
@@ -560,6 +831,8 @@ def main() -> None:
     summary_src = None
     for ws in client_ws:
         rows = style_stock_worksheet(stock, ws, meta_map.get(ws.id, {}))
+        write_available_formula(ws)  # Доступно (G) = Кількість − Резерв (ARRAYFORMULA)
+        write_side_summary(stock, ws)  # авто-итог + фильтры справа на каждом листе
         if summary_src is None and rows > 0:
             summary_src = ws
     if summary_src is not None:

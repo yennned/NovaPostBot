@@ -17,6 +17,12 @@ from typing import Any
 from app.config import Settings, get_settings
 from app.sheets.source import StockSheetNotFound
 
+# Канонические колонки листа «Склад» (см. scripts/provision_sheets.STOCK_HEADERS[:5]).
+# Передаём как expected_headers в get_all_records: иначе панель-итог справа и любой
+# контент за таблицей добавляют пустые ячейки в строку-шапку, и gspread падает на
+# дублирующихся пустых заголовках.
+_STOCK_EXPECTED_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна"]
+
 
 class SheetsClient:
     """Ленивая авторизация service-account и чтение листов «Склад».
@@ -71,4 +77,6 @@ class SheetsClient:
     def read_rows(self, client_key: str) -> list[dict[str, Any]]:
         """Прочитать строки остатков клиента (артикул/назва/кількість/ціна)."""
         worksheet = self.get_stock_worksheet(client_key)
-        return list(worksheet.get_all_records(default_blank=""))
+        return list(
+            worksheet.get_all_records(default_blank="", expected_headers=_STOCK_EXPECTED_HEADERS)
+        )
