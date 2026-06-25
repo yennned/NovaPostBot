@@ -11,8 +11,12 @@ backstop'ом**: громкий лог для ops + понятное uk-сооб
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from aiogram import Router
+from aiogram.dispatcher.event.bases import UNHANDLED
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import ExceptionTypeFilter
 from aiogram.types import ErrorEvent, Message
 
@@ -45,3 +49,15 @@ async def on_key_decryption_error(event: ErrorEvent) -> None:
     message = _event_message(event)
     if message is not None:
         await message.answer(_KEY_UNREADABLE_TEXT)
+
+
+@router.errors(ExceptionTypeFilter(TelegramBadRequest))
+async def on_message_not_modified(event: ErrorEvent) -> Any:
+    """Дабл-тап inline-кнопки: `edit_*` тем же контентом → Telegram «message is not
+    modified». Сообщение уже в нужном состоянии — глушим без шума (возврат не-UNHANDLED
+    помечает событие обработанным, лог не пишется). Прочие `TelegramBadRequest` (нет
+    сообщения, устаревший callback и т.п.) — реальные, отдаём дальше через `UNHANDLED`.
+    """
+    if "message is not modified" in str(event.exception):
+        return None
+    return UNHANDLED

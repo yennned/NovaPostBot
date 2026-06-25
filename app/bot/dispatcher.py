@@ -64,5 +64,5 @@ def build_dispatcher(
     dp.include_router(analytics_router)
     dp.include_router(client_cabinet_router)
     dp.include_router(ttn_router)
-    dp.include_router(errors_router)  # backstop: непрочитанный ключ ФОП (ротация FERNET_KEY)
+    dp.include_router(errors_router)  # backstop: ключ ФОП (FERNET_KEY) + «message is not modified»
     return dp

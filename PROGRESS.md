@@ -20,6 +20,31 @@
 - **Дальше:** дотянуть single-window на оставшиеся manager/owner-разделы, дочистить ТТН-flow после всех текстовых шагов, расширить tests под новый home-dashboard и новую staff/delete-логику, отдельно прогнать DB/bot набор на тестовой БД, досинкать docs по Google Sheets/view-файлам.
 - **Открытые вопросы:** полноценный e2e-прогон `pytest` в этом сеансе завис на инициализации окружения/плагинов до выполнения тест-кейсов; синтаксис (`py_compile`) и targeted `ruff` по изменённым файлам — зелёные.
 
+## 2026-06-25 · fix/stock-edit-resilience · pending
+- **Сделано:** разбор Docker-логов bot/worker → две устойчивости. **(1)** Лист
+  склада клиента, названный по Telegram-имени, мог отсутствовать → сырой
+  `gspread.WorksheetNotFound` валил хендлер «створити ТТН», кабінет товарів и
+  воркерный `low_stock_job` трейсбеком. Заведено доменное `StockSheetNotFound`
+  (`app/sheets/source.py`), трансляция `gspread → домен` на единственной границе
+  Sheets (`SheetsClient.get_stock_worksheet` — покрывает и `read_rows`, и
+  `apply_deltas`), а общий choke point `get_inventory_snapshot` теперь мягко
+  деградирует к пустому остатку + `logger.warning("inventory.sheet_missing")`
+  (manager-сводка `stock_totals` уже глотала это отдельно → None, без изменений).
+  **(2)** Дабл-тап inline-кнопки спамил `TelegramBadRequest: message is not
+  modified` (32×) трейсбеками. Погашено в едином `errors_router`
+  (`app/bot/handlers/errors.py`): `@router.errors(ExceptionTypeFilter(
+  TelegramBadRequest))` → `None` для «not modified» (обработано, без лога),
+  `UNHANDLED` для прочих (пробрасываются) — один choke point вместо правок 30+
+  call-site. Тесты: нет листа → пустой остаток; гасим/пробрасываем
+  `TelegramBadRequest`. Прогон таргетных — зелёный, ruff чист. Ревью дифа
+  (3 независимых finder-агента): корректность и aiogram/gspread-pitfalls чисто;
+  поправлен устаревший комментарий регистрации `errors_router`.
+- **Дальше:** PR в `main` (зелёный CI), мерж. Опц. follow-up: убрать локальный
+  `_edit_or_ignore` в `clients_manage.py` (частично дублирует глобальный хендлер).
+- **Открытые вопросы:** `fernet_decrypt_failed` в логах (2×) — это правка данных,
+  не код: клиенту с нечитаемым ключом НП нужно перевводить ключ (ротация
+  `FERNET_KEY`/сид не тем ключом), backstop уже ловит без краша.
+
 ## 2026-06-24 · fix/alex-test-env-isolation · pending
 - **Сделано:** изоляция тестового окружения от локального `.env`. Autouse-фикстура
   `_clear_settings_cache` (tests/conftest.py) теперь обнуляет

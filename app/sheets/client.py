@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
+from app.sheets.source import StockSheetNotFound
 
 
 class SheetsClient:
@@ -52,11 +53,20 @@ class SheetsClient:
         return self._gc
 
     def get_stock_worksheet(self, client_key: str) -> Any:
-        """Вернуть лист остатков клиента из книги «Склад» (read-only)."""
+        """Вернуть лист остатков клиента из книги «Склад» (read-only).
+
+        Нет листа с таким именем → доменный `StockSheetNotFound` (а не сырой
+        `gspread.WorksheetNotFound`), чтобы сервис-слой не зависел от gspread.
+        """
         if not self._settings.sheets_stock_book_id:
             raise RuntimeError("SHEETS_STOCK_BOOK_ID не настроен")
+        from gspread.exceptions import WorksheetNotFound
+
         book = self._authorize().open_by_key(self._settings.sheets_stock_book_id)
-        return book.worksheet(client_key)
+        try:
+            return book.worksheet(client_key)
+        except WorksheetNotFound as exc:
+            raise StockSheetNotFound(client_key) from exc
 
     def read_rows(self, client_key: str) -> list[dict[str, Any]]:
         """Прочитать строки остатков клиента (артикул/назва/кількість/ціна)."""

@@ -13,7 +13,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services.exceptions import PermissionDenied
-from app.sheets import StockRow, StockSource, build_stock_source
+from app.sheets import StockRow, StockSheetNotFound, StockSource, build_stock_source
 
 logger = structlog.get_logger(__name__)
 
@@ -81,7 +81,15 @@ async def get_inventory_snapshot(
     reader: StockSource | None = None,
 ) -> list[InventoryItem]:
     _require_active_client(client)
-    rows = (reader or build_stock_source()).read_stock(stock_sheet_key(client))
+    key = stock_sheet_key(client)
+    try:
+        rows = (reader or build_stock_source()).read_stock(key)
+    except StockSheetNotFound:
+        # Лист склада ещё не заведён/переименован — это пустой остаток, а не сбой:
+        # клиент видит «склад порожній», а не падение хендлера створення ТТН.
+        # Manager-сводка (`stock_totals`) проглатывает это отдельно → None.
+        logger.warning("inventory.sheet_missing", client_id=str(client.id), key=key)
+        rows = []
     reserved = await ShipmentRepository(session).reserved_by_sku(client.id)
     items = _build_items(rows, reserved)
     items.sort(
