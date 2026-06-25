@@ -91,9 +91,10 @@ def parcel_text(*, weight: str | None, size_token: str) -> str:
     weight_line = f"{weight} кг" if weight else "ще не вказано"
     return (
         "📦 <b>Параметри посилки</b> — крок 2\n\n"
-        f"⚖️ Вага: <b>{weight_line}</b>\n"
-        f"📐 Габарити: <b>{SIZE_PRESETS[size_token]}</b>\n\n"
-        "Вкажіть вагу та оберіть габарити, потім — «Далі»."
+        f"📐 Коробка: <b>{SIZE_PRESETS[size_token]}</b>\n"
+        f"⚖️ Вага: <b>{weight_line}</b>\n\n"
+        "Оберіть коробку (вага підставиться автоматично) — і тисніть «Далі».\n"
+        "Потрібна точна вага? Натисніть «Вказати вагу»."
     )
 
 
@@ -246,7 +247,9 @@ def card_text(data: dict, price: dict) -> str:
     else:
         lines.append(f"💵 Вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
         if price.get("redelivery"):
-            lines.append(f"   Комісія за переказ COD: {price['redelivery']} ₴")
+            # Орієнтовно: оцінка йде через RedeliveryCalculate, фактичну комісію
+            # «Контроль оплати» (NovaPay) підтверджує менеджер при відправленні.
+            lines.append(f"   Комісія за переказ COD: ≈{price['redelivery']} ₴ (орієнтовно)")
         if price.get("eta"):
             lines.append(f"📅 Орієнтовна доставка: {html.escape(str(price['eta']))}")
     return "\n".join(lines)

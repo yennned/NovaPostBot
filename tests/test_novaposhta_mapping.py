@@ -77,16 +77,18 @@ def test_save_props_payer_sender():
     assert props["PayerType"] == "Sender"
 
 
-def test_save_props_prepay_has_no_backward_delivery():
+def test_save_props_prepay_has_no_afterpayment():
     props = to_save_props(_draft())  # cod_amount=None
+    assert "AfterpaymentOnGoodsCost" not in props
+    # Класична Післяплата (BackwardDeliveryData) не используется в принципе.
     assert "BackwardDeliveryData" not in props
 
 
-def test_save_props_cod_builds_backward_delivery():
+def test_save_props_cod_uses_afterpayment_on_goods_cost():
+    # COD ФОП = «Контроль оплати» → скаляр AfterpaymentOnGoodsCost, НЕ BackwardDeliveryData.
     props = to_save_props(_draft(cod_amount=Decimal("750.50")))
-    assert props["BackwardDeliveryData"] == [
-        {"PayerType": "Recipient", "CargoType": "Money", "RedeliveryString": "750.50"}
-    ]
+    assert props["AfterpaymentOnGoodsCost"] == "750.50"
+    assert "BackwardDeliveryData" not in props
 
 
 def test_save_props_volume_optional():

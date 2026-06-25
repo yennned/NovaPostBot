@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.ttn import (
     DEFAULT_SIZE_TOKEN,
+    SIZE_DEFAULT_WEIGHT,
     SIZE_PRESETS,
     TTN_PAGE_SIZE,
     build_back_to_card_kb,
@@ -175,15 +176,17 @@ async def _show_picker(
     offset: int,
     edit: bool,
 ) -> None:
-    query = (await state.get_data()).get("ttn_query")
+    data = await state.get_data()
+    query = data.get("ttn_query")
+    category = data.get("ttn_category")
     page = await list_inventory(
-        session, client=client, query=query, limit=TTN_PAGE_SIZE, offset=offset
+        session, client=client, query=query, category=category, limit=TTN_PAGE_SIZE, offset=offset
     )
-    await state.update_data(cart_offset=page.offset)
+    await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
     data = await state.get_data()
     cart_count = len(data.get("cart", {}))
     text = texts.cart_picker_text(page, cart_count=cart_count)
-    kb = build_cart_picker_kb(page, cart_count=cart_count)
+    kb = build_cart_picker_kb(page, cart_count=cart_count, active_category=category)
     if edit:
         await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -232,6 +235,14 @@ async def _show_cart(message: Message, state: FSMContext) -> None:
 async def _show_parcel(message: Message, state: FSMContext, *, edit: bool = True) -> None:
     data = await state.get_data()
     size_token = data.get("size_token", DEFAULT_SIZE_TOKEN)
+    # Frictionless: при входе сразу проставляем дефолтную коробку+вес, чтобы «Далі»
+    # был доступен с порога. Коробку клиент меняет кнопками, точный вес — «Вказати вагу».
+    if not data.get("weight"):
+        default_weight = SIZE_DEFAULT_WEIGHT.get(
+            size_token, SIZE_DEFAULT_WEIGHT[DEFAULT_SIZE_TOKEN]
+        )
+        await state.update_data(size_token=size_token, weight=default_weight)
+        data = await state.get_data()
     text = texts.parcel_text(weight=data.get("weight"), size_token=size_token)
     kb = build_parcel_kb(size_token=size_token, weight_set=bool(data.get("weight")))
     if edit:
@@ -266,7 +277,13 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
         updates["payer_type"] = "Recipient"
     if data.get("payment_method") == "cod":
         total = _cart_total(cart)
-        updates["cod_amount"] = f"{total:f}" if total > 0 else None
+        if total > 0:
+            updates["cod_amount"] = f"{total:f}"
+        else:
+            # Корзина без цены → COD не на чём держать: откатываем на передоплату,
+            # чтобы битое состояние (cod + None) не дошло до submit.
+            updates["payment_method"] = "prepay"
+            updates["cod_amount"] = None
     if updates:
         await state.update_data(**updates)
         data = await state.get_data()
@@ -399,10 +416,44 @@ async def cb_search_clear(
     if client is None:
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
-    await state.update_data(ttn_query=None)
+    await state.update_data(ttn_query=None, ttn_category=None)
     await state.set_state(CreateTtnState.picking_items)
     await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
-    await callback.answer("Пошук скинуто.")
+    await callback.answer("Фільтри скинуто.")
+
+
+@router.callback_query(F.data.startswith("cab:ttn:pcat:"))
+async def cb_pick_category(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    """Фильтр товаров по категории в пикере ТТН (как `cab:pcat` в «Товари»)."""
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    code = callback.data.split(":")[3]
+    if code == "all":
+        await state.update_data(ttn_category=None)
+    else:
+        try:
+            idx = int(code)
+        except ValueError:
+            await callback.answer(_STALE, show_alert=True)
+            return
+        categories = (await state.get_data()).get("ttn_categories", [])
+        if idx < 0 or idx >= len(categories):
+            await callback.answer(_STALE, show_alert=True)
+            return
+        await state.update_data(ttn_category=categories[idx])
+    await state.set_state(CreateTtnState.picking_items)
+    await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
+    await callback.answer()
 
 
 @router.message(CreateTtnState.entering_item_search, F.text, ~F.text.startswith("/"))
@@ -417,7 +468,8 @@ async def receive_item_search(
     if client is None:
         await message.answer("Авторизуйтесь через /start.")
         return
-    await state.update_data(ttn_query=(message.text or "").strip())
+    # Поиск сбрасывает фильтр-категорию (как в «Товари»): ищем по всему складу.
+    await state.update_data(ttn_query=(message.text or "").strip(), ttn_category=None)
     await state.set_state(CreateTtnState.picking_items)
     query = (await state.get_data()).get("ttn_query")
     page = await list_inventory(
@@ -427,7 +479,7 @@ async def receive_item_search(
         limit=TTN_PAGE_SIZE,
         offset=0,
     )
-    await state.update_data(cart_offset=page.offset)
+    await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
     data = await state.get_data()
     if not await edit_stored_screen(
         bot,
@@ -747,9 +799,12 @@ async def cb_size(callback: CallbackQuery, state: FSMContext) -> None:
     if token not in SIZE_PRESETS:
         await callback.answer(_STALE, show_alert=True)
         return
-    await state.update_data(size_token=token)
+    # Выбор коробки подставляет вес (верхняя граница тира) → активирует «Далі».
+    # Точный вес клиент при желании задаёт кнопкой «⚖️ Вказати вагу».
+    box_weight = SIZE_DEFAULT_WEIGHT.get(token, SIZE_DEFAULT_WEIGHT[DEFAULT_SIZE_TOKEN])
+    await state.update_data(size_token=token, weight=box_weight)
     await _show_parcel(callback.message, state)
-    await callback.answer(f"Габарити: {SIZE_PRESETS[token]}")
+    await callback.answer(f"{SIZE_PRESETS[token]} · {box_weight} кг")
 
 
 @router.callback_query(F.data == "cab:ttn:wt")
@@ -1388,10 +1443,16 @@ async def cb_set_payment(
             await callback.answer()
     elif mode == "cod":
         total = _cart_total((await state.get_data()).get("cart", {}))
-        await state.update_data(
-            payment_method="cod",
-            cod_amount=(f"{total:f}" if total > 0 else None),
-        )
+        if total <= 0:
+            # Анти-баг: без суммы COD ставить нельзя (на submit упадёт «COD без
+            # суммы»). Цены нет → товар без ціни в складі.
+            await callback.answer(
+                "Не вдалося визначити суму післяплати — у товарів немає ціни. "
+                "Зверніться до менеджера.",
+                show_alert=True,
+            )
+            return
+        await state.update_data(payment_method="cod", cod_amount=f"{total:f}")
         if await _back_to_card(
             callback,
             state,
@@ -1424,6 +1485,12 @@ def _submit_error_text(exc: ClientServiceError, cart: dict) -> str:
     if isinstance(exc, SenderProfileNotConfigured):
         return "❌ ФОП не налаштований. Зверніться до менеджера."
     if isinstance(exc, TtnCreationFailed):
+        low = str(exc).lower()
+        if "afterpayment" in low or "післяплат" in low or "контроль оплат" in low:
+            return (
+                "❌ Накладений платіж (контроль оплати) недоступний для цього ФОП. "
+                "Зверніться до менеджера або оберіть передоплату."
+            )
         return f"❌ Не вдалося створити ТТН: {exc}"
     return f"❌ Помилка: {exc}"
 
