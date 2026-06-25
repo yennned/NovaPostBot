@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards import build_contact_keyboard, build_home_keyboard
+from app.bot.keyboards import build_contact_keyboard, build_role_menu
 from app.bot.notify import BotNotifier
 from app.bot.screen import remember_screen
 from app.bot.services import StartService
@@ -51,7 +51,7 @@ async def _render_home(message: Message, context: EffectiveContext) -> None:
 
     await message.answer(
         "\n".join(parts),
-        reply_markup=build_home_keyboard(context.effective_role),
+        reply_markup=build_role_menu(context.effective_role),
     )
 
 
@@ -82,7 +82,7 @@ async def start_command(
         return
 
     role = effective_context.effective_role or user.role
-    await message.answer(welcome_text(user, role), reply_markup=build_home_keyboard(role))
+    await message.answer(welcome_text(user, role), reply_markup=build_role_menu(role))
 
 
 @router.message(StartStates.waiting_for_contact, F.contact)
@@ -127,7 +127,7 @@ async def receive_contact(
     if result.user.status is UserStatus.active:
         await message.answer(
             welcome_text(result.user, result.user.role),
-            reply_markup=build_home_keyboard(result.user.role),
+            reply_markup=build_role_menu(result.user.role),
         )
         return
 
@@ -166,9 +166,8 @@ async def home_callback(
         )
     else:
         parts.append(f"Відкриваю меню {effective_context.effective_role.value}.")
-    await callback.message.edit_text(
-        "\n".join(parts),
-        reply_markup=build_home_keyboard(effective_context.effective_role),
-    )
+    # Меню роли — на постоянной reply-панели снизу (set на /start, «прилипает»).
+    # Тут только чистим inline-экран до home-текста; панель остаётся внизу.
+    await callback.message.edit_text("\n".join(parts), reply_markup=None)
     await remember_screen(state, callback.message)
     await callback.answer()

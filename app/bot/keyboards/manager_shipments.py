@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.keyboards.common import nav_footer
 from app.services.manager_shipments import ManagerShipmentCard, ManagerShipmentPage
 
 PAGE_SIZE = 6
@@ -44,19 +45,20 @@ def build_queue_kb(page: ManagerShipmentPage) -> InlineKeyboardMarkup:
     if page.offset > 0:
         nav.append(
             InlineKeyboardButton(
-                text="◀️",
+                text="◀",
                 callback_data=f"mq:list:{page.bucket}:{max(page.offset - page.limit, 0)}",
             )
         )
     if page.offset + page.limit < page.total:
         nav.append(
             InlineKeyboardButton(
-                text="▶️",
+                text="▶",
                 callback_data=f"mq:list:{page.bucket}:{page.offset + page.limit}",
             )
         )
     if nav:
         rows.append(nav)
+    rows.extend(nav_footer())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -106,14 +108,7 @@ def build_card_kb(bucket: str, offset: int, card: ManagerShipmentCard) -> Inline
                 )
             )
         rows.append(issue_row)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="◀️ До списку",
-                callback_data=f"mq:list:{bucket}:{offset}",
-            )
-        ]
-    )
+    rows.extend(nav_footer(back=f"mq:list:{bucket}:{offset}", back_label="До списку"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -139,17 +134,10 @@ def build_return_inspection_kb(
     rows.append(
         [
             InlineKeyboardButton(text="✅ Прийняти повернення", callback_data="mq:ria"),
-            InlineKeyboardButton(text="◀️ Назад", callback_data="mq:rib"),
+            InlineKeyboardButton(text="◀ Назад", callback_data="mq:rib"),
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="📬 До черги",
-                callback_data=f"mq:list:{bucket}:{offset}",
-            )
-        ]
-    )
+    rows.extend(nav_footer(back=f"mq:list:{bucket}:{offset}", back_label="До черги"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

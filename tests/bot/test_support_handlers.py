@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import ReplyKeyboardMarkup
 from app.bot import permissions as perm
 from app.bot.handlers.support import (
     cb_open,
@@ -201,7 +201,7 @@ async def test_staff_reply_message_denies_foreign_thread_access(db_session: Asyn
     assert refreshed.assigned_manager_id == assigned.id
 
 
-async def test_client_chat_exit_clears_reply_keyboard(db_session: AsyncSession):
+async def test_client_chat_exit_restores_role_menu(db_session: AsyncSession):
     client = await _client(db_session)
     msg = FakeMessage("/exit")
     state = FakeState()
@@ -209,14 +209,12 @@ async def test_client_chat_exit_clears_reply_keyboard(db_session: AsyncSession):
     await client_chat_exit(msg, _ctx(client, UserRole.client), state)
 
     assert state.cleared
-    # 1-е сообщение гасит залипшую reply-клавиатуру «Вийти з чату»,
-    assert isinstance(msg.answers[0]["reply_markup"], ReplyKeyboardRemove)
-    # 2-е — inline-home (не reply-клавиатура).
-    assert msg.answers[1]["reply_markup"] is not None
-    assert not isinstance(msg.answers[1]["reply_markup"], ReplyKeyboardRemove)
+    # Выход из чата возвращает нижнюю reply-панель меню роли (она же заменяет
+    # «exit»-клавиатуру) — одним сообщением, без ReplyKeyboardRemove.
+    assert isinstance(msg.answers[-1]["reply_markup"], ReplyKeyboardMarkup)
 
 
-async def test_staff_reply_exit_clears_reply_keyboard(db_session: AsyncSession):
+async def test_staff_reply_exit_restores_role_menu(db_session: AsyncSession):
     manager = await _manager(db_session)
     msg = FakeMessage("/exit")
     state = FakeState()
@@ -224,8 +222,7 @@ async def test_staff_reply_exit_clears_reply_keyboard(db_session: AsyncSession):
     await staff_reply_exit(msg, _ctx(manager, UserRole.manager), state)
 
     assert state.cleared
-    assert isinstance(msg.answers[0]["reply_markup"], ReplyKeyboardRemove)
-    assert not isinstance(msg.answers[1]["reply_markup"], ReplyKeyboardRemove)
+    assert isinstance(msg.answers[-1]["reply_markup"], ReplyKeyboardMarkup)
 
 
 async def test_cb_open_denies_foreign_thread_access(db_session: AsyncSession):
