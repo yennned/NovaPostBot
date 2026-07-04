@@ -31,11 +31,12 @@ def _freeze_today(monkeypatch, moment: datetime) -> None:
 
 def test_bounds_today_end_is_next_midnight_not_now(monkeypatch):
     # Регрессия: раньше end=now → строка со штампом БД чуть «в будущем» выпадала.
-    _freeze_today(monkeypatch, datetime(2026, 7, 4, 14, 30, tzinfo=TZ))
+    moment = datetime(2026, 7, 4, 14, 30, tzinfo=TZ)
+    _freeze_today(monkeypatch, moment)
     start, end = _bounds("today", day=None, settings=_KYIV_SETTINGS)
     assert start == datetime(2026, 7, 4, 0, 0, tzinfo=TZ)
     assert end == datetime(2026, 7, 5, 0, 0, tzinfo=TZ)
-    assert end > datetime.now(TZ)  # окно тянется за «сейчас» — свежая строка не выпадет
+    assert end > moment  # окно тянется за «сейчас» — свежая строка не выпадет
 
 
 def test_bounds_week_starts_monday_spans_seven_days(monkeypatch):
