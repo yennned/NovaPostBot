@@ -189,6 +189,20 @@ git checkout feat/x → docker compose up   # локальный тест-бот
 через GitHub → установить App на репозиторий (секретов/workflow не требует). Плюс
 ручной `/code-review` и `/security-review` из Claude Code по требованию.
 
+**CodeRabbit CLI (ревью ДО пуша).** Тот же ревьюер локально в терминале — ловим
+замечания ещё до PR. Разово: `coderabbit auth` (логин). Перед пушем в ветке:
+```bash
+coderabbit review --plain        # ревью незакоммиченных + свежих изменений в терминале
+# алиас: cr review
+```
+Так к моменту PR CodeRabbit App уже почти нечего сказать. **skill `autofix`**
+(`~/.claude/skills`) — безопасно применяет предложения CodeRabbit из тредов PR,
+по одному с подтверждением (сам промпты ревьюера не исполняет). Итоговый поток:
+`checkout → docker compose up (тест-бот) → coderabbit review (локально) → PR →
+CodeRabbit App + lint-test → autofix по тредам → (push перезапускает lint-test —
+гейт всегда последний) → squash-merge`. Важно: правки от `autofix` должны пройти
+зелёный `lint-test` перед merge, а не после — merge только по свежему зелёному CI.
+
 **Обновление без остановки клиентов.**
 - Бот на **long polling**: при деплое контейнер перезапускается ~2–5 с, Telegram
   копит апдейты у себя (~24 ч) и отдаёт после старта — сообщения не теряются.
