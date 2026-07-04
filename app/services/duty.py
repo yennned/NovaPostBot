@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +22,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, UserRepository
 from app.services.exceptions import OfficeClosed, PermissionDenied
+from app.utils.timefmt import now_local
 from app.utils.work_schedule import current_window_end, is_open, next_window_start
 
 # Дежурят только менеджеры.
@@ -33,11 +33,6 @@ DUTY_ROLES = frozenset({UserRole.manager})
 class DutyResult:
     user: User
     window_end: datetime  # конец текущего рабочего окна (Europe/Kyiv)
-
-
-def _now_local(settings: Settings, now: datetime | None) -> datetime:
-    tz = ZoneInfo(settings.timezone)
-    return datetime.now(tz) if now is None else now.astimezone(tz)
 
 
 async def go_on_duty(
@@ -58,7 +53,7 @@ async def go_on_duty(
     if user.status is not UserStatus.active:
         raise PermissionDenied("обліковий запис неактивний")
 
-    moment = _now_local(cfg, now)
+    moment = now_local(cfg, now)
     schedule = cfg.work_schedule
     window_end = current_window_end(moment, schedule)
     if window_end is None:
@@ -88,7 +83,7 @@ async def current_duty_managers(
     отсекает «зависшие» смены прошлого дня, ещё не снятые воркером.
     """
     cfg = settings or get_settings()
-    today = _now_local(cfg, now).date()
+    today = now_local(cfg, now).date()
     stmt = (
         select(User)
         .where(
@@ -113,7 +108,7 @@ async def clear_expired_duty(
     Возвращает снятых пользователей — воркер опц. шлёт им «зміну завершено».
     """
     cfg = settings or get_settings()
-    moment = _now_local(cfg, now)
+    moment = now_local(cfg, now)
     keep_open = is_open(moment, cfg.work_schedule)
     today = moment.date()
 

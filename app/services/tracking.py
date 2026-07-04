@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -18,13 +18,11 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import TrackingStatus
 from app.novaposhta.tracking import map_tracking_status
 from app.services import notifications
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import best_effort_sync, run_on_sheets_executor
 from app.services.inventory import stock_sheet_key
 from app.services.notifications import Notifier
 from app.sheets import StockDelta, StockSource, build_stock_source
 from app.utils.sla import sla_met
-
-logger = structlog.get_logger(__name__)
 
 NONSTANDARD_STATUSES = {
     ShipmentStatus.returning,
@@ -32,6 +30,9 @@ NONSTANDARD_STATUSES = {
     ShipmentStatus.lost,
     ShipmentStatus.damaged,
 }
+
+# Потолок конкурентных НП-чтений статусов за один поллинг (по одному httpx-клиенту).
+_POLL_FETCH_CONCURRENCY = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,29 +61,48 @@ async def poll_shipments(
             continue
         by_api_key[shipment.sender_profile.np_api_key].append(shipment)
 
+    # Спеки чтения: (api_key, batch, chunk из ≤100 номеров) на каждый ФОП.
+    fetch_specs: list[tuple[str, list[Shipment], list[str]]] = []
+    for api_key, batch in by_api_key.items():
+        numbers = [shipment.ttn_number for shipment in batch if shipment.ttn_number]
+        for chunk in _chunked(numbers, size=100):
+            fetch_specs.append((api_key, batch, chunk))
+    if not fetch_specs:
+        return TrackingPollResult(checked=0, updated=0, notified=0)
+
+    # Фаза чтения — независимые НП-вызовы конкурентно (общий httpx.AsyncClient
+    # потокобезопасен), но с ограничителем, чтобы не завалить API при многих ФОП.
+    # TaskGroup: при сбое одного чтения остальные отменяются структурно (без «висящих»
+    # задач и «Task exception was never retrieved»).
+    sem = asyncio.Semaphore(_POLL_FETCH_CONCURRENCY)
+
+    async def _fetch(api_key: str, chunk: list[str]) -> list[TrackingStatus]:
+        async with sem:
+            return await methods.get_status_documents(np_client, api_key=api_key, numbers=chunk)
+
+    async with asyncio.TaskGroup() as tg:
+        tasks = [tg.create_task(_fetch(api_key, chunk)) for api_key, _, chunk in fetch_specs]
+    fetched = [task.result() for task in tasks]
+
+    # Фаза записи — последовательно на общей `AsyncSession` (не потокобезопасна).
     checked = 0
     updated = 0
     notified = 0
-    for api_key, batch in by_api_key.items():
-        numbers = [shipment.ttn_number for shipment in batch if shipment.ttn_number]
-        if not numbers:
-            continue
-        for chunk in _chunked(numbers, size=100):
-            checked += len(chunk)
-            rows = await methods.get_status_documents(np_client, api_key=api_key, numbers=chunk)
-            by_number = {row.number: row for row in rows}
-            for shipment in batch:
-                if shipment.ttn_number not in by_number:
-                    continue
-                changed, pushed = await apply_tracking_status(
-                    session,
-                    shipment=shipment,
-                    tracking=by_number[shipment.ttn_number],
-                    notifier=notifier,
-                    mutator=mutator,
-                )
-                updated += int(changed)
-                notified += int(pushed)
+    for (_api_key, batch, chunk), rows in zip(fetch_specs, fetched, strict=True):
+        checked += len(chunk)
+        by_number = {row.number: row for row in rows}
+        for shipment in batch:
+            if shipment.ttn_number not in by_number:
+                continue
+            changed, pushed = await apply_tracking_status(
+                session,
+                shipment=shipment,
+                tracking=by_number[shipment.ttn_number],
+                notifier=notifier,
+                mutator=mutator,
+            )
+            updated += int(changed)
+            notified += int(pushed)
     return TrackingPollResult(checked=checked, updated=updated, notified=notified)
 
 
@@ -155,7 +175,8 @@ async def _apply_dispatch_stock(
     if await repo.movement_exists(shipment.id, StockMovementType.ttn_dispatch):
         return
 
-    (mutator or build_stock_source()).apply_deltas(
+    await run_on_sheets_executor(
+        (mutator or build_stock_source()).apply_deltas,
         stock_sheet_key(shipment.client),
         [
             StockDelta(
@@ -168,22 +189,20 @@ async def _apply_dispatch_stock(
             for item in shipment.items
         ],
     )
-    movements = StockMovementRepository(session)
-    for item in shipment.items:
-        await movements.create(
-            client_id=shipment.client_id,
-            shipment_id=shipment.id,
-            sku=item.sku,
-            movement_type=StockMovementType.ttn_dispatch,
-            quantity_delta=-item.quantity,
-            quantity_before=0,
-            quantity_after=-item.quantity,
-            comment=f"Списання по ТТН {shipment.ttn_number or '—'}",
-        )
-    try:
-        await sync_client_sheets(session, client=shipment.client)
-    except Exception:
-        logger.warning("tracking_sheet_sync_failed", shipment_id=str(shipment.id), exc_info=True)
+    await StockMovementRepository(session).record_for_items(
+        client_id=shipment.client_id,
+        shipment_id=shipment.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_dispatch,
+        sign=-1,
+        comment=f"Списання по ТТН {shipment.ttn_number or '—'}",
+    )
+    await best_effort_sync(
+        session,
+        client=shipment.client,
+        log_key="tracking_sheet_sync_failed",
+        shipment_id=str(shipment.id),
+    )
 
 
 def _chunked(items: list[str], *, size: int) -> list[list[str]]:

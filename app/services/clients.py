@@ -12,8 +12,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-import structlog
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -21,16 +19,13 @@ from app.config import Settings
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, SenderProfileRepository, UserRepository
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
-    PermissionDenied,
     PhoneAlreadyTaken,
     TransitionForbidden,
 )
-
-logger = structlog.get_logger(__name__)
 
 # Per-flag права (ключи в `users.permissions`). Канонический источник —
 # `app/bot/permissions.py`; здесь — алиасы для обратной совместимости вызовов
@@ -69,34 +64,6 @@ class ClientCard:
     created_at: datetime
     sender_profiles_count: int
     default_sender_name: str | None
-
-
-def _require_staff(actor: User, settings: Settings | None) -> None:
-    """Чтение списка/карточки — только активный персонал (manager+) или dev."""
-    if permissions.is_dev(actor.telegram_id, settings):
-        return
-    if actor.status is not UserStatus.active:
-        raise PermissionDenied("учётная запись неактивна")
-    if not permissions.role_at_least(actor.role, UserRole.manager):
-        raise PermissionDenied("требуется роль менеджера или выше")
-
-
-def _require_can_manage(actor: User, target: User, flag: str, settings: Settings | None) -> None:
-    """Мутация клиента: актёр активен + иерархия `can_manage` + per-flag право.
-
-    Статус актёра проверяем здесь, т.к. `/start` гейтит вход, но reply-клавиатуры в
-    Telegram сохраняются — заблокированный/архивный менеджер не должен управлять
-    клиентами по «залипшим» кнопкам (dev обходит проверку).
-    """
-    if (
-        not permissions.is_dev(actor.telegram_id, settings)
-        and actor.status is not UserStatus.active
-    ):
-        raise PermissionDenied("учётная запись неактивна")
-    if not permissions.can_manage(actor, target, settings):
-        raise PermissionDenied("нет прав управлять этим пользователем")
-    if not permissions.has_permission(actor, flag, settings):
-        raise PermissionDenied(f"право {flag} отозвано")
 
 
 async def _get_client(users: UserRepository, client_id: uuid.UUID) -> User:
@@ -144,7 +111,7 @@ async def _transition(
 ) -> ClientCard:
     users = UserRepository(session)
     user = await _get_client(users, client_id)
-    _require_can_manage(actor, user, CAN_MANAGE_CLIENTS, settings)
+    permissions.require_can_manage(actor, user, CAN_MANAGE_CLIENTS, settings)
     _check_transition(user, to, allowed_from)
 
     before = {"status": user.status}
@@ -173,7 +140,7 @@ async def list_clients(
     offset: int = 0,
     settings: Settings | None = None,
 ) -> ClientPage:
-    _require_staff(actor, settings)
+    permissions.require_staff(actor, settings)
     users = UserRepository(session)
     rows, total = await users.list_by_status(status=status, query=query, limit=limit, offset=offset)
     counts = await users.count_by_status()
@@ -198,7 +165,7 @@ async def get_client_card(
     client_id: uuid.UUID,
     settings: Settings | None = None,
 ) -> ClientCard:
-    _require_staff(actor, settings)
+    permissions.require_staff(actor, settings)
     user = await _get_client(UserRepository(session), client_id)
     return await _card(session, user)
 
@@ -295,7 +262,7 @@ async def update_client_profile(
 ) -> ClientCard:
     users = UserRepository(session)
     user = await _get_client(users, client_id)
-    _require_can_manage(actor, user, CAN_EDIT_CLIENTS, settings)
+    permissions.require_can_manage(actor, user, CAN_EDIT_CLIENTS, settings)
 
     before = {"full_name": user.full_name, "phone": user.phone}
     changed = False
@@ -321,18 +288,11 @@ async def update_client_profile(
             after={"full_name": user.full_name, "phone": user.phone},
         )
         if full_name is not None:
-            # Sheets — best-effort: сбой синка не должен валить переименование клиента.
-            # Но ошибку БД (sync делает SELECT/flush на этой же сессии) НЕ глотаем —
-            # иначе сессия в rollback-required, и следующий запрос/commit потеряет
-            # уже сфлашенное переименование. Пробрасываем → middleware откатит явно.
-            try:
-                await sync_client_sheets(
-                    session, client=user, previous_sheet_key=previous_sheet_key
-                )
-            except SQLAlchemyError:
-                raise
-            except Exception:
-                logger.warning(
-                    "client_profile_sheet_sync_failed", user_id=str(user.id), exc_info=True
-                )
+            await best_effort_sync(
+                session,
+                client=user,
+                log_key="client_profile_sheet_sync_failed",
+                previous_sheet_key=previous_sheet_key,
+                user_id=str(user.id),
+            )
     return await _card(session, user)

@@ -5,18 +5,15 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment
 from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import best_effort_sync, run_on_sheets_executor
 from app.services.exceptions import InvalidReturnDecision, ShipmentActionForbidden, ShipmentNotFound
 from app.services.inventory import stock_sheet_key
 from app.sheets import StockDelta, StockSource, build_stock_source
-
-logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +94,9 @@ async def receive_returned_shipment(
                 price=item.unit_price,
             )
         )
-    (mutator or build_stock_source()).apply_deltas(stock_sheet_key(shipment.client), deltas)
+    await run_on_sheets_executor(
+        (mutator or build_stock_source()).apply_deltas, stock_sheet_key(shipment.client), deltas
+    )
 
     movements = StockMovementRepository(session)
     accepted_total = 0
@@ -137,7 +136,9 @@ async def receive_returned_shipment(
             "rejected_quantity": rejected_total,
         },
     )
-    try:
-        await sync_client_sheets(session, client=shipment.client)
-    except Exception:
-        logger.warning("return_sheet_sync_failed", shipment_id=str(shipment.id), exc_info=True)
+    await best_effort_sync(
+        session,
+        client=shipment.client,
+        log_key="return_sheet_sync_failed",
+        shipment_id=str(shipment.id),
+    )

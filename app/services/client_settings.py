@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import structlog
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import UserRole, UserStatus
@@ -16,14 +14,12 @@ from app.db.repositories import (
     SenderProfileRepository,
     UserRepository,
 )
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     InvalidNotificationSetting,
     PermissionDenied,
     PhoneAlreadyTaken,
 )
-
-logger = structlog.get_logger(__name__)
 
 NOTIFY_APPROVED = "notify_registration_approved"
 NOTIFY_SHIPMENT_STATUS = "notify_shipment_status"
@@ -170,21 +166,11 @@ async def update_self_profile(
             after={"full_name": client.full_name, "phone": client.phone},
         )
         if full_name is not None:
-            # Sheets — best-effort: сбой синка не должен валить self-service апдейт.
-            # Ошибку БД не глотаем (см. clients.update_client_profile) —
-            # пробрасываем, чтобы не оставить сессию в rollback-required.
-            try:
-                await sync_client_sheets(
-                    session,
-                    client=client,
-                    previous_sheet_key=previous_sheet_key,
-                )
-            except SQLAlchemyError:
-                raise
-            except Exception:
-                logger.warning(
-                    "client_self_profile_sheet_sync_failed",
-                    user_id=str(client.id),
-                    exc_info=True,
-                )
+            await best_effort_sync(
+                session,
+                client=client,
+                log_key="client_self_profile_sheet_sync_failed",
+                previous_sheet_key=previous_sheet_key,
+                user_id=str(client.id),
+            )
     return await get_client_settings(session, client=client)

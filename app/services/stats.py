@@ -10,12 +10,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
+from app.db.models.enums import ShipmentStatus
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
-from app.services.exceptions import PermissionDenied
+from app.services import shipments
 from app.services.inventory import get_inventory_snapshot
 from app.sheets import StockSource
+from app.utils.timefmt import now_local
 
 DISPATCHED_STATUSES = {
     ShipmentStatus.dispatched,
@@ -23,8 +24,9 @@ DISPATCHED_STATUSES = {
     ShipmentStatus.arrived,
     ShipmentStatus.delivered,
 }
-RETURN_STATUSES = {ShipmentStatus.returning, ShipmentStatus.returned}
-LOSS_STATUSES = {ShipmentStatus.lost, ShipmentStatus.damaged}
+# RETURN_STATUSES / LOSS_STATUSES — единый источник в `shipments` (см. там).
+RETURN_STATUSES = shipments.RETURN_STATUSES
+LOSS_STATUSES = shipments.LOSS_STATUSES
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,27 +48,35 @@ class ClientStatsSnapshot:
     top_skus: list[TopSkuStat]
 
 
-def _require_active_client(client: User) -> None:
-    if client.role is not UserRole.client:
-        raise PermissionDenied("кабінет доступний тільки клієнту")
-    if client.status is not UserStatus.active:
-        raise PermissionDenied("кабінет клієнта доступний після підтвердження")
-
-
 def _bounds(period: str, *, day: date | None, settings: Settings) -> tuple[datetime, datetime]:
+    """Границы периода `[start, end)` в зоне отделения (`time.min` каждой даты).
+
+    `end` — начало следующего периода (завтра / след. понедельник / 1-е след.
+    месяца), НЕ `now`. Верхняя граница по `now()` семантически урезала бы «сьогодні»
+    и была хрупкой: `status_changed_at` штампует Postgres (`server_default now()`), а
+    `now` считался на часах приложения — рассинхрон в пару мс уводил свежую строку
+    «в будущее» относительно `end`, и она выпадала из отчёта.
+    """
     tz = ZoneInfo(settings.timezone)
-    now = datetime.now(tz)
+
+    def _midnight(value: date) -> datetime:
+        return datetime.combine(value, time.min, tzinfo=tz)
+
     if day is not None:
-        start = datetime.combine(day, time.min, tzinfo=tz)
-        return start, start + timedelta(days=1)
+        return _midnight(day), _midnight(day + timedelta(days=1))
+
+    today = datetime.now(tz).date()
     if period == "week":
-        start = datetime.combine((now - timedelta(days=now.weekday())).date(), time.min, tzinfo=tz)
-        return start, now
+        monday = today - timedelta(days=today.weekday())
+        return _midnight(monday), _midnight(monday + timedelta(days=7))
     if period == "month":
-        start = datetime.combine(now.date().replace(day=1), time.min, tzinfo=tz)
-        return start, now
-    start = datetime.combine(now.date(), time.min, tzinfo=tz)
-    return start, now
+        first = today.replace(day=1)
+        if first.month == 12:
+            next_first = first.replace(year=first.year + 1, month=1)
+        else:
+            next_first = first.replace(month=first.month + 1)
+        return _midnight(first), _midnight(next_first)
+    return _midnight(today), _midnight(today + timedelta(days=1))
 
 
 async def get_client_stats(
@@ -78,7 +88,7 @@ async def get_client_stats(
     reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> ClientStatsSnapshot:
-    _require_active_client(client)
+    shipments._require_active_client(client)
     cfg = settings or get_settings()
     start, end = _bounds(period, day=day, settings=cfg)
     repo = ShipmentRepository(session)
@@ -118,7 +128,10 @@ async def get_client_stats(
     return ClientStatsSnapshot(
         period="day" if day is not None else period,
         start=start,
-        end=end,
+        # Для показа обрезаем верхнюю границу до «сейчас»: окно запроса `[start, end)`
+        # тянется до конца периода (см. `_bounds`), но пользователю «Період» не должен
+        # уходить в завтра/след. месяц.
+        end=min(end, now_local(cfg)),
         shipped_qty=shipped_qty,
         returns_qty=returns_qty,
         losses_qty=losses_qty,

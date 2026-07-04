@@ -33,7 +33,7 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
 from app.services import inventory, notifications, shipments
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     InsufficientStock,
     SenderDispatchNotConfigured,
@@ -242,18 +242,14 @@ async def create_shipment(
     )
     shipment.sla_deadline = shipment_sla_deadline(shipment.created_at, settings=settings)
     shipment.fee_amount = compute_shipment_fee(sum(item.quantity for item in drafts))
-    stock_movements = StockMovementRepository(session)
-    for draft in drafts:
-        await stock_movements.create(
-            client_id=client.id,
-            shipment_id=shipment.id,
-            sku=draft.sku,
-            movement_type=StockMovementType.ttn_reserve,
-            quantity_delta=-draft.quantity,
-            quantity_before=0,
-            quantity_after=-draft.quantity,
-            comment=f"Резерв під ТТН {result.int_doc_number}",
-        )
+    await StockMovementRepository(session).record_for_items(
+        client_id=client.id,
+        shipment_id=shipment.id,
+        items=drafts,
+        movement_type=StockMovementType.ttn_reserve,
+        sign=-1,
+        comment=f"Резерв під ТТН {result.int_doc_number}",
+    )
     await AuditRepository(session).log(
         "shipment_created",
         user_id=client.id,
@@ -274,10 +270,13 @@ async def create_shipment(
             )
         except Exception:
             logger.warning("shipment_push_failed", shipment_id=str(shipment.id))
-    try:
-        await sync_client_sheets(session, client=client, reader=reader)
-    except Exception:
-        logger.warning("shipment_sheet_sync_failed", shipment_id=str(shipment.id), exc_info=True)
+    await best_effort_sync(
+        session,
+        client=client,
+        log_key="shipment_sheet_sync_failed",
+        reader=reader,
+        shipment_id=str(shipment.id),
+    )
     # Перечитываем с joinedload(items) — иначе `_to_card` ленивой загрузкой
     # коллекции упадёт в async (MissingGreenlet).
     fresh = await repo.get_by_id(shipment.id)
@@ -322,24 +321,18 @@ async def cancel_shipment(
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
     card = await shipments.cancel_shipment(session, client=client, shipment_id=shipment_id)
-    movements = StockMovementRepository(session)
-    for item in shipment.items:
-        await movements.create(
-            client_id=client.id,
-            shipment_id=shipment.id,
-            sku=item.sku,
-            movement_type=StockMovementType.ttn_cancel,
-            quantity_delta=item.quantity,
-            quantity_before=0,
-            quantity_after=item.quantity,
-            comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
-        )
-    try:
-        await sync_client_sheets(session, client=client)
-    except Exception:
-        logger.warning(
-            "shipment_cancel_sheet_sync_failed",
-            shipment_id=str(shipment.id),
-            exc_info=True,
-        )
+    await StockMovementRepository(session).record_for_items(
+        client_id=client.id,
+        shipment_id=shipment.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_cancel,
+        sign=1,
+        comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
+    )
+    await best_effort_sync(
+        session,
+        client=client,
+        log_key="shipment_cancel_sheet_sync_failed",
+        shipment_id=str(shipment.id),
+    )
     return card

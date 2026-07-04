@@ -133,6 +133,7 @@ class ShipmentRepository(BaseRepository):
         query: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        with_movements: bool = False,
     ) -> tuple[list[Shipment], int]:
         conditions = [Shipment.client_id == client_id]
         if statuses:
@@ -151,13 +152,16 @@ class ShipmentRepository(BaseRepository):
         total = await self.session.scalar(
             select(func.count()).select_from(Shipment).where(*conditions)
         )
+        options = [
+            joinedload(Shipment.client),
+            joinedload(Shipment.items),
+            joinedload(Shipment.sender_profile),
+        ]
+        if with_movements:
+            options.append(joinedload(Shipment.stock_movements))
         rows = await self.session.scalars(
             select(Shipment)
-            .options(
-                joinedload(Shipment.client),
-                joinedload(Shipment.items),
-                joinedload(Shipment.sender_profile),
-            )
+            .options(*options)
             .where(*conditions)
             .order_by(Shipment.created_at.desc())
             .limit(limit)
@@ -313,15 +317,23 @@ class ShipmentRepository(BaseRepository):
         )
         return list(rows.unique()), int(total or 0)
 
-    async def count_by_statuses(self, statuses: set[ShipmentStatus]) -> int:
-        return int(
-            await self.session.scalar(
-                select(func.count())
-                .select_from(Shipment)
-                .where(Shipment.status.in_(tuple(statuses)))
-            )
-            or 0
+    async def count_by_status_groups(
+        self, groups: dict[str, set[ShipmentStatus]]
+    ) -> dict[str, int]:
+        """Счётчики по бакетам статусов одним `GROUP BY` (вместо N запросов COUNT)."""
+        all_statuses = {status for statuses in groups.values() for status in statuses}
+        if not all_statuses:
+            return dict.fromkeys(groups, 0)
+        rows = await self.session.execute(
+            select(Shipment.status, func.count())
+            .where(Shipment.status.in_(tuple(all_statuses)))
+            .group_by(Shipment.status)
         )
+        per_status = dict(rows.all())
+        return {
+            key: sum(per_status.get(status, 0) for status in statuses)
+            for key, statuses in groups.items()
+        }
 
     async def movement_exists(
         self,

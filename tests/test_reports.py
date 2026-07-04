@@ -17,6 +17,7 @@ from app.db.repositories import (
 )
 from app.services import reports
 from app.services.exceptions import PermissionDenied
+from app.services.shipment import compute_shipment_fee
 from sqlalchemy.ext.asyncio import AsyncSession
 
 TZ = ZoneInfo("Europe/Kyiv")
@@ -48,10 +49,10 @@ async def _shipment(session, *, client_id, status, qty, **fields):
     return shipment
 
 
-def test_fee_for_units_formula():
-    assert reports.fee_for_units(1) == Decimal(20)
-    assert reports.fee_for_units(3) == Decimal(22)
-    assert reports.fee_for_units(0) == Decimal(0)
+def test_compute_shipment_fee_formula():
+    assert compute_shipment_fee(1) == Decimal(20)
+    assert compute_shipment_fee(3) == Decimal(22)
+    assert compute_shipment_fee(0) == Decimal(0)
 
 
 async def test_period_report_aggregates_by_client(db_session: AsyncSession):

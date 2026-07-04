@@ -6,9 +6,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import permissions
 from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole
 from app.db.models.shipment import Shipment
 from app.db.repositories import (
@@ -20,18 +20,16 @@ from app.db.repositories import (
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
-from app.services import clients, notifications, shipments
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services import notifications, shipments
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import ShipmentActionForbidden, ShipmentNotFound, TtnCancelFailed
 from app.services.notifications import Notifier
 from app.services.returns import ReturnDecision, receive_returned_shipment
 
-logger = structlog.get_logger(__name__)
-
 QUEUE_BUCKETS = {
     "created": {ShipmentStatus.created},
     "confirmed": {ShipmentStatus.confirmed},
-    "returns": {ShipmentStatus.returning, ShipmentStatus.returned},
+    "returns": shipments.RETURN_STATUSES,
 }
 NONSTANDARD_SOURCE_STATUSES = {
     ShipmentStatus.dispatched,
@@ -133,7 +131,7 @@ async def list_queue(
     limit: int = 8,
     offset: int = 0,
 ) -> ManagerShipmentPage:
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     repo = ShipmentRepository(session)
     rows, total = await repo.list_for_staff(
         statuses=_bucket_statuses(bucket),
@@ -141,9 +139,7 @@ async def list_queue(
         limit=limit,
         offset=offset,
     )
-    counts = {
-        key: await repo.count_by_statuses(statuses) for key, statuses in QUEUE_BUCKETS.items()
-    }
+    counts = await repo.count_by_status_groups(QUEUE_BUCKETS)
     return ManagerShipmentPage(
         items=[_to_list_item(row) for row in rows],
         total=total,
@@ -161,7 +157,7 @@ async def get_card(
     actor,
     shipment_id: uuid.UUID,
 ) -> ManagerShipmentCard:
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     shipment = await ShipmentRepository(session).get_by_id(shipment_id)
     if shipment is None:
         raise ShipmentNotFound(str(shipment_id))
@@ -174,7 +170,7 @@ async def confirm_shipment(
     actor,
     shipment_id: uuid.UUID,
 ) -> ManagerShipmentCard:
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     repo = ShipmentRepository(session)
     shipment = await repo.get_by_id(shipment_id)
     if shipment is None:
@@ -200,7 +196,7 @@ async def cancel_shipment(
     shipment_id: uuid.UUID,
     np_client: NovaPoshtaClient,
 ) -> ManagerShipmentCard:
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     repo = ShipmentRepository(session)
     shipment = await repo.get_by_id(shipment_id)
     if shipment is None:
@@ -220,19 +216,15 @@ async def cancel_shipment(
             raise TtnCancelFailed(str(exc)) from exc
     before = {"status": shipment.status.value}
     await repo.update_status(shipment, ShipmentStatus.cancelled)
-    movements = StockMovementRepository(session)
-    for item in shipment.items:
-        await movements.create(
-            client_id=shipment.client_id,
-            shipment_id=shipment.id,
-            actor_user_id=actor.id,
-            sku=item.sku,
-            movement_type=StockMovementType.ttn_cancel,
-            quantity_delta=item.quantity,
-            quantity_before=0,
-            quantity_after=item.quantity,
-            comment=f"Скасування менеджером ТТН {shipment.ttn_number or '—'}",
-        )
+    await StockMovementRepository(session).record_for_items(
+        client_id=shipment.client_id,
+        shipment_id=shipment.id,
+        actor_user_id=actor.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_cancel,
+        sign=1,
+        comment=f"Скасування менеджером ТТН {shipment.ttn_number or '—'}",
+    )
     await AuditRepository(session).log(
         "shipment_cancelled_by_staff",
         user_id=actor.id,
@@ -240,14 +232,12 @@ async def cancel_shipment(
         before=before,
         after={"status": shipment.status.value},
     )
-    try:
-        await sync_client_sheets(session, client=shipment.client)
-    except Exception:
-        logger.warning(
-            "manager_cancel_sheet_sync_failed",
-            shipment_id=str(shipment.id),
-            exc_info=True,
-        )
+    await best_effort_sync(
+        session,
+        client=shipment.client,
+        log_key="manager_cancel_sheet_sync_failed",
+        shipment_id=str(shipment.id),
+    )
     return _to_card(shipment)
 
 
@@ -265,7 +255,7 @@ async def receive_return(
     user = await UserRepository(session).get_by_id(shipment.client_id)
     if user is None or user.role is not UserRole.client:
         raise ShipmentNotFound(str(shipment_id))
-    clients._require_can_manage(actor, user, clients.CAN_MANAGE_CLIENTS, settings=None)
+    permissions.require_can_manage(actor, user, permissions.CAN_MANAGE_CLIENTS, settings=None)
     await receive_returned_shipment(
         session,
         shipment_id=shipment_id,
@@ -285,7 +275,7 @@ async def mark_nonstandard(
     shipment_id: uuid.UUID,
     status: ShipmentStatus,
 ) -> ManagerShipmentCard:
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     if status not in NONSTANDARD_TARGET_STATUSES:
         raise ShipmentActionForbidden("mark_nonstandard", status)
     repo = ShipmentRepository(session)

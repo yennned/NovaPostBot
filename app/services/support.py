@@ -15,7 +15,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +25,7 @@ from app.db.models.user import User
 from app.db.repositories import SupportRepository
 from app.services import duty
 from app.services.exceptions import PermissionDenied
+from app.utils.timefmt import now_local
 from app.utils.work_schedule import is_open, window_for_day
 
 
@@ -47,11 +47,6 @@ class ThreadOpenResult:
     office_open: bool
 
 
-def _now_local(settings: Settings, now: datetime | None) -> datetime:
-    tz = ZoneInfo(settings.timezone)
-    return datetime.now(tz) if now is None else now.astimezone(tz)
-
-
 async def get_duty_contact(
     session: AsyncSession,
     *,
@@ -59,7 +54,7 @@ async def get_duty_contact(
     now: datetime | None = None,
 ) -> DutyContact:
     cfg = settings or get_settings()
-    moment = _now_local(cfg, now)
+    moment = now_local(cfg, now)
     managers = await duty.current_duty_managers(session, settings=cfg, now=moment)
     return DutyContact(
         manager=managers[0] if managers else None,
