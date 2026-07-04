@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     # Версия сборки (git sha от CI, «dev» локально) — для логов старта и /version.
     app_version: str = Field(default="dev", alias="APP_VERSION")
 
+    # Среда исполнения — чтобы в логах/`/version` было видно, куда подключён процесс,
+    # и случайно не спутать локальный тест-бот с продом. На поведение кода не влияет
+    # (разделение сред идёт через .env: токен/URL), только на трассировку.
+    environment: Literal["local", "staging", "production"] = Field(
+        default="local",
+        alias="ENVIRONMENT",
+    )
+
     # Telegram
     bot_token: str = Field(default="", alias="BOT_TOKEN")
 

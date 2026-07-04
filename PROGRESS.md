@@ -15,6 +15,30 @@
 
 ---
 
+## 2026-07-05 · feat/alex-devflow · тест/review-среда, PR-ворота, откат
+- **Зачем:** выстроить профессиональный поток «обкатать ветку на отдельном
+  тест-боте → PR → merge в main → прод; при проблеме — быстрый откат», не трогая
+  боевого бота. Этап A (сейчас): тест-бот **локально** (ничего не платить);
+  этап B (позже, когда клиенты) — always-on staging на том же VPS. План —
+  `~/.claude/plans/streamed-shimmying-panda.md`.
+- **Флаг среды:** `ENVIRONMENT` (local/staging/production) в `app/config.py`;
+  печатается в логах старта (`bot.start`/`worker.start`) и в `/version` — чтобы
+  не спутать тест с продом. На поведение кода не влияет.
+- **Откат прода:** `.github/workflows/rollback.yml` (`workflow_dispatch` + тег
+  образа) — по SSH подменяет `APP_IMAGE` на VPS и перекатывает. Тот же
+  `concurrency: deploy-main`, что у `deploy`. Правило: откат меняет код, не схему
+  БД → миграции держим backward-compatible (expand/contract).
+- **Авто-ревью PR:** CodeRabbit (GitHub App, free для публичных репо), конфиг
+  `.coderabbit.yaml` (ревью на русском). Сигнальный, не гейт. Активация разово на
+  coderabbit.ai (установка App на репо) — секретов/workflow не требует.
+- **Доки:** раздел «Среды и процесс» в CONTRIBUTING (таблица сред, зачем PR,
+  expand/contract, откат, этап B), тест-бот в README/.env.example.
+- **Дальше:** установить CodeRabbit App на репо (coderabbit.ai); VPS+деплой —
+  когда появится сервер (rollback/deploy пока «спят», SSH-шаг скипается).
+- **Открытые вопросы:** нет (оставили 2 бота: тест локально + боевой в резерве).
+
+---
+
 ## 2026-07-04 · fix/alex-cicd-buildx · фикс deploy-джоба
 - **Проблема:** первый `deploy` на `main` (#53) упал: `Build and push image` — «Cache
   export is not supported for the docker driver» (я задал `cache-to: type=gha`, но
