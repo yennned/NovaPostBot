@@ -15,6 +15,13 @@
 
 ---
 
+## 2026-07-04 · fix/alex-cicd-buildx · фикс deploy-джоба
+- **Проблема:** первый `deploy` на `main` (#53) упал: `Build and push image` — «Cache
+  export is not supported for the docker driver» (я задал `cache-to: type=gha`, но
+  дефолтный docker-драйвер GHA-кэш не поддерживает). SSH-деплой скипнулся корректно.
+- **Фикс:** шаг `docker/setup-buildx-action@v3` перед build — поднимает buildx с
+  драйвером `docker-container`, где GHA-кэш работает.
+
 ## 2026-07-04 · chore/alex-cicd · CI/CD + командная гигиена (Tier 1 + Tier 2)
 - **Зачем:** закрыть два разрыва «командного» проекта — не было автодеплоя (прод
   обновлялся вручную по SSH `up -d --build`) и трассируемости версии (по образу нельзя
