@@ -160,16 +160,17 @@ CI (GitHub Actions, `.github/workflows/ci.yml`, job `lint-test`) гоняет la
 | Среда | Бот-токен | БД | Когда |
 |---|---|---|---|
 | **local** | **отдельный** тест-бот (@BotFather) | локальный Postgres (`docker-compose.override.yml`) | запуск на машине разработчика |
+| **staging** *(этап B — ещё не активна)* | отдельный staging-бот | Neon-ветка | always-on на том же VPS, авто-деплой из PR (см. ниже) |
 | **production** | боевой `@novopokrovka_np_bot` | Neon (managed) | только merge в `main` → авто-деплой |
 
 `ENVIRONMENT` (`local`/`staging`/`production`) в `.env` виден в логе старта и по
 `/version` — чтобы случайно не спутать тест с продом. На поведение кода не влияет.
 
 **Поток обкатки (последовательная модель):**
-```
+```text
 git checkout feat/x → docker compose up   # локальный тест-бот, свой токен, локальный PG
    → руками проверяешь в тест-боте → OK?
-   → PR → CI (lint-test, гейт) + авто-ревью Claude → merge в main → авто-деплой в прод
+   → PR → CI (lint-test, гейт) + авто-ревью CodeRabbit → merge в main → авто-деплой в прод
    → проблема в проде? → workflow «Rollback prod» на прошлый :sha-/:vX.Y.Z
 ```
 

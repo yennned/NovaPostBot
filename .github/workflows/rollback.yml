@@ -46,13 +46,21 @@ jobs:
           script_stop: true
           script: |
             cd ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}
-            image_base="$(grep -E '^APP_IMAGE=' .env | head -n1 | sed -E 's/^APP_IMAGE=([^:]+):.*/\1/')"
+            prev_line="$(grep -E '^APP_IMAGE=' .env | head -n1)"
+            image_base="$(printf '%s' "$prev_line" | sed -E 's/^APP_IMAGE=([^:]+):.*/\1/')"
             if [ -z "$image_base" ]; then
               echo "APP_IMAGE не найден в .env" >&2
               exit 1
             fi
             sed -i -E "s#^APP_IMAGE=.*#APP_IMAGE=${image_base}:${IMAGE_TAG}#" .env
             echo "Rollback to ${image_base}:${IMAGE_TAG}"
-            docker compose pull
+            # Если pull нового тега упал — возвращаем прежний APP_IMAGE, чтобы .env не
+            # остался с битой ссылкой (иначе следующий `up` смотрел бы на несуществующий
+            # образ). Только после успешного pull перекатываем контейнеры.
+            if ! docker compose pull; then
+              sed -i -E "s#^APP_IMAGE=.*#${prev_line}#" .env
+              echo "pull ${image_base}:${IMAGE_TAG} упал — APP_IMAGE восстановлен" >&2
+              exit 1
+            fi
             docker compose up -d --no-build
             docker image prune -f
