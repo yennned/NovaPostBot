@@ -28,7 +28,7 @@ jobs:
       DATABASE_URL_DIRECT: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
       FERNET_KEY: 8LriREApni0MjqknuIDohQH6rnNVIOknKJ6Kl4tuVQ4=
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
@@ -75,7 +75,7 @@ jobs:
       group: deploy-main
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compute image ref
         id: meta
