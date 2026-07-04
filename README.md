@@ -1,5 +1,9 @@
 # NovaPostBot — Telegram-бот фулфілменту Нової Пошти
 
+[![CI](https://github.com/yennned/NovaPostBot/actions/workflows/ci.yml/badge.svg)](https://github.com/yennned/NovaPostBot/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![License](https://img.shields.io/badge/license-proprietary-lightgrey)
+
 Личный кабинет фулфілменту в Telegram: клиенты создают ТТН через API Нової Пошти
 своим ключом (мульти-ФОП), видят остатки/статистику/отправления и общаются с
 дежурным менеджером; менеджеры обрабатывают и отправляют ТТН, ведут склад,
@@ -90,12 +94,20 @@ docker compose logs -f bot
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-## Хостинг
+## Хостинг и деплой
 
 Hetzner CPX21 VPS (бот + воркер + Redis в Docker) + managed Postgres **Neon**
 (план **Launch** с отключённым scale-to-zero; Free — только dev/staging из-за
 холодных стартов). Ориентир ~€10–15/мес. Код провайдеро-независим
 (`DATABASE_URL`/`REDIS_URL`). Детали — [docs/01-overview.md](docs/01-overview.md).
+
+**CI/CD.** Push/PR в `main` → CI `lint-test` (layer-check, ruff, compileall,
+pytest на Postgres-контейнере). После зелёного CI **push в `main`** триггерит
+`deploy`: сборка образа → **GHCR** (`:latest` + `:sha-<short>`) → SSH-деплой на VPS
+(`docker compose pull && up -d --no-build`). Ручной `up -d --build` больше не нужен.
+Версия сборки (git sha) пишется в лог старта (`bot.start version=…`) и отдаётся
+командой `/version` (dev). Вехи — теги `vX.Y.Z` (`release.yml` → GitHub Release +
+образ с тегом версии). Настройка секретов деплоя — в [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Разработка
 
