@@ -1,0 +1,23 @@
+# CODEOWNERS — авто-реквест ревью по layer-split (см. CONTRIBUTING.md).
+# alex = @yennned (домен/инфра). step = @STEP-GITHUB-HANDLE ← ВПИШИ логин Степана.
+#
+# Замени @STEP-GITHUB-HANDLE на реальный GitHub-логин; до этого правила на bot-слой
+# не будут авто-запрашивать ревью (GitHub просто игнорирует неизвестного владельца).
+
+# По умолчанию — владелец репо (чтобы у любого PR был code owner)
+*                     @yennned
+
+# bot-слой (presentation / aiogram) — step
+/app/bot/             @STEP-GITHUB-HANDLE
+
+# домен и инфраструктура — alex
+/app/services/        @yennned
+/app/db/              @yennned
+/app/novaposhta/      @yennned
+/app/sheets/          @yennned
+/migrations/          @yennned
+
+# инфра репозитория (CI/CD, деплой, контейнеры) — оба
+/.github/             @yennned @STEP-GITHUB-HANDLE
+/Dockerfile           @yennned @STEP-GITHUB-HANDLE
+/docker-compose.yml   @yennned @STEP-GITHUB-HANDLE
