@@ -33,23 +33,30 @@ from app.config import get_settings
 from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
+from app.sheets.client import _STOCK_EXPECTED_HEADERS
 from google.oauth2.service_account import Credentials
-from gspread.utils import ValueInputOption
+from gspread.utils import ValueInputOption, rowcol_to_a1
 from sqlalchemy import select
 
-# Колонки листа «Склад». Бот ЧИТАЕТ/append первые 5 (Артикул..Ціна). Резерв (F) пишет
-# бот из Postgres (reserved по открытым ТТН) через client_sheet_sync.write_reserved;
-# Доступно (G) — ARRAYFORMULA =Кількість−Резерв (см. write_available_formula).
-STOCK_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна", "Резерв", "Доступно"]
-# Первые 5 — каноничны для чтения. Передаём как expected_headers
-# (= app/sheets/client._STOCK_EXPECTED_HEADERS), иначе панель-итог справа (пустые
-# заголовки колонок-разрыва) валит get_all_records при повторном прогоне.
-STOCK_READ_HEADERS = STOCK_HEADERS[:5]
-# Панель «Зведення» справа от данных (0-based колонки): тонкий разрыв, лейблы, значения.
-PANEL_GAP_COL = len(STOCK_HEADERS)  # F — разрыв сразу после данных
-PANEL_LABEL_COL = PANEL_GAP_COL + 1  # G — лейблы
-PANEL_VALUE_COL = PANEL_GAP_COL + 2  # H — значения/селекторы (дропдауны)
-_PANEL_VALUE_A1 = chr(ord("A") + PANEL_VALUE_COL)  # «H» — для формул-ссылок на селекторы
+# Колонки листа «Склад». Первые 5 (Артикул..Ціна) — каноничны для чтения ботом и
+# живут единым источником в app/sheets/client (_STOCK_EXPECTED_HEADERS); здесь только
+# дополняем их Резервом (F, пишет бот из Postgres через client_sheet_sync) и Доступно
+# (G, ARRAYFORMULA =Кількість−Резерв, см. write_available_formula). Передаём первые 5
+# как expected_headers, иначе панель-итог справа валит get_all_records при повторе.
+STOCK_READ_HEADERS = list(_STOCK_EXPECTED_HEADERS)
+STOCK_HEADERS = [*STOCK_READ_HEADERS, "Резерв", "Доступно"]
+
+
+def _col_a1(col0: int) -> str:
+    """0-based индекс колонки → буква A1 (0→A, 5→F, 9→J, 26→AA)."""
+    return rowcol_to_a1(1, col0 + 1)[:-1]
+
+
+# Панель «Зведення» справа от данных A–G (0-based колонки): тонкий разрыв, лейблы, значения.
+PANEL_GAP_COL = len(STOCK_HEADERS)  # H — разрыв сразу после данных
+PANEL_LABEL_COL = PANEL_GAP_COL + 1  # I — лейблы
+PANEL_VALUE_COL = PANEL_GAP_COL + 2  # J — значения/селекторы (дропдауны)
+_PANEL_VALUE_A1 = _col_a1(PANEL_VALUE_COL)  # «J» — для формул-ссылок на селекторы
 INTAKE_HEADERS = [
     "Дата",
     "Артикул",
@@ -73,7 +80,6 @@ SCOPES = [
 ]
 
 SUMMARY_TITLE = "📊 Зведення"
-LOW_STOCK = 3  # совпадает с settings.low_stock_threshold
 PROTECT_DESC = "Залишки править лише бот/Script (owner/dev — за винятком)"
 _DEFAULT_TABS = {"Sheet1", "Аркуш1", "Лист1"}
 
@@ -377,9 +383,10 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
         }
     )
     dcol = _grid(sid, 1, 1000, 3, 4)
+    low_stock = get_settings().low_stock_threshold  # единый порог с рантаймом бота
     reqs += [
-        _cf_rule(dcol, "NUMBER_LESS_THAN_EQ", str(LOW_STOCK), RED, RED_FG, bold=True),
-        _cf_rule(dcol, "NUMBER_BETWEEN", [str(LOW_STOCK + 1), "9"], AMBER, None),
+        _cf_rule(dcol, "NUMBER_LESS_THAN_EQ", str(low_stock), RED, RED_FG, bold=True),
+        _cf_rule(dcol, "NUMBER_BETWEEN", [str(low_stock + 1), "9"], AMBER, None),
         _cf_rule(dcol, "NUMBER_GREATER_THAN_EQ", "10", GREEN, GREEN_FG),
     ]
     if cats:  # умные чипы: дропдаун категорий + цвет-блок по категории
@@ -606,17 +613,17 @@ def side_summary_cells() -> list[list[str]]:
 
 
 def write_side_summary(book: Any, ws: Any) -> None:
-    """Интерактивная панель «Зведення» СПРАВА вплотную к данным (колонки G–H).
+    """Интерактивная панель «Зведення» СПРАВА вплотную к данным (колонки I–J).
 
     Справа (а не внизу) → строки растут вниз (`appendRow` приёмки/бота) и панель их
     не задевает: итог автоматический и никогда не «сползает», без правки Apps Script.
-    Дропдауны (Data Validation) в ячейках-селекторах H7 (категорія) и H13 (артикул);
+    Дропдауны (Data Validation) в ячейках-селекторах J7 (категорія) и J13 (артикул);
     подсчёты — формулы из `side_summary_cells`. Бот читает A:E с `expected_headers`,
     лишние колонки справа чтение не ломают (см. app/sheets/client.py).
     """
     sid = ws.id
     lbl, val, end = PANEL_LABEL_COL, PANEL_VALUE_COL, PANEL_VALUE_COL + 1
-    panel_range = f"{chr(ord('A') + lbl)}1:{_PANEL_VALUE_A1}18"
+    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}18"
     records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
     safe_title = ws.title.replace("'", "''")
@@ -799,6 +806,29 @@ def write_side_summary(book: Any, ws: Any) -> None:
     book.batch_update({"requests": reqs})
 
 
+def ensure_locale(book: Any, locale: str = "uk_UA") -> None:
+    """Закрепить локаль книги (идемпотентно).
+
+    Формулы панели «Зведення» и `write_available_formula` используют «;» как разделитель
+    аргументов — это верно только для comma-decimal локали (uk_UA/ru_RU). Без явной
+    установки книга наследует дефолт service-account (обычно en_US, dot-decimal), где
+    разделитель «,» → все «;»-формулы молча ломаются. Ставим явно, чтобы инвариант
+    держался by-construction.
+    """
+    book.batch_update(
+        {
+            "requests": [
+                {
+                    "updateSpreadsheetProperties": {
+                        "properties": {"locale": locale},
+                        "fields": "locale",
+                    }
+                }
+            ]
+        }
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--share", default="", help="email(ы) через запятую — дать доступ writer")
@@ -823,6 +853,7 @@ def main() -> None:
 
     # --- «Склад» ---
     stock, _ = open_or_create(gc, settings.sheets_stock_book_id, STOCK_TITLE)
+    ensure_locale(stock)  # «;»-формулы панели требуют comma-decimal локали (uk_UA)
     style_header(stock, ensure_worksheet(stock, TEMPLATE_TAB, STOCK_HEADERS), len(STOCK_HEADERS))
     client_ws = [ensure_worksheet(stock, tab, STOCK_HEADERS) for tab in tabs]
     _drop_empty_defaults(stock)
