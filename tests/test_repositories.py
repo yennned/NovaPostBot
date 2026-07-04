@@ -212,7 +212,8 @@ async def test_stock_movement_record_for_items(db_session: AsyncSession):
         comment="dispatch",
     )
     dispatch_rows = [
-        r for r in await movements.list_for_shipment(shipment.id)
+        r
+        for r in await movements.list_for_shipment(shipment.id)
         if r.movement_type is StockMovementType.ttn_dispatch
     ]
     assert {(r.sku, r.quantity_delta) for r in dispatch_rows} == {("A", -2), ("B", -5)}
