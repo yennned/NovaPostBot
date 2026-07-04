@@ -177,9 +177,14 @@ CI (GitHub Actions, `.github/workflows/ci.yml`, job `lint-test`) гоняет la
    (путь к репо на VPS, дефолт `~/NovaPostBot`). Пока их нет — шаг деплоя мягко
    скипается, образ всё равно пушится в GHCR.
 2. **На VPS:** репозиторий с `.env` (+ `APP_IMAGE=ghcr.io/<owner>/novapostbot:latest`) и
-   `./secrets/`; разовый `docker login ghcr.io` (read-PAT) **или** сделать GHCR-пакет
-   публичным — иначе `docker compose pull` не авторизуется.
-3. **CODEOWNERS:** заменить `@STEP-GITHUB-HANDLE` в `.github/CODEOWNERS` на реальный логин.
+   `./secrets/`. GHCR-пакет держим **приватным** — образ тянет только сервер. Разово,
+   под тем же пользователем, что `SSH_USER` (креды лягут в его `~/.docker/config.json`):
+   ```bash
+   # PAT (classic) со scope read:packages — github.com/settings/tokens
+   echo '<PAT>' | docker login ghcr.io -u <owner> --password-stdin
+   ```
+   После этого `docker compose pull` в деплое авторизуется автоматически.
+3. **CODEOWNERS** — логины уже проставлены (`@yennned`, `@Stepandj`).
 4. **Обязательное ревью** (когда команда стабильно вдвоём): включить
    `required_approving_review_count = 1` в branch protection `main`:
    ```bash
