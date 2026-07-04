@@ -60,6 +60,25 @@ def test_manager_queue_text_and_callbacks_fit_limit():
     assert all(len(item) <= 64 for item in callbacks)
 
 
+def _page(*, query):
+    return ManagerShipmentPage(
+        items=[],
+        total=0,
+        limit=6,
+        offset=0,
+        bucket="created",
+        query=query,
+        counts={"created": 0, "confirmed": 0, "returns": 0},
+    )
+
+
+def test_queue_reset_button_only_with_active_search():
+    # Без активного поиска «Скинути» не показываем (иначе сброс — no-op-редактирование).
+    assert all("mq:clear" not in cb for cb in _callbacks(build_queue_kb(_page(query=None))))
+    # С активным поиском «Скинути» появляется.
+    assert any("mq:clear" in cb for cb in _callbacks(build_queue_kb(_page(query="TTN-1"))))
+
+
 def test_manager_card_shows_expected_actions():
     shipment_id = uuid4()
     card = ManagerShipmentCard(

@@ -26,11 +26,16 @@ def build_queue_kb(page: ManagerShipmentPage) -> InlineKeyboardMarkup:
                 callback_data="mq:list:returns:0",
             ),
         ],
-        [
-            InlineKeyboardButton(text="🔎 Пошук", callback_data=f"mq:search:{page.bucket}"),
-            InlineKeyboardButton(text="🧹 Скинути", callback_data=f"mq:clear:{page.bucket}"),
-        ],
     ]
+    # «🧹 Скинути» показываем только при активном поиске — иначе сброс был бы
+    # no-op-редактированием (Telegram «message is not modified») и кнопка казалась
+    # бы сломанной. Без поиска оставляем только «🔎 Пошук».
+    search_row = [InlineKeyboardButton(text="🔎 Пошук", callback_data=f"mq:search:{page.bucket}")]
+    if page.query:
+        search_row.append(
+            InlineKeyboardButton(text="🧹 Скинути", callback_data=f"mq:clear:{page.bucket}")
+        )
+    rows.append(search_row)
     for item in page.items:
         label = item.ttn_number or item.recipient_name
         rows.append(

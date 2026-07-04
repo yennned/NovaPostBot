@@ -33,8 +33,8 @@ def build_role_menu(role: UserRole) -> ReplyKeyboardMarkup:
     else:
         rows = [
             ["📬 Відправлення", "📦 Склад"],
-            ["👥 Клієнти", "💬 Підтримка"],
-            ["👔 Персонал", "📈 Аналітика"],
+            ["👥 Клієнти", "👔 Персонал"],
+            ["📈 Аналітика"],
         ]
 
     keyboard = [[KeyboardButton(text=text) for text in row] for row in rows]
