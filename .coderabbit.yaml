@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Конфиг авто-ревьюера CodeRabbit (GitHub App). Ставится разово на сайте
+# coderabbit.ai (логин через GitHub → установить App на репозиторий). Секретов и
+# workflow-файла не требует. Ревью СИГНАЛЬНОЕ — не блокирует merge (гейт — lint-test).
+language: ru-RU
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+  # Автогенерённые Alembic-миграции не ревьюим построчно (но diff остаётся в summary).
+  path_filters:
+    - "!migrations/versions/**"

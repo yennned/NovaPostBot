@@ -1,0 +1,66 @@
+name: Rollback prod
+
+# Ручной откат прода на ранее собранный образ из GHCR (:sha-<short> или :vX.Y.Z).
+# Образы копятся ci.yml (:latest + :sha-) и release.yml (:vX.Y.Z) — их можно
+# перенакатить без пересборки. Откат меняет ТОЛЬКО код: схему БД он не откатывает,
+# поэтому миграции держим backward-compatible (expand/contract). См. CONTRIBUTING.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Тег образа в GHCR для отката (напр. sha-abc1234 или v1.2.3)"
+        required: true
+        type: string
+
+# Тот же группа-ключ, что у job deploy в ci.yml — чтобы откат и обычный деплой
+# не наехали друг на друга (сериализуются, не отменяя выполняющийся).
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Guard — SSH secrets present
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          if [ -z "$SSH_HOST" ]; then
+            echo "::error::SSH_HOST не задан — откат невозможен (деплой ещё не активирован)."
+            exit 1
+          fi
+
+      # На VPS: подменяем строку APP_IMAGE в .env на нужный тег и перекатываем.
+      # sed правит существующую строку APP_IMAGE=... (она задана при активации деплоя).
+      - name: Rollback over SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: IMAGE_TAG
+          script_stop: true
+          script: |
+            cd ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}
+            prev_line="$(grep -E '^APP_IMAGE=' .env | head -n1)"
+            image_base="$(printf '%s' "$prev_line" | sed -E 's/^APP_IMAGE=([^:]+):.*/\1/')"
+            if [ -z "$image_base" ]; then
+              echo "APP_IMAGE не найден в .env" >&2
+              exit 1
+            fi
+            sed -i -E "s#^APP_IMAGE=.*#APP_IMAGE=${image_base}:${IMAGE_TAG}#" .env
+            echo "Rollback to ${image_base}:${IMAGE_TAG}"
+            # Если pull нового тега упал — возвращаем прежний APP_IMAGE, чтобы .env не
+            # остался с битой ссылкой (иначе следующий `up` смотрел бы на несуществующий
+            # образ). Только после успешного pull перекатываем контейнеры.
+            if ! docker compose pull; then
+              sed -i -E "s#^APP_IMAGE=.*#${prev_line}#" .env
+              echo "pull ${image_base}:${IMAGE_TAG} упал — APP_IMAGE восстановлен" >&2
+              exit 1
+            fi
+            docker compose up -d --no-build
+            docker image prune -f

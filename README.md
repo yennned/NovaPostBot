@@ -81,13 +81,19 @@ tests/                 unit-тесты (чистая логика)
 ## Быстрый старт (Docker)
 
 ```bash
-cp .env.example .env   # BOT_TOKEN, DATABASE_URL (Neon pooled),
+cp .env.example .env   # ENVIRONMENT=local, BOT_TOKEN (см. ниже), DATABASE_URL (Neon pooled),
                        # DATABASE_URL_DIRECT (Alembic), REDIS_URL, FERNET_KEY,
                        # INVENTORY_SOURCE, GOOGLE_SA_JSON, SHEETS_*,
                        # OWNER_TELEGRAM_IDS, DEV_TELEGRAM_IDS
 docker compose up -d --build     # migrate (alembic upgrade head) → bot + worker
 docker compose logs -f bot
 ```
+
+> **Локально — отдельный тест-бот.** В `.env` укажи `BOT_TOKEN` **тест-бота** (создать
+> у [@BotFather](https://t.me/BotFather)), а не боевого: два процесса на одном токене
+> дают `409 Conflict` и задевают реальных клиентов. Цикл обкатки: `git checkout feat/x`
+> → `docker compose up` → тыкаешь тест-бота → `/version` покажет `Середовище: local` →
+> PR → merge. Подробнее — [CONTRIBUTING.md](CONTRIBUTING.md#среды-и-процесс).
 
 Генерация `FERNET_KEY`:
 ```bash

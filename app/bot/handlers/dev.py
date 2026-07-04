@@ -18,8 +18,11 @@ router.message.filter(IsDevFilter())
 
 @router.message(Command("version"))
 async def version(message: Message) -> None:
-    """Версия сборки (git sha от CI, «dev» локально) — трассируемость «что в проде»."""
-    await message.answer(f"Версія збірки: `{get_settings().app_version}`")
+    """Версия сборки + среда — трассируемость «что и где запущено» (тест vs прод)."""
+    settings = get_settings()
+    await message.answer(
+        f"Версія збірки: `{settings.app_version}`\nСередовище: `{settings.environment}`"
+    )
 
 
 def _parse_role(value: str) -> UserRole | None:
