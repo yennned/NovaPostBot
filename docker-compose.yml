@@ -1,5 +1,14 @@
 # Прод-Postgres — внешний (managed Neon, см. DATABASE_URL). Локальный `postgres`
 # ниже (профиль `dev`) — для autogenerate миграций и прогона тестов без Neon.
+
+# Общий образ для migrate/bot/worker (один Dockerfile, разные command).
+# Локально APP_IMAGE не задан → `build` собирает novapostbot:local (как раньше).
+# На проде в .env: APP_IMAGE=ghcr.io/yennned/novapostbot:latest → `docker compose pull`.
+x-app: &app
+  image: ${APP_IMAGE:-novapostbot:local}
+  build: .
+  env_file: .env
+
 services:
   redis:
     image: redis:7-alpine
@@ -27,15 +36,13 @@ services:
       retries: 10
 
   migrate:
-    build: .
+    <<: *app
     command: ["alembic", "upgrade", "head"]
-    env_file: .env
     restart: "no"
 
   bot:
-    build: .
+    <<: *app
     command: ["python", "-m", "app.main"]
-    env_file: .env
     depends_on:
       redis:
         condition: service_healthy
@@ -44,9 +51,8 @@ services:
     restart: unless-stopped
 
   worker:
-    build: .
+    <<: *app
     command: ["python", "-m", "app.worker"]
-    env_file: .env
     depends_on:
       redis:
         condition: service_healthy
