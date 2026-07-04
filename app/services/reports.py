@@ -6,8 +6,8 @@
   поддержка по менеджерах.
 
 Fee берём из persisted `shipments.fee_amount`/`fee_free` (воркер проставляет при
-`dispatched`, бесплатно при промахе SLA). `fee_for_units` — preview-формула
-`20 + (units − 1)` для документации/оценки. Аттрибуция ТТН по менеджерам отложена
+`dispatched`, бесплатно при промахе SLA). Preview-формула `20 + (units − 1)` —
+единый `compute_shipment_fee` (app.services.shipment). Аттрибуция ТТН по менеджерам отложена
 (нет `manager_id` у `shipments`) — здесь per-manager = метрики поддержки.
 """
 
@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,16 +26,9 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import ReportsRepository, UserRepository
 from app.services.exceptions import PermissionDenied
-from app.services.stats import LOSS_STATUSES, RETURN_STATUSES
+from app.services.stats import LOSS_STATUSES, RETURN_STATUSES, _bounds
 
 PERIODS = ("today", "week", "month")
-
-
-def fee_for_units(units: int) -> Decimal:
-    """Preview-формула комиссии: 20 грн за первую единицу + 1 грн за каждую следующую."""
-    if units <= 0:
-        return Decimal("0")
-    return Decimal(20) + Decimal(units - 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,23 +85,6 @@ class ManagerSupportStat:
     closed_count: int
 
 
-def _bounds(
-    period: str, settings: Settings, *, day: date | None = None
-) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(settings.timezone)
-    now = datetime.now(tz)
-    if day is not None:
-        start = datetime.combine(day, time.min, tzinfo=tz)
-        return start, start + timedelta(days=1)
-    if period == "week":
-        start = datetime.combine((now - timedelta(days=now.weekday())).date(), time.min, tzinfo=tz)
-    elif period == "month":
-        start = datetime.combine(now.date().replace(day=1), time.min, tzinfo=tz)
-    else:
-        start = datetime.combine(now.date(), time.min, tzinfo=tz)
-    return start, now
-
-
 def _require_reports(actor: User, settings: Settings | None) -> None:
     if permissions.is_dev(actor.telegram_id, settings):
         return
@@ -141,7 +116,7 @@ async def period_report(
 ) -> PeriodReport:
     _require_reports(actor, settings)
     cfg = settings or get_settings()
-    start, end = _bounds(period, cfg, day=day)
+    start, end = _bounds(period, day=day, settings=cfg)
     repo = ReportsRepository(session)
     dispatched = await repo.shipments_dispatched(start=start, end=end)
     returns_and_losses = await repo.shipments_status_changed(
@@ -208,7 +183,7 @@ async def financial_report(
 ) -> FinancialReport:
     _require_owner(actor, settings)
     cfg = settings or get_settings()
-    start, end = _bounds(period, cfg, day=day)
+    start, end = _bounds(period, day=day, settings=cfg)
     shipments = await ReportsRepository(session).shipments_dispatched(start=start, end=end)
 
     fee_total = sum(
@@ -245,7 +220,7 @@ async def manager_support_stats(
 ) -> list[ManagerSupportStat]:
     _require_owner(actor, settings)
     cfg = settings or get_settings()
-    start, end = _bounds(period, cfg, day=day)
+    start, end = _bounds(period, day=day, settings=cfg)
     repo = ReportsRepository(session)
     open_counts = await repo.open_thread_counts()
     closed_counts = await repo.closed_thread_counts(start=start, end=end)

@@ -179,9 +179,7 @@ async def _staff_recipient_ids(
     for owner in await users.list_by_role(UserRole.owner):
         if owner.status is UserStatus.active:
             recipient_ids.add(owner.telegram_id)
-    for manager in await users.list_by_role(UserRole.manager):
-        if manager.status is UserStatus.active and manager.on_duty:
-            recipient_ids.add(manager.telegram_id)
+    recipient_ids |= await _manager_recipient_ids(session)
     return recipient_ids
 
 

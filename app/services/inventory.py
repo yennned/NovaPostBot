@@ -9,10 +9,9 @@ from decimal import Decimal
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
-from app.services.exceptions import PermissionDenied
+from app.services import shipments
 from app.sheets import StockRow, StockSheetNotFound, StockSource, build_stock_source
 
 logger = structlog.get_logger(__name__)
@@ -36,13 +35,6 @@ class InventoryPage:
     limit: int
     offset: int
     categories: list[str]
-
-
-def _require_active_client(client: User) -> None:
-    if client.role is not UserRole.client:
-        raise PermissionDenied("кабінет доступний тільки клієнту")
-    if client.status is not UserStatus.active:
-        raise PermissionDenied("кабінет клієнта доступний після підтвердження")
 
 
 def stock_sheet_key(client: User) -> str:
@@ -80,10 +72,10 @@ async def get_inventory_snapshot(
     client: User,
     reader: StockSource | None = None,
 ) -> list[InventoryItem]:
-    _require_active_client(client)
+    shipments._require_active_client(client)
     key = stock_sheet_key(client)
     try:
-        rows = (reader or build_stock_source()).read_stock(key)
+        rows = await asyncio.to_thread((reader or build_stock_source()).read_stock, key)
     except StockSheetNotFound:
         # Лист склада ещё не заведён/переименован — это пустой остаток, а не сбой:
         # клиент видит «склад порожній», а не падение хендлера створення ТТН.

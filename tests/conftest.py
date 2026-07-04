@@ -50,6 +50,17 @@ def _clear_settings_cache():
     crypto._fernet.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_shared_sheets_client():
+    """Сбрасываем процесс-глобальный кэш `SheetsClient` — иначе первый тест с
+    включёнными Sheets закэшировал бы клиент со своими settings на всю сессию."""
+    from app.services import client_sheet_sync
+
+    client_sheet_sync._shared_sheets_client = None
+    yield
+    client_sheet_sync._shared_sheets_client = None
+
+
 def _assert_safe_test_database(url: str) -> None:
     if not url.strip():
         raise RuntimeError("DATABASE_URL is empty. Configure a dedicated test database first.")

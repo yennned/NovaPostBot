@@ -18,8 +18,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-import structlog
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -31,15 +29,13 @@ from app.db.repositories import AuditRepository, SenderProfileRepository, UserRe
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaAuthError, NovaPoshtaValidationError
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     PermissionDenied,
     SenderProfileIncomplete,
     SenderProfileKeyInvalid,
     SenderProfileNotFound,
 )
-
-logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,19 +235,12 @@ async def update_profile(
         if "name" in changes:
             client = await UserRepository(session).get_by_id(profile.client_id)
             if client is not None:
-                # Sheets — best-effort: сбой синка не должен валить апдейт профиля.
-                # Ошибку БД не глотаем (см. clients.update_client_profile) —
-                # пробрасываем, чтобы не оставить сессию в rollback-required.
-                try:
-                    await sync_client_sheets(session, client=client)
-                except SQLAlchemyError:
-                    raise
-                except Exception:
-                    logger.warning(
-                        "sender_profile_sheet_sync_failed",
-                        profile_id=str(profile.id),
-                        exc_info=True,
-                    )
+                await best_effort_sync(
+                    session,
+                    client=client,
+                    log_key="sender_profile_sheet_sync_failed",
+                    profile_id=str(profile.id),
+                )
     return _view(profile)
 
 

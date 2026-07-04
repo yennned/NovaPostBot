@@ -12,7 +12,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from app.config import get_settings
+from app.config import Settings, get_settings
+
+
+def now_local(settings: Settings, now: datetime | None = None) -> datetime:
+    """Текущий момент в зоне отделения, либо переданный `now`, приведённый к ней."""
+    tz = ZoneInfo(settings.timezone)
+    return datetime.now(tz) if now is None else now.astimezone(tz)
 
 
 def to_local(value: datetime) -> datetime:

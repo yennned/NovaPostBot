@@ -5,7 +5,13 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from app.db.models.enums import OrgType, StockMovementType, UserRole, UserStatus
+from app.db.models.enums import (
+    OrgType,
+    ShipmentStatus,
+    StockMovementType,
+    UserRole,
+    UserStatus,
+)
 from app.db.repositories import (
     AuditRepository,
     NotificationSettingRepository,
@@ -165,3 +171,86 @@ async def test_stock_movement_repository_persists_ledger_and_shipment_link(
     assert entry.quantity_after == 8
     rows = await movements.list_for_shipment(shipment.id)
     assert [row.id for row in rows] == [entry.id]
+
+
+async def test_stock_movement_record_for_items(db_session: AsyncSession):
+    users = UserRepository(db_session)
+    shipments = ShipmentRepository(db_session)
+    movements = StockMovementRepository(db_session)
+    client = await users.create(telegram_id=560)
+    actor = await users.create(telegram_id=561, role=UserRole.manager)
+    items = [
+        ShipmentItemDraft(sku="A", name="A", quantity=2, unit_price=Decimal("10")),
+        ShipmentItemDraft(sku="B", name="B", quantity=5, unit_price=Decimal("20")),
+    ]
+    shipment = await shipments.create(client_id=client.id, recipient_name="Іван", items=items)
+
+    await movements.record_for_items(
+        client_id=client.id,
+        shipment_id=shipment.id,
+        actor_user_id=actor.id,
+        items=items,
+        movement_type=StockMovementType.ttn_cancel,
+        sign=1,
+        comment="cancel",
+    )
+
+    rows = await movements.list_for_shipment(shipment.id)
+    # По одной строке на позицию; delta = sign*quantity, before/after — 0/delta.
+    assert {(r.sku, r.quantity_delta) for r in rows} == {("A", 2), ("B", 5)}
+    assert all(r.movement_type is StockMovementType.ttn_cancel for r in rows)
+    assert all(r.actor_user_id == actor.id for r in rows)
+    assert all(r.quantity_before == 0 and r.quantity_after == r.quantity_delta for r in rows)
+
+    # Обратный знак (списание) даёт отрицательные delta.
+    await movements.record_for_items(
+        client_id=client.id,
+        shipment_id=shipment.id,
+        items=items,
+        movement_type=StockMovementType.ttn_dispatch,
+        sign=-1,
+        comment="dispatch",
+    )
+    dispatch_rows = [
+        r for r in await movements.list_for_shipment(shipment.id)
+        if r.movement_type is StockMovementType.ttn_dispatch
+    ]
+    assert {(r.sku, r.quantity_delta) for r in dispatch_rows} == {("A", -2), ("B", -5)}
+    assert all(r.actor_user_id is None for r in dispatch_rows)  # actor опционален
+
+
+async def test_count_by_status_groups(db_session: AsyncSession):
+    users = UserRepository(db_session)
+    shipments = ShipmentRepository(db_session)
+    client = await users.create(telegram_id=562)
+
+    async def _mk(status: ShipmentStatus) -> None:
+        await shipments.create(
+            client_id=client.id,
+            recipient_name="X",
+            items=[ShipmentItemDraft(sku="A", name="A", quantity=1)],
+            status=status,
+        )
+
+    for status in (
+        ShipmentStatus.created,
+        ShipmentStatus.created,
+        ShipmentStatus.confirmed,
+        ShipmentStatus.returning,
+        ShipmentStatus.returned,
+    ):
+        await _mk(status)
+
+    counts = await shipments.count_by_status_groups(
+        {
+            "created": {ShipmentStatus.created},
+            "confirmed": {ShipmentStatus.confirmed},
+            "returns": {ShipmentStatus.returning, ShipmentStatus.returned},  # мульти-статус
+            "dispatched": {ShipmentStatus.dispatched},  # ни одной → 0
+        }
+    )
+    assert counts == {"created": 2, "confirmed": 1, "returns": 2, "dispatched": 0}
+
+    # Пустые входы: ни запроса, ни падений.
+    assert await shipments.count_by_status_groups({}) == {}
+    assert await shipments.count_by_status_groups({"x": set()}) == {"x": 0}

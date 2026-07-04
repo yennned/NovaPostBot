@@ -7,13 +7,12 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import permissions
 from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole
 from app.db.repositories import ShipmentRepository, UserRepository
-from app.services import clients, shipments
+from app.services import shipments
 from app.services.exceptions import ClientNotFound, ShipmentNotFound
 from app.services.returns import receive_returned_shipment
-
-RETURN_STATUSES = {ShipmentStatus.returning, ShipmentStatus.returned}
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +54,11 @@ async def list_client_returns(
     client = await _client_for_staff(session, actor=actor, client_id=client_id)
     rows, total = await ShipmentRepository(session).get_by_client_and_status(
         client.id,
-        statuses=RETURN_STATUSES,
+        statuses=shipments.RETURN_STATUSES,
         limit=limit,
         offset=offset,
+        with_movements=True,
     )
-    repo = ShipmentRepository(session)
     items = [
         ManagerReturnListItem(
             id=row.id,
@@ -67,7 +66,10 @@ async def list_client_returns(
             recipient_name=row.recipient_name,
             status=row.status,
             items_count=sum(item.quantity for item in row.items),
-            can_receive=not await repo.movement_exists(row.id, StockMovementType.ttn_return),
+            can_receive=not any(
+                movement.movement_type == StockMovementType.ttn_return
+                for movement in row.stock_movements
+            ),
         )
         for row in rows
     ]
@@ -87,10 +89,10 @@ async def get_return_card(
     actor,
     shipment_id: uuid.UUID,
 ) -> ManagerReturnCard:
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     repo = ShipmentRepository(session)
     shipment = await repo.get_by_id(shipment_id)
-    if shipment is None or shipment.status not in RETURN_STATUSES:
+    if shipment is None or shipment.status not in shipments.RETURN_STATUSES:
         raise ShipmentNotFound(str(shipment_id))
     client = await _client_for_staff(session, actor=actor, client_id=shipment.client_id)
     return ManagerReturnCard(
@@ -132,10 +134,10 @@ async def _client_for_staff(
     client_id: uuid.UUID,
     require_manage: bool = False,
 ):
-    clients._require_staff(actor, settings=None)
+    permissions.require_staff(actor, settings=None)
     user = await UserRepository(session).get_by_id(client_id)
     if user is None or user.role is not UserRole.client:
         raise ClientNotFound(str(client_id))
     if require_manage:
-        clients._require_can_manage(actor, user, clients.CAN_MANAGE_CLIENTS, settings=None)
+        permissions.require_can_manage(actor, user, permissions.CAN_MANAGE_CLIENTS, settings=None)
     return user

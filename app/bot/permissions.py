@@ -11,8 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import Settings, get_settings
-from app.db.models.enums import UserRole
+from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
+from app.services.exceptions import PermissionDenied
 
 # Числовой ранг роли (client < manager < owner) — для строгого сравнения «сверху вниз».
 _ROLE_RANK: dict[UserRole, int] = {
@@ -115,3 +116,30 @@ def has_permission(user: User, flag: str, settings: Settings | None = None) -> b
     if user.role is UserRole.manager:
         return bool(user.permissions.get(flag, True))
     return False
+
+
+def require_staff(actor: User, settings: Settings | None = None) -> None:
+    """Гейт чтения staff-экранов: активный менеджер+ или dev, иначе `PermissionDenied`."""
+    if is_dev(actor.telegram_id, settings):
+        return
+    if actor.status is not UserStatus.active:
+        raise PermissionDenied("учётная запись неактивна")
+    if not role_at_least(actor.role, UserRole.manager):
+        raise PermissionDenied("требуется роль менеджера или выше")
+
+
+def require_can_manage(
+    actor: User, target: User, flag: str, settings: Settings | None = None
+) -> None:
+    """Гейт мутации клиента: актёр активен + иерархия `can_manage` + per-flag право.
+
+    Статус актёра проверяем здесь, т.к. `/start` гейтит вход, но reply-клавиатуры в
+    Telegram сохраняются — заблокированный/архивный менеджер не должен управлять
+    клиентами по «залипшим» кнопкам (dev обходит проверку).
+    """
+    if not is_dev(actor.telegram_id, settings) and actor.status is not UserStatus.active:
+        raise PermissionDenied("учётная запись неактивна")
+    if not can_manage(actor, target, settings):
+        raise PermissionDenied("нет прав управлять этим пользователем")
+    if not has_permission(actor, flag, settings):
+        raise PermissionDenied(f"право {flag} отозвано")

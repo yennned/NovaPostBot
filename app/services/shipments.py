@@ -15,10 +15,16 @@ from app.db.models.user import User
 from app.db.repositories import AuditRepository, ShipmentRepository
 from app.services.exceptions import PermissionDenied, ShipmentActionForbidden, ShipmentNotFound
 
+# Группировки статусов отправлений — единый источник для сервисов (аналитика,
+# очередь менеджера, возвраты). `shipments` — самый нижний shipment-слой (импортит
+# только db+exceptions), поэтому канон здесь, без риска циклов.
+RETURN_STATUSES = {ShipmentStatus.returning, ShipmentStatus.returned}
+LOSS_STATUSES = {ShipmentStatus.lost, ShipmentStatus.damaged}
+
 ACTIVE_CLIENT_SHIPMENT_STATUSES = {
     "created": {ShipmentStatus.created},
     "confirmed": {ShipmentStatus.confirmed},
-    "returns": {ShipmentStatus.returning, ShipmentStatus.returned},
+    "returns": RETURN_STATUSES,
     "all": set(ShipmentStatus),
 }
 CANCELABLE_STATUSES = {ShipmentStatus.created, ShipmentStatus.confirmed}

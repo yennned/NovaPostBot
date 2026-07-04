@@ -8,7 +8,7 @@ import pytest
 from app.db.models.audit import AuditLog
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import UserRepository
-from app.services import clients
+from app.services import client_sheet_sync, clients
 from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
@@ -183,7 +183,7 @@ async def test_update_profile_sheets_error_is_swallowed(db_session: AsyncSession
     async def boom(*args, **kwargs):
         raise RuntimeError("gspread 503")
 
-    monkeypatch.setattr(clients, "sync_client_sheets", boom)
+    monkeypatch.setattr(client_sheet_sync, "sync_client_sheets", boom)
 
     card = await clients.update_client_profile(
         db_session, actor=actor, client_id=client.id, full_name="Нове Імʼя"
@@ -201,7 +201,7 @@ async def test_update_profile_db_error_in_sync_propagates(db_session: AsyncSessi
     async def boom(*args, **kwargs):
         raise SQLAlchemyError("conn dropped")
 
-    monkeypatch.setattr(clients, "sync_client_sheets", boom)
+    monkeypatch.setattr(client_sheet_sync, "sync_client_sheets", boom)
 
     with pytest.raises(SQLAlchemyError):
         await clients.update_client_profile(

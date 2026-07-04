@@ -51,6 +51,35 @@
 - **Открытые вопросы:** нет (оставили 2 бота: тест локально + боевой в резерве).
 
 ---
+## 2026-07-04 · feat/step-simplify-services · чистка services + follow-up
+- **Зачем:** `/simplify` по `app/services/` + разбор отложенных пунктов. Только
+  качество (reuse/simplify/efficiency/altitude), без изменения задуманного поведения.
+- **Дедупликация:** `_require_active_client` (канон в `shipments`), `compute_shipment_fee`
+  (убрал дубль `reports.fee_for_units`), `_bounds` (канон в `stats`, `reports` импортит),
+  `now_local` (вынес в `utils/timefmt`, из `duty`/`support`), наборы `RETURN/LOSS_STATUSES`
+  (канон в `shipments`, самый нижний слой), `_staff_recipient_ids` переиспользует
+  `_manager_recipient_ids`.
+- **Эффективность:** блокирующие вызовы Sheets (чтение `inventory`, записи `tracking`/
+  `returns`) уведены в `asyncio.to_thread`; N+1 в `list_client_returns` убран opt-in
+  `joinedload(stock_movements)`; `list_queue` — 3 `COUNT` → один `GROUP BY`
+  (`count_by_status_groups`); `poll_shipments` — чтения НП конкурентно через `TaskGroup`
+  + семафор(8), записи последовательно.
+- **Altitude:** единый `best_effort_sync` (пробрасывает `SQLAlchemyError`, глотает
+  остальное) вместо 8 расходившихся try/except; `record_for_items` — единая точка
+  конвенции движений склада (4 write-пути); RBAC-гейты `require_staff`/`require_can_manage`
+  переехали в `bot/permissions.py`; синк Sheets — выделенный single-worker executor
+  (амортизация OAuth без нагрузки на общий пул).
+- **Баг-фикс `_bounds`:** окно `today/week/month` теперь `[start, конец периода)`, а не
+  `[start, now]`. Прежний верхний край `now` (часы приложения) против `status_changed_at`
+  (штамп Postgres `now()`) при рассинхроне часов в пару мс уводил свежую строку «в
+  будущее» → она выпадала из отчёта «за сьогодні» (флейк `test_period_report`). Показ
+  «Період» обрезается до `now` отдельно (`min(end, now_local)`).
+- **Тесты:** новые — `_bounds` (today>now, week-понедельник, month Dec→Jan),
+  `count_by_status_groups`, `record_for_items`; фикс монкипатч-таргета в `test_clients`;
+  reset-фикстура общего `SheetsClient`. Полный прогон зелёный (стабильно, без гонки).
+- **Дальше:** закоммитить, PR в `main`.
+
+---
 
 ## 2026-07-04 · fix/alex-cicd-buildx · фикс deploy-джоба
 - **Проблема:** первый `deploy` на `main` (#53) упал: `Build and push image` — «Cache
