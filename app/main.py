@@ -20,7 +20,7 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     log = get_logger("bot")
-    log.info("bot.start", timezone=settings.timezone)
+    log.info("bot.start", version=settings.app_version, timezone=settings.timezone)
     if not settings.bot_token:
         log.warning("bot.token_missing")
         await asyncio.Event().wait()

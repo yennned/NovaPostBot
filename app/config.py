@@ -62,6 +62,9 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # Версия сборки (git sha от CI, «dev» локально) — для логов старта и /version.
+    app_version: str = Field(default="dev", alias="APP_VERSION")
+
     # Telegram
     bot_token: str = Field(default="", alias="BOT_TOKEN")
 
