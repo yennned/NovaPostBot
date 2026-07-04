@@ -148,8 +148,44 @@ pytest -q
 сгенерировать: `python -c "from app.utils.crypto import generate_key; print(generate_key())"`.
 В CI Postgres поднимается автоматически (service-container в `ci.yml`).
 
-CI (GitHub Actions, `.github/workflows/ci.yml`) гоняет `ruff` + `pytest`
-(с Postgres-сервисом) и является гейтом для merge в `main`.
+CI (GitHub Actions, `.github/workflows/ci.yml`, job `lint-test`) гоняет layer-check,
+`ruff` + `ruff format --check`, `compileall` и `pytest` (с Postgres-сервисом) и является
+гейтом для merge в `main`.
+
+## CI/CD и деплой
+
+**Непрерывный деплой.** После зелёного `lint-test` **push в `main`** запускает job
+`deploy` (`ci.yml`): собирает образ, пушит в **GHCR** (`:latest` + `:sha-<short>`) и
+деплоит по SSH на VPS (`docker compose pull && up -d --no-build`). Ручной
+`up -d --build` на сервере больше не нужен.
+
+**Версия сборки.** CI прокидывает `--build-arg GIT_SHA=<sha>` → `APP_VERSION` в образе.
+Видна в логе старта (`bot.start version=…` / `worker.start`) и по команде `/version`
+(dev). Так всегда понятно, что именно крутится в проде.
+
+**Образ в compose.** `docker-compose.yml` параметризован: локально `APP_IMAGE` не задан →
+`build` собирает `novapostbot:local`; на VPS в `.env` — `APP_IMAGE=ghcr.io/<owner>/novapostbot:latest`.
+
+**Релизы/вехи.** Тег `vX.Y.Z` (`git tag vX.Y.Z && git push origin vX.Y.Z`) → `release.yml`
+создаёт GitHub Release (авто-заметки из PR) + образ с тегом версии. Continuous-деплой
+идёт по `main`; теги — для отслеживания версий и отката. Журнал — `CHANGELOG.md`.
+
+### Активация деплоя (разово, нужны права)
+
+1. **Secrets репозитория** (Settings → Secrets and variables → Actions):
+   `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` (deploy-ключ Hetzner), опц. `DEPLOY_PATH`
+   (путь к репо на VPS, дефолт `~/NovaPostBot`). Пока их нет — шаг деплоя мягко
+   скипается, образ всё равно пушится в GHCR.
+2. **На VPS:** репозиторий с `.env` (+ `APP_IMAGE=ghcr.io/<owner>/novapostbot:latest`) и
+   `./secrets/`; разовый `docker login ghcr.io` (read-PAT) **или** сделать GHCR-пакет
+   публичным — иначе `docker compose pull` не авторизуется.
+3. **CODEOWNERS:** заменить `@STEP-GITHUB-HANDLE` в `.github/CODEOWNERS` на реальный логин.
+4. **Обязательное ревью** (когда команда стабильно вдвоём): включить
+   `required_approving_review_count = 1` в branch protection `main`:
+   ```bash
+   gh api -X PATCH repos/<owner>/NovaPostBot/branches/main/protection/required_pull_request_reviews \
+     -F required_approving_review_count=1
+   ```
 
 ## Документация
 

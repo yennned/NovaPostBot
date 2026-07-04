@@ -19,7 +19,7 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     log = get_logger("worker")
-    log.info("worker.start", timezone=settings.timezone)
+    log.info("worker.start", version=settings.app_version, timezone=settings.timezone)
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     np_client = NovaPoshtaClient(settings=settings)
     mutator = build_stock_source(settings)

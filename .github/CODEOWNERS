@@ -1,0 +1,20 @@
+# CODEOWNERS — авто-реквест ревью по layer-split (см. CONTRIBUTING.md).
+# alex = @yennned (домен/инфра). step = @Stepandj (bot-слой).
+
+# По умолчанию — владелец репо (чтобы у любого PR был code owner)
+*                     @yennned
+
+# bot-слой (presentation / aiogram) — step
+/app/bot/             @Stepandj
+
+# домен и инфраструктура — alex
+/app/services/        @yennned
+/app/db/              @yennned
+/app/novaposhta/      @yennned
+/app/sheets/          @yennned
+/migrations/          @yennned
+
+# инфра репозитория (CI/CD, деплой, контейнеры) — оба
+/.github/             @yennned @Stepandj
+/Dockerfile           @yennned @Stepandj
+/docker-compose.yml   @yennned @Stepandj

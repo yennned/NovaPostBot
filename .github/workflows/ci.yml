@@ -59,3 +59,64 @@ jobs:
 
       - name: Pytest
         run: python -m pytest -q
+
+  # CD: только при push в main и только после зелёного lint-test.
+  # Образ всегда публикуется в GHCR (git sha + latest); деплой по SSH — лишь если
+  # заданы секреты сервера (иначе шаг мягко скипается, первый merge не падает).
+  deploy:
+    needs: lint-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image ref
+        id: meta
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy over SSH
+        if: ${{ env.SSH_HOST != '' }}
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
+          # APP_IMAGE (ghcr…:latest) задан в .env на сервере; порядок migrate→bot→worker
+          # держит depends_on. --no-build: используем подтянутый образ, не собираем на VPS.
+          script: |
+            cd ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}
+            docker compose pull
+            docker compose up -d --no-build
+            docker image prune -f

@@ -9,10 +9,17 @@ from aiogram.types import Message
 from app.bot.filters import IsDevFilter
 from app.bot.services import BotServices, DevService
 from app.bot.texts import dev_help_text
+from app.config import get_settings
 from app.db.models.enums import UserRole
 
 router = Router(name="dev")
 router.message.filter(IsDevFilter())
+
+
+@router.message(Command("version"))
+async def version(message: Message) -> None:
+    """Версия сборки (git sha от CI, «dev» локально) — трассируемость «что в проде»."""
+    await message.answer(f"Версія збірки: `{get_settings().app_version}`")
 
 
 def _parse_role(value: str) -> UserRole | None:
