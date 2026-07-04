@@ -15,6 +15,19 @@
 
 ---
 
+## 2026-07-05 · feat/alex-coderabbit-cli · доки CodeRabbit CLI + autofix
+- **Зачем:** закрепить локальный уровень ревью «до пуша». Кроме CodeRabbit App на
+  PR добавлен **CodeRabbit CLI** (`coderabbit`/`cr`, авторизован) — ревью diff в
+  терминале до PR; и skill **`autofix`** — применение предложений CodeRabbit из
+  тредов PR по одному с подтверждением.
+- **Доки:** в CONTRIBUTING («Среды и процесс») блок «CodeRabbit CLI» + обновлён
+  итоговый поток: `checkout → тест-бот → coderabbit review → PR → App+lint-test →
+  autofix → squash-merge`.
+- **Дальше:** позже — Codex-ревью рядом/вместо (нужен платный ChatGPT).
+- **Открытые вопросы:** нет.
+
+---
+
 ## 2026-07-05 · feat/alex-devflow · тест/review-среда, PR-ворота, откат
 - **Зачем:** выстроить профессиональный поток «обкатать ветку на отдельном
   тест-боте → PR → merge в main → прод; при проблеме — быстрый откат», не трогая
