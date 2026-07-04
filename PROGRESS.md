@@ -15,7 +15,44 @@
 
 ---
 
-## 2026-06-25 · feat/alex-ttn-ux-fixes · pending (Склад: інтерактивне «Зведення» + синк Резерв/Доступно)
+## 2026-07-04 · feat/alex-sklad-summary · доведение склад-WIP + /simplify-чистка
+- **Ветка:** блок B склада (панель «Зведення» + синк Резерв/Доступно) вынесен из
+  `feat/alex-all-wip` в отдельную ветку off `main` (cherry-pick WIP-коммита) —
+  независимо от блока A (support/menu/dates). В `main` пока НЕ мержим: сначала живая
+  проверка.
+- **Сделано (/simplify-чистка):**
+  1) **Единый источник заголовков склада.** `provision_sheets` импортирует
+     `app.sheets.client._STOCK_EXPECTED_HEADERS`; `STOCK_HEADERS = [*read, "Резерв",
+     "Доступно"]`. Устранён дубль канонических колонок.
+  2) **`LOW_STOCK` из настроек.** Порог для CF-правил берётся из
+     `settings.low_stock_threshold` (лениво в `style_stock_worksheet`), не хардкод `3`.
+  3) **Арифметика колонок → `gspread.utils.rowcol_to_a1`.** Удалён самописный
+     `_col_letter` (inventory) и `chr(ord("A")+…)` (provision); новый хелпер `_col_a1`
+     (0-based → буква). Заодно ушёл латентный баг за колонкой Z.
+  4) **Стале-комментарии панели** (говорили F/G/H — реально H/I/J) приведены к факту;
+     докстринг `write_side_summary` (J7/J13, колонки I–J).
+  5) **Тест-фейк:** убраны мёртвые `update_cell`/`append_row`; добавлен `batch_update`.
+  6) **Altitude:** `write_reserved` убран из протокола `StockSource` и заглушки
+     `CrmStockSource` — это вьюшка поверх Sheets, вызывается напрямую из
+     `client_sheet_sync`, не через seam; остаётся методом `GoogleSheetsStockSource`.
+  7) **Efficiency:** `apply_deltas` батчит обновления количества в один
+     `batch_update` (1 запрос вместо N `update_cell` на много-позиционной ТТН).
+- **Сделано (доведение):** локаль книги «Склад» закреплена явно (`ensure_locale`,
+  `updateSpreadsheetProperties locale=uk_UA` после `open_or_create`) — снимает открытый
+  вопрос про `;`-разделитель (comma-decimal локаль). Пропущено сознательно: дедуп
+  раскладки секций панели (снижал читаемость).
+- **Тесты:** `test_sheets_read_rows` дополнен write-side — `write_available_formula`
+  (G2/ARRAYFORMULA/`;`), `apply_deltas` батч (один `batch_update` на N дельт),
+  `_write_stock_reserved` best-effort (зеркалит резерв; глотает `StockSheetNotFound`
+  и ошибки API). Полный `pytest` на `novapostbot_test` — **392 passed** (флакуша
+  `test_period_report_aggregates_by_client` в этот раз зелёная, часы синхронны);
+  `ruff check`/`format` чисты. Provision `--dry-run` — OK, колонки H/I/J.
+- **Дальше:** живая проверка провижининга на книге «Склад» (панель/формулы, локаль,
+  синк резерва) + пересборка docker bot+worker; после — решение про PR блока B в `main`.
+- **Открытые вопросы:** `ensure_locale` ставит `uk_UA`; если у книги нужна иная
+  comma-decimal локаль — параметр функции.
+
+## 2026-06-25 · feat/alex-ttn-ux-fixes · База (Склад: інтерактивне «Зведення» + синк Резерв/Доступно)
 - **Сделано:** на листе **каждого** клиента в книге «Склад» — интерактивная панель
   «📊 Зведення» формулами **справа** (I/J) + синхронизация Резерв/Доступно.
   **(1) Панель** (`scripts/provision_sheets.side_summary_cells`/`write_side_summary`,
