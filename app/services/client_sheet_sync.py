@@ -13,8 +13,9 @@ from app.config import Settings, get_settings
 from app.db.models.user import User
 from app.db.repositories import SenderProfileRepository
 from app.services.inventory import get_inventory_snapshot
-from app.sheets import StockSource
+from app.sheets import GoogleSheetsStockSource, StockSource
 from app.sheets.client import SheetsClient
+from app.sheets.source import StockSheetNotFound
 
 logger = structlog.get_logger(__name__)
 
@@ -106,6 +107,8 @@ def _sync_client_sheets_sync(
     client = SheetsClient(settings)
     gc = client._authorize()
     rename_ok = _rename_main_worksheets(gc, settings, previous_sheet_key or source_key, target_key)
+    # Зеркалим резерв (из снапшота PG) в колонку «Резерв» актуального листа «Склад».
+    _write_stock_reserved(client, target_key if rename_ok else source_key, rows)
     book_id = _sync_view_book(
         gc,
         stock_view_book_id=stock_view_book_id,
@@ -114,6 +117,21 @@ def _sync_client_sheets_sync(
         rows=rows,
     )
     return rename_ok, book_id
+
+
+def _write_stock_reserved(client: SheetsClient, sheet_key: str, rows: list[ViewRow]) -> None:
+    """Best-effort: записать Резерв (из PG-снапшота) в лист «Склад». Доступно — формула.
+
+    Не должно ронять синк: нет листа/колонки/ошибка API → просто лог. Источник правды
+    резерва остаётся Postgres.
+    """
+    reserved = {row.sku: row.reserved for row in rows}
+    try:
+        GoogleSheetsStockSource(client).write_reserved(sheet_key, reserved)
+    except StockSheetNotFound:
+        pass  # лист клиента в «Складі» ещё не заведён — нормально
+    except Exception:
+        logger.warning("stock_reserved_sync_failed", sheet_key=sheet_key, exc_info=True)
 
 
 def _rename_main_worksheets(gc, settings: Settings, source_key: str, target_key: str) -> bool:

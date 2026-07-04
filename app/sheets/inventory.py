@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from app.sheets.client import SheetsClient
+from app.sheets.client import _STOCK_EXPECTED_HEADERS, SheetsClient
 from app.sheets.source import StockDelta, StockRow
 
 _SKU_KEYS = ("артикул", "sku")
@@ -13,6 +13,7 @@ _NAME_KEYS = ("назва", "name")
 _CATEGORY_KEYS = ("категорія", "category")
 _QUANTITY_KEYS = ("кількість", "quantity", "qty")
 _PRICE_KEYS = ("ціна", "price")
+_RESERVE_KEYS = ("резерв", "reserved")
 
 
 def _lookup(row: dict[str, object], *aliases: str) -> str | None:
@@ -66,8 +67,14 @@ class GoogleSheetsStockSource:
         if not deltas:
             return
 
+        from gspread.utils import rowcol_to_a1
+
         worksheet = self.client.get_stock_worksheet(client_key)
-        rows = list(worksheet.get_all_records(default_blank=""))
+        # expected_headers: панель «Зведення» добавляет справа пустые заголовки колонок —
+        # без него get_all_records падает на их дубликатах (как в client.read_rows).
+        rows = list(
+            worksheet.get_all_records(default_blank="", expected_headers=_STOCK_EXPECTED_HEADERS)
+        )
         headers = [str(header).strip().lower() for header in worksheet.row_values(1)]
         quantity_col = _column_index(headers, _QUANTITY_KEYS)
 
@@ -77,6 +84,10 @@ class GoogleSheetsStockSource:
             if sku:
                 indexed[sku] = (offset, row)
 
+        # Обновления количества по существующим SKU собираем в один batch_update
+        # (1 запрос вместо N update_cell — экономит квоту gspread на много-позиционной
+        # ТТН). Новые SKU добавляем append_row: адрес следующей строки знает только API.
+        updates: list[dict[str, Any]] = []
         for delta in deltas:
             current = indexed.get(delta.sku)
             if current is None:
@@ -98,8 +109,33 @@ class GoogleSheetsStockSource:
             after = before + delta.quantity_delta
             if after < 0:
                 raise ValueError(f"sku {delta.sku} would become negative")
-            worksheet.update_cell(row_index, quantity_col, after)
+            updates.append({"range": rowcol_to_a1(row_index, quantity_col), "values": [[after]]})
             row["кількість"] = str(after)
+
+        if updates:
+            worksheet.batch_update(updates)
+
+    def write_reserved(self, client_key: str, reserved: dict[str, int]) -> None:
+        """Зеркалить Резерв из Postgres в колонку «Резерв» листа «Склад» по SKU.
+
+        Источник правды резерва — PG; в книге это вьюшка для оператора. Доступно (G)
+        пересчитывает ARRAYFORMULA `=Кількість−Резерв`. SKU без брони → 0. Нет колонки
+        «Резерв» (старый формат листа) — тихо пропускаем.
+        """
+        from gspread.utils import rowcol_to_a1
+
+        worksheet = self.client.get_stock_worksheet(client_key)
+        header = [str(h).strip().lower() for h in worksheet.row_values(1)]
+        try:
+            reserve_col = _column_index(header, _RESERVE_KEYS)
+        except ValueError:
+            return
+        skus = worksheet.col_values(1)  # колонка A: шапка + артикулы (панель справа не мешает)
+        if len(skus) < 2:
+            return
+        values = [[int(reserved.get(str(sku).strip(), 0))] for sku in skus[1:]]
+        range_name = f"{rowcol_to_a1(2, reserve_col)}:{rowcol_to_a1(len(skus), reserve_col)}"
+        worksheet.update(values=values, range_name=range_name)
 
 
 class CrmStockSource:

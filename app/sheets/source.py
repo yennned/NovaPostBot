@@ -40,7 +40,12 @@ class StockDelta:
 
 
 class StockSource(Protocol):
-    """Источник остатков склада с read/write-операциями доменного слоя."""
+    """Источник остатков склада с read/write-операциями доменного слоя.
+
+    Зеркалирование резерва в книгу (`GoogleSheetsStockSource.write_reserved`) — это
+    вьюшка поверх Sheets, а не capability источника: оно вызывается напрямую из
+    `client_sheet_sync`, не через этот seam, поэтому в протокол не входит.
+    """
 
     def read_stock(self, client_key: str) -> list[StockRow]: ...
 
