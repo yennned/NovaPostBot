@@ -15,6 +15,40 @@
 
 ---
 
+## 2026-07-04 · chore/alex-cicd · CI/CD + командная гигиена (Tier 1 + Tier 2)
+- **Зачем:** закрыть два разрыва «командного» проекта — не было автодеплоя (прод
+  обновлялся вручную по SSH `up -d --build`) и трассируемости версии (по образу нельзя
+  сказать, какой коммит в проде). Ветка off `main`, в `main`/прод пока НЕ мержим.
+- **Tier 1 — CD + версия:**
+  - **Версия в образе:** `Dockerfile` `ARG GIT_SHA=dev` → `ENV APP_VERSION`;
+    `config.app_version` (alias `APP_VERSION`); логи `bot.start`/`worker.start`
+    получили `version=…`; dev-команда `/version` (handlers/dev.py).
+  - **Образ в compose:** YAML-anchor `x-app` + `image: ${APP_IMAGE:-novapostbot:local}`
+    — локально `build` собирает `:local`, на VPS `APP_IMAGE=ghcr…:latest` → `pull`.
+  - **Автодеплой:** job `deploy` в `ci.yml` (push в `main`, `needs: lint-test`):
+    build+push образа в **GHCR** (`:latest` + `:sha-<short>`, GHA-кэш) → деплой по SSH
+    (`appleboy/ssh-action`: `compose pull && up -d --no-build`). Guard: без секрета
+    `SSH_HOST` шаг деплоя скипается (первый merge не падает), образ всё равно пушится.
+  - **Релизы:** `release.yml` по тегу `v*` → GitHub Release (авто-заметки) + образ с
+    тегом версии; `CHANGELOG.md` (Keep a Changelog).
+- **Tier 2 — GitHub-гигиена:** `.github/CODEOWNERS` (layer-split; логин step —
+  плейсхолдер), PR-шаблон, issue-шаблоны (bug/feature) + config, `dependabot.yml`
+  (pip + actions, weekly), `LICENSE` (Proprietary/All Rights Reserved). README —
+  бейдж CI + раздел «Хостинг и деплой»; CONTRIBUTING — раздел «CI/CD и деплой» +
+  чек-лист активации (секреты, GHCR-логин, CODEOWNERS, обязательное ревью).
+- **Проверено:** `docker compose config` (anchor раскрывается; `APP_IMAGE`-override
+  работает), `docker build --build-arg GIT_SHA=…` → `APP_VERSION` зашит в образ,
+  workflow-YAML валиден, layer-check/ruff/compileall чисты, `pytest` — всё зелёное
+  кроме пред-существующей флакуши `test_period_report_aggregates_by_client` (часы
+  colima↔host; изолированно проходит, к CI/CD отношения не имеет).
+- **Дальше (предпосылки пользователя, не автоматизируется):** задать secrets
+  `SSH_HOST`/`SSH_USER`/`SSH_PRIVATE_KEY` (+опц. `DEPLOY_PATH`); на VPS `APP_IMAGE` в
+  `.env` + `docker login ghcr.io` (или публичный GHCR-пакет); вписать логин step в
+  CODEOWNERS; при желании — включить обязательное 1 ревью. Порядок: сначала
+  секреты/логины → потом merge, иначе deploy-джоб скипнется.
+- **Открытые вопросы:** GHCR-пакет приватный по умолчанию — решить, `docker login` на
+  VPS или сделать пакет публичным.
+
 ## 2026-07-04 · feat/alex-sklad-summary · доведение склад-WIP + /simplify-чистка
 - **Ветка:** блок B склада (панель «Зведення» + синк Резерв/Доступно) вынесен из
   `feat/alex-all-wip` в отдельную ветку off `main` (cherry-pick WIP-коммита) —
