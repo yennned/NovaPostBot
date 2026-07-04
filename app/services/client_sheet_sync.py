@@ -35,6 +35,18 @@ _sheets_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheets-
 _shared_sheets_client: SheetsClient | None = None
 
 
+async def run_on_sheets_executor(fn, /, *args):
+    """Выполнить блокирующий вызов Sheets на выделенном single-worker executor.
+
+    Сериализует ВСЕ обращения к Sheets (клиентский синк + записи склада
+    `apply_deltas`): один воркер исключает гонку read-modify-write по одному листу
+    и конкуренцию за общий gspread-клиент. В отличие от `asyncio.to_thread` (общий
+    пул) не позволяет медленной записи в Sheets занять воркеров склада.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_sheets_executor, functools.partial(fn, *args))
+
+
 @dataclass(frozen=True, slots=True)
 class ViewRow:
     sku: str

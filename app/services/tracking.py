@@ -18,7 +18,7 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import TrackingStatus
 from app.novaposhta.tracking import map_tracking_status
 from app.services import notifications
-from app.services.client_sheet_sync import best_effort_sync
+from app.services.client_sheet_sync import best_effort_sync, run_on_sheets_executor
 from app.services.inventory import stock_sheet_key
 from app.services.notifications import Notifier
 from app.sheets import StockDelta, StockSource, build_stock_source
@@ -175,7 +175,7 @@ async def _apply_dispatch_stock(
     if await repo.movement_exists(shipment.id, StockMovementType.ttn_dispatch):
         return
 
-    await asyncio.to_thread(
+    await run_on_sheets_executor(
         (mutator or build_stock_source()).apply_deltas,
         stock_sheet_key(shipment.client),
         [

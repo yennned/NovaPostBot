@@ -77,7 +77,13 @@
 - **Тесты:** новые — `_bounds` (today>now, week-понедельник, month Dec→Jan),
   `count_by_status_groups`, `record_for_items`; фикс монкипатч-таргета в `test_clients`;
   reset-фикстура общего `SheetsClient`. Полный прогон зелёный (стабильно, без гонки).
-- **Дальше:** закоммитить, PR в `main`.
+- **Ревью (CodeRabbit App на #66, 2026-07-05):** rebase на свежий `main`; 🟠 Major —
+  записи склада `apply_deltas` в `returns`/`tracking` уведены с общего `asyncio.to_thread`
+  на выделенный single-worker `_sheets_executor` (новый хелпер `run_on_sheets_executor`)
+  — устранена гонка read-modify-write по листу клиента; 🟡 Minor — сообщения
+  `PermissionDenied` в `bot/permissions.py` переведены на украинский (были видны юзеру
+  через `str(exc)`).
+- **Дальше:** merge в `main`.
 
 ---
 

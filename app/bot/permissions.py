@@ -123,9 +123,9 @@ def require_staff(actor: User, settings: Settings | None = None) -> None:
     if is_dev(actor.telegram_id, settings):
         return
     if actor.status is not UserStatus.active:
-        raise PermissionDenied("учётная запись неактивна")
+        raise PermissionDenied("обліковий запис неактивний")
     if not role_at_least(actor.role, UserRole.manager):
-        raise PermissionDenied("требуется роль менеджера или выше")
+        raise PermissionDenied("потрібна роль менеджера або вище")
 
 
 def require_can_manage(
@@ -138,8 +138,8 @@ def require_can_manage(
     клиентами по «залипшим» кнопкам (dev обходит проверку).
     """
     if not is_dev(actor.telegram_id, settings) and actor.status is not UserStatus.active:
-        raise PermissionDenied("учётная запись неактивна")
+        raise PermissionDenied("обліковий запис неактивний")
     if not can_manage(actor, target, settings):
-        raise PermissionDenied("нет прав управлять этим пользователем")
+        raise PermissionDenied("немає прав керувати цим користувачем")
     if not has_permission(actor, flag, settings):
-        raise PermissionDenied(f"право {flag} отозвано")
+        raise PermissionDenied(f"право {flag} відкликано")
