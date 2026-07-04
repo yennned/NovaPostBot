@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import gspread
 import pytest
+from app.services.client_sheet_sync import ViewRow, _write_stock_reserved
 from app.sheets.client import _STOCK_EXPECTED_HEADERS, SheetsClient
 from app.sheets.inventory import GoogleSheetsStockSource
-from app.sheets.source import StockDelta
-from scripts.provision_sheets import _PANEL_VALUE_A1, side_summary_cells
+from app.sheets.source import StockDelta, StockSheetNotFound
+from scripts.provision_sheets import _PANEL_VALUE_A1, side_summary_cells, write_available_formula
 
 # Шапка: канонические 5 колонок + Резерв/Доступно + разрыв (H, '') + панель «Зведення»
 # (I='📊 Зведення', J=''). Две пустые ячейки-заголовка ('' в H и J) — то, на чём
@@ -54,8 +55,7 @@ class _FakeStockWorksheet(_FakeWorksheet):
 
     def __init__(self, grid: list[list[str]]) -> None:
         super().__init__(grid)
-        self.cell_updates: list[tuple[int, int, object]] = []
-        self.appended: list[list] = []
+        self.batch_updates: list[dict] = []
         self.range_updates: list[tuple[str, list]] = []
 
     def row_values(self, row: int) -> list:
@@ -67,11 +67,8 @@ class _FakeStockWorksheet(_FakeWorksheet):
             out.pop()
         return out
 
-    def update_cell(self, row: int, col: int, value: object) -> None:
-        self.cell_updates.append((row, col, value))
-
-    def append_row(self, values: list) -> None:
-        self.appended.append(values)
+    def batch_update(self, data: list[dict], **kwargs) -> None:
+        self.batch_updates.extend(data)
 
     def update(self, values=None, range_name=None, **kwargs) -> None:
         self.range_updates.append((range_name, values))
@@ -89,8 +86,22 @@ def test_apply_deltas_survives_side_panel_and_updates_quantity():
     """apply_deltas не падает на панельных пустых заголовках и правит Кількість по SKU."""
     ws = _FakeStockWorksheet([list(r) for r in _GRID])
     _source_over(ws).apply_deltas("Вася", [StockDelta(sku="COF-1", quantity_delta=-2)])
-    # COF-1 (строка 2), Кількість — колонка D (4); было 5 → стало 3
-    assert (2, 4, 3) in ws.cell_updates
+    # COF-1 (строка 2), Кількість — колонка D → «D2»; было 5 → стало 3
+    assert {"range": "D2", "values": [[3]]} in ws.batch_updates
+
+
+def test_apply_deltas_batches_all_updates_in_one_call():
+    """Много-позиционная ТТН = один batch_update (а не N update_cell) → экономия квоты."""
+    ws = _FakeStockWorksheet([list(r) for r in _GRID])
+    _source_over(ws).apply_deltas(
+        "Вася",
+        [StockDelta(sku="COF-1", quantity_delta=-2), StockDelta(sku="WHL-1", quantity_delta=1)],
+    )
+    # COF-1: 5−2=3 (D2); WHL-1: 3+1=4 (D3) — оба в одном списке batch_update
+    assert ws.batch_updates == [
+        {"range": "D2", "values": [[3]]},
+        {"range": "D3", "values": [[4]]},
+    ]
 
 
 def test_write_reserved_maps_reserved_by_sku_into_reserve_column():
@@ -184,3 +195,63 @@ def test_side_summary_cells_structure_and_formulas():
     # Локаль книги с запятой → разделитель аргументов «;», а не «,».
     assert ";" in cells[3][1] and "," not in cells[3][1]
     assert ";" in cells[8][1]
+
+
+def test_write_available_formula_writes_arrayformula_to_g2():
+    """Доступно (G2) = одна ARRAYFORMULA =Кількість−Резерв, разделитель «;» (локаль)."""
+
+    class _WS:
+        def __init__(self) -> None:
+            self.updates: list[tuple] = []
+
+        def update(self, values=None, range_name=None, **kwargs):
+            self.updates.append((range_name, values, kwargs))
+
+    ws = _WS()
+    write_available_formula(ws)
+
+    assert len(ws.updates) == 1
+    range_name, values, _ = ws.updates[0]
+    assert range_name == "G2"
+    formula = values[0][0]
+    assert formula.startswith("=ARRAYFORMULA(")
+    assert "D2:D-F2:F" in formula
+    assert ";" in formula and "," not in formula  # comma-locale разделитель
+
+
+def _view_row(sku: str, reserved: int) -> ViewRow:
+    return ViewRow(
+        sku=sku, name=sku, category=None, price=None, stock=9, reserved=reserved, available=9
+    )
+
+
+def test_write_stock_reserved_mirrors_reserved_into_column():
+    """Best-effort синк резерва зеркалит reserved по SKU в колонку «Резерв» листа."""
+    ws = _FakeStockWorksheet([list(r) for r in _GRID])
+
+    class _Client:
+        def get_stock_worksheet(self, key):
+            return ws
+
+    _write_stock_reserved(_Client(), "Вася", [_view_row("COF-1", 2), _view_row("WHL-1", 1)])
+    assert ws.range_updates == [("F2:F3", [[2], [1]])]
+
+
+def test_write_stock_reserved_swallows_missing_sheet():
+    """Нет листа клиента в «Складі» → StockSheetNotFound глотается, синк не падает."""
+
+    class _Client:
+        def get_stock_worksheet(self, key):
+            raise StockSheetNotFound(key)
+
+    _write_stock_reserved(_Client(), "Вася", [_view_row("COF-1", 2)])  # не бросает
+
+
+def test_write_stock_reserved_swallows_api_error():
+    """Любая ошибка API — best-effort: логируется и не роняет синк клиентских книг."""
+
+    class _Client:
+        def get_stock_worksheet(self, key):
+            raise RuntimeError("Sheets API 500")
+
+    _write_stock_reserved(_Client(), "Вася", [_view_row("COF-1", 2)])  # не бросает
