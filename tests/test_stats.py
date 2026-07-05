@@ -54,6 +54,34 @@ def test_bounds_month_rollover_december_to_january(monkeypatch):
     assert end == datetime(2027, 1, 1, 0, 0, tzinfo=TZ)
 
 
+def test_bounds_range_inclusive_and_orders_dates():
+    from datetime import date
+
+    start, end = _bounds(
+        "today",
+        day=None,
+        settings=_KYIV_SETTINGS,
+        date_from=date(2026, 7, 1),
+        date_to=date(2026, 7, 3),
+    )
+    assert start == datetime(2026, 7, 1, 0, 0, tzinfo=TZ)
+    assert end == datetime(2026, 7, 4, 0, 0, tzinfo=TZ)  # конец — включительно (to+1 день)
+
+
+def test_bounds_range_swaps_reversed_dates():
+    from datetime import date
+
+    start, end = _bounds(
+        "today",
+        day=None,
+        settings=_KYIV_SETTINGS,
+        date_from=date(2026, 7, 3),
+        date_to=date(2026, 7, 1),  # перепутан порядок
+    )
+    assert start == datetime(2026, 7, 1, 0, 0, tzinfo=TZ)
+    assert end == datetime(2026, 7, 4, 0, 0, tzinfo=TZ)
+
+
 class _Reader:
     def read_stock(self, client_key: str):
         return [
@@ -99,3 +127,30 @@ async def test_client_stats_count_dispatched_and_returned_same_shipment(
     assert stats.net_sales_qty == 0
     assert stats.total_available == 10
     assert stats.top_skus[0].sku == "SKU-1"
+
+
+def test_period_label_shows_inclusive_last_day():
+    """«Період» показывает последний включённый день, не эксклюзивную границу."""
+    from app.bot.texts.client_cabinet import _period_label
+    from app.services.stats import ClientStatsSnapshot
+
+    def _snap(start: datetime, end: datetime) -> ClientStatsSnapshot:
+        return ClientStatsSnapshot(
+            period="range",
+            start=start,
+            end=end,
+            shipped_qty=0,
+            returns_qty=0,
+            losses_qty=0,
+            net_sales_qty=0,
+            total_available=0,
+            top_skus=[],
+        )
+
+    # Диапазон 01–03.07: end эксклюзивна (полночь 04.07) → метка 01.07 — 03.07.
+    label = _period_label(_snap(datetime(2026, 7, 1, tzinfo=TZ), datetime(2026, 7, 4, tzinfo=TZ)))
+    assert label == "01.07.2026 — 03.07.2026"
+
+    # Один день: start==последний день → одна дата без диапазона.
+    single = _period_label(_snap(datetime(2026, 7, 1, tzinfo=TZ), datetime(2026, 7, 2, tzinfo=TZ)))
+    assert single == "01.07.2026"

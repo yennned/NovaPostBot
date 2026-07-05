@@ -12,6 +12,14 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.types.base import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards.calendar import (
+    CAL_APPLY,
+    CAL_CANCEL,
+    CAL_DAY,
+    CAL_NAV,
+    CAL_NOOP,
+    build_calendar_kb,
+)
 from app.bot.keyboards.client import (
     NOTIFICATION_CALLBACK_TOKENS,
     PRODUCTS_PAGE_SIZE,
@@ -45,9 +53,11 @@ from app.bot.texts.client_cabinet import (
     shipment_card_text,
     shipment_search_prompt,
     shipments_text,
+    stats_calendar_text,
     stats_text,
 )
 from app.bot.types import EffectiveContext
+from app.config import get_settings
 from app.db.models.enums import OrgType
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
@@ -67,8 +77,8 @@ from app.services.inventory import list_inventory
 from app.services.shipment import cancel_shipment
 from app.services.shipments import get_shipment_card, list_shipments
 from app.services.stats import get_client_stats
-from app.utils.dates import USER_DATE_HINT, parse_user_date
 from app.utils.phone import normalize_phone
+from app.utils.timefmt import now_local
 
 router = Router(name="client_cabinet")
 
@@ -321,22 +331,6 @@ async def _edit_shipments_screen(
         state,
         text=shipments_text(page, bucket),
         reply_markup=build_shipments_kb(page, bucket, query=query),
-        parse_mode="HTML",
-    )
-
-
-async def _edit_stats_screen(
-    bot: Bot,
-    state: FSMContext,
-    snapshot,
-    *,
-    selected: str,
-) -> bool:
-    return await edit_stored_screen(
-        bot,
-        state,
-        text=stats_text(snapshot),
-        reply_markup=build_stats_kb(selected),
         parse_mode="HTML",
     )
 
@@ -956,44 +950,153 @@ async def cb_stats_day(
     await callback.answer()
 
 
+def _stats_cal_from(data: dict) -> date | None:
+    raw = data.get("stats_cal_from")
+    return date.fromisoformat(raw) if raw else None
+
+
+async def _show_stats_calendar(
+    message: Message, state: FSMContext, *, year: int, month: int
+) -> None:
+    selected = _stats_cal_from(await state.get_data())
+    await message.edit_text(
+        stats_calendar_text(selected),
+        reply_markup=build_calendar_kb(year, month, selected_from=selected),
+        parse_mode="HTML",
+    )
+    await remember_screen(state, message)
+
+
+async def _apply_stats_range(
+    callback: CallbackQuery,
+    context: EffectiveContext,
+    session: AsyncSession,
+    state: FSMContext,
+    date_from: date,
+    date_to: date,
+) -> None:
+    await state.update_data(stats_cal_from=None)
+    client = _effective_client(context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        snapshot = await get_client_stats(
+            session, client=client, date_from=date_from, date_to=date_to
+        )
+    except PermissionDenied as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    # Кастомный диапазон — ни один пресет (сьогодні/тиждень/місяць) не активен.
+    await callback.message.edit_text(
+        stats_text(snapshot),
+        reply_markup=build_stats_kb("range"),
+        parse_mode="HTML",
+    )
+    await remember_screen(state, callback.message)
+    await callback.answer()
+
+
 @router.callback_query(F.data == "cab:statspick")
 async def cb_stats_pick(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
         return
-    await state.set_state(ClientCabinetState.waiting_for_stats_date)
-    await callback.message.answer("Введіть дату у форматі ДД.ММ.РРРР або РРРР-ММ-ДД.")
+    await state.update_data(stats_cal_from=None)
+    # Дата отделения (Europe/Kyiv), не UTC контейнера — иначе возле полуночи
+    # календарь открылся бы не на том месяце.
+    today = now_local(get_settings()).date()
+    await _show_stats_calendar(callback.message, state, year=today.year, month=today.month)
     await callback.answer()
 
 
-@router.message(ClientCabinetState.waiting_for_stats_date, F.text, ~F.text.startswith("/"))
-async def receive_stats_date(
-    message: Message,
-    bot: Bot,
-    state: FSMContext,
-    effective_context: EffectiveContext,
-    db_session: AsyncSession,
-) -> None:
-    day = parse_user_date(message.text)
-    if day is None:
-        await message.answer(f"❌ Невірна дата. Використайте {USER_DATE_HINT}.")
-        return
-    await state.set_state(None)
-    client = _effective_client(effective_context)
-    if client is None:
-        await message.answer("Спочатку авторизуйтесь через /start.")
+@router.callback_query(F.data == CAL_NOOP)
+async def cb_calendar_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(CAL_NAV))
+async def cb_calendar_nav(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
         return
     try:
-        snapshot = await get_client_stats(db_session, client=client, day=day)
-    except PermissionDenied as exc:
-        await message.answer(str(exc))
+        year, month = (int(part) for part in callback.data[len(CAL_NAV) :].split("-"))
+    except ValueError:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
         return
-    if not await _edit_stats_screen(bot, state, snapshot, selected="today"):
-        await message.answer(
-            stats_text(snapshot),
-            reply_markup=build_stats_kb("today"),
-            parse_mode="HTML",
-        )
+    await _show_stats_calendar(callback.message, state, year=year, month=month)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(CAL_DAY))
+async def cb_calendar_day(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        picked = date.fromisoformat(callback.data[len(CAL_DAY) :])
+    except ValueError:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    start = _stats_cal_from(await state.get_data())
+    if start is None:
+        # Первый клик — начало диапазона: подсвечиваем и ждём вторую дату.
+        await state.update_data(stats_cal_from=picked.isoformat())
+        await _show_stats_calendar(callback.message, state, year=picked.year, month=picked.month)
+        await callback.answer("Оберіть кінцеву дату або «Застосувати».")
+        return
+    await _apply_stats_range(callback, effective_context, db_session, state, start, picked)
+
+
+@router.callback_query(F.data == CAL_APPLY)
+async def cb_calendar_apply(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    start = _stats_cal_from(await state.get_data())
+    if start is None:
+        await callback.answer("Спочатку оберіть дату.", show_alert=True)
+        return
+    # Одиночная дата = диапазон из одного дня.
+    await _apply_stats_range(callback, effective_context, db_session, state, start, start)
+
+
+@router.callback_query(F.data == CAL_CANCEL)
+async def cb_calendar_cancel(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.update_data(stats_cal_from=None)
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        snapshot = await get_client_stats(db_session, client=client)
+    except PermissionDenied as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text(
+        stats_text(snapshot), reply_markup=build_stats_kb("today"), parse_mode="HTML"
+    )
+    await remember_screen(state, callback.message)
+    await callback.answer()
 
 
 @router.message(F.text == SETTINGS_BUTTON)
