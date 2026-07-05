@@ -827,6 +827,77 @@ def build_summary(book: Any, data_ws: Any) -> None:
     book.batch_update({"requests": reqs})
 
 
+# --- Общие билдеры batch-update запросов оформления панели «Зведення» ---------
+# Их зовут ОБЕ панели (write_side_summary — основная, write_readonly_summary —
+# зеркало), чтобы форматирование жило в одном месте и панели не расходились.
+_PANEL_BORDER = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
+_CURRENCY_FMT = "#,##0.00 ₴"
+_INT_FMT = "#,##0"
+
+
+def _col_width_req(sid: int, idx: int, px: int, span: int = 1) -> dict:
+    return {
+        "updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": idx, "endIndex": idx + span},
+            "properties": {"pixelSize": px},
+            "fields": "pixelSize",
+        }
+    }
+
+
+def _bg_req(sid: int, r0: int, r1: int, c0: int, c1: int, color: dict) -> dict:
+    return {
+        "repeatCell": {
+            "range": _grid(sid, r0, r1, c0, c1),
+            "cell": {"userEnteredFormat": {"backgroundColor": color}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }
+
+
+def _banner_req(sid: int, r0: int, c0: int, c1: int, color: dict, font_size: int) -> dict:
+    return {
+        "repeatCell": {
+            "range": _grid(sid, r0, r0 + 1, c0, c1),
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": color,
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": font_size},
+                }
+            },
+            "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+        }
+    }
+
+
+def _numfmt_req(sid: int, r0: int, r1: int, c0: int, c1: int, ntype: str, pattern: str) -> dict:
+    return {
+        "repeatCell": {
+            "range": _grid(sid, r0, r1, c0, c1),
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": ntype, "pattern": pattern}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }
+    }
+
+
+def _merge_req(sid: int, r0: int, r1: int, c0: int, c1: int) -> dict:
+    return {"mergeCells": {"range": _grid(sid, r0, r1, c0, c1), "mergeType": "MERGE_ALL"}}
+
+
+_BORDER_SIDES = ("top", "bottom", "left", "right", "innerHorizontal", "innerVertical")
+
+
+def _borders_req(sid: int, r0: int, r1: int, c0: int, c1: int) -> dict:
+    return {
+        "updateBorders": {
+            "range": _grid(sid, r0, r1, c0, c1),
+            **dict.fromkeys(_BORDER_SIDES, _PANEL_BORDER),
+        }
+    }
+
+
 def side_summary_cells() -> list[list[str]]:
     """Значения панели «Зведення» (I1:J19): лейбл + формула/селектор (USER_ENTERED).
 
@@ -888,7 +959,9 @@ def write_side_summary(book: Any, ws: Any) -> None:
     lbl, val, end = PANEL_LABEL_COL, PANEL_VALUE_COL, PANEL_VALUE_COL + 1
     helper_col = PANEL_VALUE_COL + 2  # L — скрытый список «Назва (Артикул)» для дропдауна товара
     helper_a1 = _col_a1(helper_col)
-    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}19"
+    cells = side_summary_cells()
+    last = len(cells)  # число строк панели (exclusive-граница разделов, идущих до конца)
+    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}{last}"
     records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
     safe_title = ws.title.replace("'", "''")
@@ -915,68 +988,12 @@ def write_side_summary(book: Any, ws: Any) -> None:
     )
     # raw=True по умолчанию → формулы стали бы текстом; форсим USER_ENTERED.
     ws.update(
-        values=side_summary_cells(),
+        values=cells,
         range_name=panel_range,
         value_input_option=ValueInputOption.user_entered,
     )
 
-    border = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
-
-    def _col_width(idx: int, px: int) -> dict:
-        return {
-            "updateDimensionProperties": {
-                "range": {
-                    "sheetId": sid,
-                    "dimension": "COLUMNS",
-                    "startIndex": idx,
-                    "endIndex": idx + 1,
-                },
-                "properties": {"pixelSize": px},
-                "fields": "pixelSize",
-            }
-        }
-
-    def _bg(r0: int, r1: int, color: dict) -> dict:
-        return {
-            "repeatCell": {
-                "range": _grid(sid, r0, r1, lbl, end),
-                "cell": {"userEnteredFormat": {"backgroundColor": color}},
-                "fields": "userEnteredFormat.backgroundColor",
-            }
-        }
-
-    def _banner(r0: int, color: dict, font_size: int) -> dict:
-        return {
-            "repeatCell": {
-                "range": _grid(sid, r0, r0 + 1, lbl, end),
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": color,
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                        "textFormat": {
-                            "bold": True,
-                            "foregroundColor": HEADER_FG,
-                            "fontSize": font_size,
-                        },
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
-            }
-        }
-
-    def _numfmt(r0: int, r1: int, ntype: str, pattern: str) -> dict:
-        return {
-            "repeatCell": {
-                "range": _grid(sid, r0, r1, val, end),
-                "cell": {
-                    "userEnteredFormat": {"numberFormat": {"type": ntype, "pattern": pattern}}
-                },
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        }
-
-    def _align_left(r0: int, r1: int) -> dict:
+    def _align_left(r0: int, r1: int) -> dict:  # только для селекторов панели, не шарится
         return {
             "repeatCell": {
                 "range": _grid(sid, r0, r1, val, end),
@@ -986,13 +1003,13 @@ def write_side_summary(book: Any, ws: Any) -> None:
         }
 
     reqs = [
-        _col_width(PANEL_GAP_COL, 22),  # разрыв-разделитель (тонкий)
-        _col_width(lbl, 150),  # лейблы
-        _col_width(val, 124),  # значения/селекторы
+        _col_width_req(sid, PANEL_GAP_COL, 22),  # разрыв-разделитель (тонкий)
+        _col_width_req(sid, lbl, 150),  # лейблы
+        _col_width_req(sid, val, 124),  # значения/селекторы
         # база: лейблы bold слева, значения справа, всё по центру вертикали
         {
             "repeatCell": {
-                "range": _grid(sid, 1, 19, lbl, val),
+                "range": _grid(sid, 1, last, lbl, val),
                 "cell": {
                     "userEnteredFormat": {
                         "textFormat": {"bold": True},
@@ -1005,7 +1022,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
         },
         {
             "repeatCell": {
-                "range": _grid(sid, 1, 19, val, end),
+                "range": _grid(sid, 1, last, val, end),
                 "cell": {
                     "userEnteredFormat": {
                         "horizontalAlignment": "RIGHT",
@@ -1016,28 +1033,28 @@ def write_side_summary(book: Any, ws: Any) -> None:
             }
         },
         # карточки-фон под строками результатов (всього / категорія / товар)
-        _bg(1, 4, BAND2),
-        _bg(7, 10, BAND2),
-        _bg(13, 19, BAND2),
+        _bg_req(sid, 1, 4, lbl, end, BAND2),
+        _bg_req(sid, 7, 10, lbl, end, BAND2),
+        _bg_req(sid, 13, last, lbl, end, BAND2),
         # merge баннера и подзаголовков секций
-        {"mergeCells": {"range": _grid(sid, 0, 1, lbl, end), "mergeType": "MERGE_ALL"}},
-        {"mergeCells": {"range": _grid(sid, 5, 6, lbl, end), "mergeType": "MERGE_ALL"}},
-        {"mergeCells": {"range": _grid(sid, 11, 12, lbl, end), "mergeType": "MERGE_ALL"}},
-        _banner(0, HEADER_BG, 11),
-        _banner(5, SUBHEADER_BG, 10),
-        _banner(11, SUBHEADER_BG, 10),
+        _merge_req(sid, 0, 1, lbl, end),
+        _merge_req(sid, 5, 6, lbl, end),
+        _merge_req(sid, 11, 12, lbl, end),
+        _banner_req(sid, 0, lbl, end, HEADER_BG, 11),
+        _banner_req(sid, 5, lbl, end, SUBHEADER_BG, 10),
+        _banner_req(sid, 11, lbl, end, SUBHEADER_BG, 10),
         # ячейки-селекторы (дропдауны): подсветка + значение по левому краю
-        _bg(6, 7, PICK_BG),
-        _bg(12, 13, PICK_BG),
+        _bg_req(sid, 6, 7, lbl, end, PICK_BG),
+        _bg_req(sid, 12, 13, lbl, end, PICK_BG),
         _align_left(6, 7),
         _align_left(12, 13),
         # форматы чисел: ціле (позиції/одиниці/кількість), валюта (вартість/ціна)
-        _numfmt(1, 3, "NUMBER", "#,##0"),
-        _numfmt(3, 4, "CURRENCY", "#,##0.00 ₴"),
-        _numfmt(7, 9, "NUMBER", "#,##0"),
-        _numfmt(9, 10, "CURRENCY", "#,##0.00 ₴"),
-        _numfmt(16, 17, "NUMBER", "#,##0"),
-        _numfmt(17, 19, "CURRENCY", "#,##0.00 ₴"),
+        _numfmt_req(sid, 1, 3, val, end, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 3, 4, val, end, "CURRENCY", _CURRENCY_FMT),
+        _numfmt_req(sid, 7, 9, val, end, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 9, 10, val, end, "CURRENCY", _CURRENCY_FMT),
+        _numfmt_req(sid, 16, 17, val, end, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 17, last, val, end, "CURRENCY", _CURRENCY_FMT),
         # дропдаун категорій: «Всі» + наявні категорії
         {
             "setDataValidation": {
@@ -1079,17 +1096,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
                 "fields": "hiddenByUser",
             }
         },
-        {
-            "updateBorders": {
-                "range": _grid(sid, 0, 19, lbl, end),
-                "top": border,
-                "bottom": border,
-                "left": border,
-                "right": border,
-                "innerHorizontal": border,
-                "innerVertical": border,
-            }
-        },
+        _borders_req(sid, 0, last, lbl, end),
     ]
     book.batch_update({"requests": reqs})
 
@@ -1147,9 +1154,8 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
 
     values = readonly_summary_cells(cats)
-    last = len(values)  # число строк панели
+    last = len(values)  # число строк панели (exclusive-граница; включает «Разом»)
     tbl0 = 7  # первая строка данных таблицы категорий (0-based)
-    tbl_end = last  # exclusive: включает «Разом» (последняя строка)
     panel_range = f"{_col_a1(lbl)}1:{_col_a1(end4 - 1)}{last}"
 
     # Таблица разреза занимает I–L → расширяем сетку, если колонок меньше.
@@ -1181,38 +1187,22 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
         value_input_option=ValueInputOption.user_entered,
     )
 
-    border = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
+    def _bold_band(r0: int, r1: int) -> dict:  # bold + фон BAND2 (шапка таблицы, «Разом»)
+        return {
+            "repeatCell": {
+                "range": _grid(sid, r0, r1, lbl, end4),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}},
+                "fields": "userEnteredFormat(textFormat,backgroundColor)",
+            }
+        }
+
     reqs = [
-        # ширины: разрыв, категорія, числа, вартість
-        {
-            "updateDimensionProperties": {
-                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": PANEL_GAP_COL, "endIndex": PANEL_GAP_COL + 1},
-                "properties": {"pixelSize": 22},
-                "fields": "pixelSize",
-            }
-        },
-        {
-            "updateDimensionProperties": {
-                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": lbl, "endIndex": lbl + 1},
-                "properties": {"pixelSize": 150},
-                "fields": "pixelSize",
-            }
-        },
-        {
-            "updateDimensionProperties": {
-                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": val, "endIndex": val + 2},
-                "properties": {"pixelSize": 92},
-                "fields": "pixelSize",
-            }
-        },
-        {
-            "updateDimensionProperties": {
-                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": end4 - 1, "endIndex": end4},
-                "properties": {"pixelSize": 112},
-                "fields": "pixelSize",
-            }
-        },
-        # база: всё по центру вертикали, лейблы/числа по своим краям
+        # ширины: разрыв, категорія, числа (J,K span=2), вартість
+        _col_width_req(sid, PANEL_GAP_COL, 22),
+        _col_width_req(sid, lbl, 150),
+        _col_width_req(sid, val, 92, span=2),
+        _col_width_req(sid, end4 - 1, 112),
+        # база: всё по центру вертикали
         {
             "repeatCell": {
                 "range": _grid(sid, 1, last, lbl, end4),
@@ -1235,102 +1225,21 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
                 "fields": "userEnteredFormat.horizontalAlignment",
             }
         },
-        # карточка-фон под «Всього»
-        {
-            "repeatCell": {
-                "range": _grid(sid, 1, 4, lbl, val + 1),
-                "cell": {"userEnteredFormat": {"backgroundColor": BAND2}},
-                "fields": "userEnteredFormat.backgroundColor",
-            }
-        },
+        _bg_req(sid, 1, 4, lbl, val + 1, BAND2),  # карточка-фон под «Всього»
         # баннер и подзаголовок секции (merge + тёмный фон)
-        {"mergeCells": {"range": _grid(sid, 0, 1, lbl, end4), "mergeType": "MERGE_ALL"}},
-        {"mergeCells": {"range": _grid(sid, 5, 6, lbl, end4), "mergeType": "MERGE_ALL"}},
-        {
-            "repeatCell": {
-                "range": _grid(sid, 0, 1, lbl, end4),
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": HEADER_BG,
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                        "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": 11},
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
-            }
-        },
-        {
-            "repeatCell": {
-                "range": _grid(sid, 5, 6, lbl, end4),
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": SUBHEADER_BG,
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                        "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": 10},
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
-            }
-        },
-        # шапка таблицы категорий (bold + светлый фон)
-        {
-            "repeatCell": {
-                "range": _grid(sid, 6, 7, lbl, end4),
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}},
-                "fields": "userEnteredFormat(textFormat,backgroundColor)",
-            }
-        },
-        # строка «Разом» — bold
-        {
-            "repeatCell": {
-                "range": _grid(sid, last - 1, last, lbl, end4),
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}},
-                "fields": "userEnteredFormat(textFormat,backgroundColor)",
-            }
-        },
+        _merge_req(sid, 0, 1, lbl, end4),
+        _merge_req(sid, 5, 6, lbl, end4),
+        _banner_req(sid, 0, lbl, end4, HEADER_BG, 11),
+        _banner_req(sid, 5, lbl, end4, SUBHEADER_BG, 10),
+        _bold_band(6, 7),  # шапка таблицы категорий
+        _bold_band(last - 1, last),  # строка «Разом»
         # числовые форматы «Всього» (J): позиції/одиниці ціле, вартість валюта
-        {
-            "repeatCell": {
-                "range": _grid(sid, 1, 3, val, val + 1),
-                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        },
-        {
-            "repeatCell": {
-                "range": _grid(sid, 3, 4, val, val + 1),
-                "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 ₴"}}},
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        },
-        # числовые форматы таблицы категорий: J,K ціле; L валюта (строки данных + «Разом»)
-        {
-            "repeatCell": {
-                "range": _grid(sid, tbl0, tbl_end, val, val + 2),
-                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        },
-        {
-            "repeatCell": {
-                "range": _grid(sid, tbl0, tbl_end, end4 - 1, end4),
-                "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 ₴"}}},
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        },
-        {
-            "updateBorders": {
-                "range": _grid(sid, 0, last, lbl, end4),
-                "top": border,
-                "bottom": border,
-                "left": border,
-                "right": border,
-                "innerHorizontal": border,
-                "innerVertical": border,
-            }
-        },
+        _numfmt_req(sid, 1, 3, val, val + 1, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 3, 4, val, val + 1, "CURRENCY", _CURRENCY_FMT),
+        # таблица категорий: J,K ціле; L валюта (строки данных + «Разом»)
+        _numfmt_req(sid, tbl0, last, val, val + 2, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, tbl0, last, end4 - 1, end4, "CURRENCY", _CURRENCY_FMT),
+        _borders_req(sid, 0, last, lbl, end4),
     ]
     book.batch_update({"requests": reqs})
 
