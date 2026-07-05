@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import re
 import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -152,8 +154,6 @@ def authorize() -> gspread.Client:
     if not raw:
         raise SystemExit("GOOGLE_SA_JSON не настроен (ожидаю ./secrets/service-account.json)")
     if raw.startswith("{"):
-        import json
-
         creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     else:
         creds = Credentials.from_service_account_file(raw, scopes=SCOPES)
@@ -367,6 +367,95 @@ async def provision_client_view_books(
         created += 1
         print(f"  • {label}: {book.url}")
     return created
+
+
+# --- Ручная привязка книги-зеркала (SA не может создавать файлы — нет квоты Drive) ---
+# Владелец создаёт книгу личным Google-аккаунтом, шарит на SA как редактора; этот путь
+# лишь проверяет доступ SA и пишет stock_view_book_id. Для ≤15 клиентов — проще OAuth/
+# Shared Drive (те окупаются на сотнях книг). См. docs / план QA #3.
+
+
+def _extract_book_id(url_or_id: str) -> str:
+    """Из ссылки Google Sheets (`…/spreadsheets/d/<id>/…`) или голого id → id книги."""
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id.strip())
+    return match.group(1) if match else url_or_id.strip()
+
+
+def _sa_email() -> str | None:
+    """`client_email` сервис-аккаунта из GOOGLE_SA_JSON — для подсказки про шаринг."""
+    raw = get_settings().google_sa_json.strip()
+    try:
+        if raw.startswith("{"):
+            data = json.loads(raw)
+        else:
+            with open(raw, encoding="utf-8") as fh:
+                data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data.get("client_email")
+
+
+async def _resolve_client(ref: str) -> tuple[str, str]:
+    """Клиент по `ref` → `(user_id, label)`. Числовой → telegram_id, иначе ILIKE по ПІБ.
+
+    Требует ровно одно совпадение (role=client), иначе `SystemExit` с подсказкой.
+    """
+    ref = ref.strip()
+    cond = User.telegram_id == int(ref) if ref.isdigit() else User.full_name.ilike(f"%{ref}%")
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = (
+            await session.execute(
+                select(User.id, User.full_name, User.telegram_id).where(
+                    User.role == UserRole.client, cond
+                )
+            )
+        ).all()
+    if not rows:
+        raise SystemExit(f"Клієнта за '{ref}' не знайдено (role=client).")
+    if len(rows) > 1:
+        names = ", ".join(f"{n or '—'} ({t})" for _, n, t in rows)
+        raise SystemExit(f"За '{ref}' кілька клієнтів: {names}. Уточніть telegram_id.")
+    uid, name, tg = rows[0]
+    return str(uid), (name or str(tg))
+
+
+async def _save_view_book_id(user_id: str, book_id: str) -> None:
+    sm = get_sessionmaker()
+    async with sm() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        if user is None:
+            raise SystemExit("Клієнта вже нема в БД.")
+        user.stock_view_book_id = book_id
+        await session.commit()
+
+
+def attach_view_book(gc: gspread.Client, book_id: str) -> str:
+    """Проверить доступ SA к вручную созданной книге, вкладку «Товари», раздать read-only.
+
+    Возвращает `book.url`. Падает с внятной подсказкой, если SA не расшарен как редактор.
+    """
+    sa = _sa_email() or "сервіс-акаунт"
+    try:
+        book = gc.open_by_key(book_id)
+    except Exception as exc:  # нет доступа/не тот id
+        raise SystemExit(
+            f"SA не має доступу до книги ({exc}). Поділіться таблицею на {sa} як Редактора."
+        ) from exc
+    try:
+        ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)  # проверяет доступ на запись
+    except Exception as exc:
+        raise SystemExit(
+            f"SA не може писати в книгу ({exc}). Дайте {sa} доступ Редактора (не Читача)."
+        ) from exc
+    try:
+        share_readonly(book, [])  # «будь-хто з посиланням → Читач» для клиента
+    except Exception as exc:  # у SA может не быть права менять доступ — не критично
+        print(
+            f"  ! link-viewer не виставлено автоматично ({exc}) — зробіть вручну: "
+            "Доступ за посиланням → Читач."
+        )
+    return book.url
 
 
 def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
@@ -941,6 +1030,17 @@ def main() -> None:
         action="store_true",
         help="создать персональные read-only книги-зеркала для клиентов без stock_view_book_id",
     )
+    parser.add_argument(
+        "--attach-book",
+        default="",
+        help="URL или id вручную созданной книги-зеркала — привязать к клиенту (--for)",
+    )
+    parser.add_argument(
+        "--for",
+        dest="attach_for",
+        default="",
+        help="клиент для --attach-book: telegram_id или фрагмент ПІБ",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -957,6 +1057,17 @@ def main() -> None:
         return
 
     gc = authorize()
+
+    # --- Привязка вручную созданной книги-зеркала к клиенту ---
+    if args.attach_book:
+        if not args.attach_for:
+            raise SystemExit("--attach-book потребує --for <telegram_id|фрагмент ПІБ>")
+        book_id = _extract_book_id(args.attach_book)
+        user_id, label = _run_db(_resolve_client(args.attach_for))
+        url = attach_view_book(gc, book_id)
+        _run_db(_save_view_book_id(user_id, book_id))
+        print(f"Привʼязано: {label} → {url}\nstock_view_book_id = {book_id}")
+        return
 
     # --- Персональные книги-зеркала клиентов (read-only) ---
     if args.client_books:

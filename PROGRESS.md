@@ -36,8 +36,14 @@
   и расшарил на SA. Нужно: провижн от OAuth-пользователя (личный Google, 15 ГБ) или
   Shared Drive (Workspace), либо ручное создание книги + шаринг на SA. Ссылка в боте
   не показывается, пока `stock_view_book_id` не задан — штатно.
-- **Дальше:** решить способ создания книг-зеркал; после — E2E #3 на @test_np_np_bot.
-- **Открытые вопросы:** OAuth-as-user vs Shared Drive vs ручное создание для провижна.
+- **Решение по провижну (≤15 клиентов):** книги-зеркала владеет личный Google-аккаунт
+  владельца (нативные Sheets не тратят квоту), создаются вручную по одной при
+  онбординге. Добавлен хелпер `provision_sheets.py --attach-book <url|id> --for <ref>`:
+  проверяет доступ SA (open_by_key + ensure «Товари»), раздаёт link-viewer, пишет
+  `stock_view_book_id`. `_extract_book_id`/`_sa_email`/`_resolve_client`. SA-email для
+  шаринга: `np-sheets@numeric-datum-500315-t2.iam.gserviceaccount.com`.
+- **Дальше:** владелец создаёт тест-книгу + шарит на SA → `--attach-book` → E2E #3.
+- **Открытые вопросы:** OAuth-as-user/Shared Drive — только если клиентов станет много.
 
 ---
 
