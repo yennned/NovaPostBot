@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from app.db.models.enums import ShipmentStatus
@@ -116,10 +116,25 @@ def shipment_card_text(card: ShipmentCard) -> str:
     return "\n".join(lines)
 
 
+def _period_label(snapshot: ClientStatsSnapshot) -> str:
+    """Человекочитаемый период по включённым дням.
+
+    Окно запроса — `[start, end)` (end — эксклюзивная граница: полночь следующего
+    дня, либо `now` для текущего периода). Показываем ПОСЛЕДНИЙ включённый день
+    (`end − 1 c`), иначе для «01–03.07» отображалось бы «04.07 00:00» — будто
+    захвачен лишний день.
+    """
+    start_day = snapshot.start.date()
+    last_day = (snapshot.end - timedelta(seconds=1)).date()
+    if start_day >= last_day:
+        return start_day.strftime("%d.%m.%Y")
+    return f"{start_day:%d.%m.%Y} — {last_day:%d.%m.%Y}"
+
+
 def stats_text(snapshot: ClientStatsSnapshot) -> str:
     lines = [
         "📊 <b>Статистика</b>",
-        f"Період: {_fmt_dt(snapshot.start)} — {_fmt_dt(snapshot.end)}",
+        f"Період: {_period_label(snapshot)}",
         f"Відправлено: <b>{snapshot.shipped_qty}</b>",
         f"Повернення/відмови: <b>{snapshot.returns_qty}</b>",
         f"Втрати/пошкодження: <b>{snapshot.losses_qty}</b>",
@@ -156,6 +171,18 @@ def product_search_prompt() -> str:
 
 def shipment_search_prompt() -> str:
     return "Введіть № ТТН або ім'я одержувача для пошуку відправлень."
+
+
+def stats_calendar_text(selected_from) -> str:
+    if selected_from is None:
+        return (
+            "📅 <b>Оберіть дату</b>\n"
+            "Один день — натисніть дату. Діапазон — натисніть початкову, потім кінцеву."
+        )
+    return (
+        f"📅 Початок: <b>{selected_from:%d.%m.%Y}</b>\n"
+        "Оберіть кінцеву дату або «Застосувати» для одного дня."
+    )
 
 
 def profile_edit_prompt(field: str) -> str:

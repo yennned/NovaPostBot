@@ -48,7 +48,14 @@ class ClientStatsSnapshot:
     top_skus: list[TopSkuStat]
 
 
-def _bounds(period: str, *, day: date | None, settings: Settings) -> tuple[datetime, datetime]:
+def _bounds(
+    period: str,
+    *,
+    day: date | None,
+    settings: Settings,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> tuple[datetime, datetime]:
     """Границы периода `[start, end)` в зоне отделения (`time.min` каждой даты).
 
     `end` — начало следующего периода (завтра / след. понедельник / 1-е след.
@@ -56,12 +63,18 @@ def _bounds(period: str, *, day: date | None, settings: Settings) -> tuple[datet
     и была хрупкой: `status_changed_at` штампует Postgres (`server_default now()`), а
     `now` считался на часах приложения — рассинхрон в пару мс уводил свежую строку
     «в будущее» относительно `end`, и она выпадала из отчёта.
+
+    Приоритет: диапазон (`date_from`/`date_to`, включительно по обе даты) → один
+    день (`day`) → предустановленный `period`.
     """
     tz = ZoneInfo(settings.timezone)
 
     def _midnight(value: date) -> datetime:
         return datetime.combine(value, time.min, tzinfo=tz)
 
+    if date_from is not None and date_to is not None:
+        start_day, end_day = sorted((date_from, date_to))
+        return _midnight(start_day), _midnight(end_day + timedelta(days=1))
     if day is not None:
         return _midnight(day), _midnight(day + timedelta(days=1))
 
@@ -85,12 +98,14 @@ async def get_client_stats(
     client: User,
     period: str = "today",
     day: date | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> ClientStatsSnapshot:
     shipments._require_active_client(client)
     cfg = settings or get_settings()
-    start, end = _bounds(period, day=day, settings=cfg)
+    start, end = _bounds(period, day=day, settings=cfg, date_from=date_from, date_to=date_to)
     repo = ShipmentRepository(session)
     dispatched_shipments = await repo.list_dispatched_between(client.id, start=start, end=end)
     returned_shipments = await repo.list_status_changed_between(
@@ -125,8 +140,14 @@ async def get_client_stats(
     returns_qty = sum(returned.values())
     losses_qty = sum(lost.values())
     top_skus = [TopSkuStat(sku=sku, quantity=qty) for sku, qty in shipped.most_common(5)]
+    if date_from is not None and date_to is not None:
+        resolved_period = "range"
+    elif day is not None:
+        resolved_period = "day"
+    else:
+        resolved_period = period
     return ClientStatsSnapshot(
-        period="day" if day is not None else period,
+        period=resolved_period,
         start=start,
         # Для показа обрезаем верхнюю границу до «сейчас»: окно запроса `[start, end)`
         # тянется до конца периода (см. `_bounds`), но пользователю «Період» не должен

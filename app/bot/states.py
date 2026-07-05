@@ -15,7 +15,6 @@ class ClientManageState(StatesGroup):
 class ClientCabinetState(StatesGroup):
     waiting_for_product_search = State()
     waiting_for_shipment_search = State()
-    waiting_for_stats_date = State()
     waiting_for_settings_profile = State()
     waiting_for_sender_profile_edit = State()
 
