@@ -444,6 +444,7 @@ def attach_view_book(gc: gspread.Client, book_id: str) -> str:
         ) from exc
     try:
         ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)  # проверяет доступ на запись
+        _drop_empty_defaults(book)  # убрать дефолтную «Лист1»/«Sheet1» у ручной книги
     except Exception as exc:
         raise SystemExit(
             f"SA не може писати в книгу ({exc}). Дайте {sa} доступ Редактора (не Читача)."
