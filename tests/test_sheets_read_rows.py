@@ -173,7 +173,7 @@ def test_read_stock_skips_side_panel_phantom_rows():
 
 def test_side_summary_cells_structure_and_formulas():
     cells = side_summary_cells()
-    assert len(cells) == 18
+    assert len(cells) == 19
     # три секции: всього / за категорією / за товаром
     assert cells[0][0].endswith("Зведення")
     assert cells[5][0] == "За категорією"
@@ -184,14 +184,20 @@ def test_side_summary_cells_structure_and_formulas():
     assert cells[3] == ["Вартість, ₴", "=SUMPRODUCT(D2:D;E2:E)"]
     # ячейки-селекторы с дефолтами
     assert cells[6] == ["Категорія", "Всі"]
-    assert cells[12] == ["Артикул", ""]
+    # J13 — комбинированный селектор «Товар», J14 — резолв-артикул (ключ lookup)
+    assert cells[12][0] == "Товар"
+    assert cells[13][0] == "Артикул"
     # фильтр по категории завязан на селектор (колонка значений панели) и опцию «Всі»
-    cat_ref, sku_ref = f"${_PANEL_VALUE_A1}$7", f"${_PANEL_VALUE_A1}$13"
+    cat_ref = f"${_PANEL_VALUE_A1}$7"
+    sel_ref, art_ref = f"${_PANEL_VALUE_A1}$13", f"${_PANEL_VALUE_A1}$14"
     assert all(cat_ref in cells[i][1] for i in (7, 8, 9))
     assert all('"Всі"' in cells[i][1] for i in (7, 8, 9))
-    # фильтр по товару завязан на селектор товара (VLOOKUP/SUMIF)
-    assert all(sku_ref in cells[i][1] for i in (13, 14, 15, 16, 17))
-    assert "VLOOKUP" in cells[13][1]
+    # резолв артикула из комбинированного селектора товара
+    assert "REGEXEXTRACT" in cells[13][1] and sel_ref in cells[13][1]
+    # значения товара ищут по резолв-артикулу J14 (VLOOKUP/SUMIF), не по селектору J13
+    assert all(art_ref in cells[i][1] for i in (14, 15, 16, 17, 18))
+    assert all(sel_ref not in cells[i][1] for i in (14, 15, 16, 17, 18))
+    assert "VLOOKUP" in cells[14][1]
     # Локаль книги с запятой → разделитель аргументов «;», а не «,».
     assert ";" in cells[3][1] and "," not in cells[3][1]
     assert ";" in cells[8][1]

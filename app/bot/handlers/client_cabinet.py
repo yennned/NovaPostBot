@@ -62,6 +62,7 @@ from app.db.models.enums import OrgType
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
 from app.services import client_settings, sender_profile
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     InvalidNotificationSetting,
     PermissionDenied,
@@ -144,16 +145,20 @@ async def _show_inventory(
     )
     await state.update_data(product_categories=page.categories)
     await target.answer(
-        products_text(page),
-        reply_markup=build_inventory_kb(
-            page,
-            active_category=category,
-            query=query,
-            sheet_url=stock_view_book_url(client),
-        ),
+        products_text(page, sheet_url=stock_view_book_url(client)),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
     await _remember_if_possible(state, target)
+    # Синк-на-входе: зеркалим текущий склад в персональную Google-книгу, чтобы за
+    # ссылкой были свежие данные. Экран уже показан → задержка записи не видна; сбой
+    # Google глотается в лог (best_effort) и не роняет экран. Только когда клиент
+    # открывает СВОЙ склад: под импперсонизацией owner/dev (`/as client`) просмотр чужого
+    # склада не должен писать в его Google-таблицы и мутировать его строку в БД.
+    actor = context.actor_user
+    if actor is not None and client.id == actor.id:
+        await best_effort_sync(session, client=client, log_key="inventory_open_sheet_sync_failed")
 
 
 async def _edit_inventory(
@@ -178,14 +183,10 @@ async def _edit_inventory(
     )
     await state.update_data(product_categories=page.categories)
     await message.edit_text(
-        products_text(page),
-        reply_markup=build_inventory_kb(
-            page,
-            active_category=category,
-            query=query,
-            sheet_url=stock_view_book_url(client),
-        ),
+        products_text(page, sheet_url=stock_view_book_url(client)),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
     await remember_screen(state, message)
 
@@ -308,14 +309,10 @@ async def _edit_inventory_screen(
     return await edit_stored_screen(
         bot,
         state,
-        text=products_text(page),
-        reply_markup=build_inventory_kb(
-            page,
-            active_category=category,
-            query=query,
-            sheet_url=stock_view_book_url(client),
-        ),
+        text=products_text(page, sheet_url=stock_view_book_url(client)),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 

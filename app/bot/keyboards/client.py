@@ -60,7 +60,6 @@ def build_inventory_kb(
     *,
     active_category: str | None = None,
     query: str | None = None,
-    sheet_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     # «🧹 Скинути» показываем только при активном фильтре (поиск или категория) —
     # иначе сброс был бы no-op-редактированием (Telegram «message is not modified»)
@@ -69,9 +68,6 @@ def build_inventory_kb(
     if query or active_category:
         search_row.append(InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:pclear"))
     rows: list[list[InlineKeyboardButton]] = [search_row]
-    # Ссылка на персональную Google-таблицу склада (если книга заведена провижином).
-    if sheet_url:
-        rows.append([InlineKeyboardButton(text="📊 Відкрити таблицю складу", url=sheet_url)])
     rows.extend(category_chips(page.categories, prefix="cab:pcat", active=active_category))
     for item in page.items:
         price = f"{item.price:.2f} ₴" if item.price is not None else "—"

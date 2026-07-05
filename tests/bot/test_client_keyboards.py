@@ -12,6 +12,7 @@ from app.bot.keyboards.client import (
     build_shipment_card_kb,
     build_shipments_kb,
 )
+from app.bot.texts.client_cabinet import products_text
 from app.db.models.enums import OrgType
 from app.services.client_settings import ClientSettingsView, NotificationSettingView
 from app.services.inventory import InventoryPage
@@ -125,14 +126,16 @@ def test_inventory_reset_button_only_with_active_filter():
     )
 
 
-def test_inventory_shows_sheet_link_only_when_url_present():
-    # Без книги-зеркала ссылки нет.
-    no_link = build_inventory_kb(_inventory_page())
-    urls = [b.url for row in no_link.inline_keyboard for b in row if b.url]
+def test_inventory_no_sheet_link_button_in_keyboard():
+    # Ссылка на таблицу теперь живёт в тексте, а не кнопкой — url-кнопок нет.
+    kb = build_inventory_kb(_inventory_page(), active_category="Одяг", query="товар")
+    urls = [b.url for row in kb.inline_keyboard for b in row if b.url]
     assert urls == []
-    # С url — появляется кнопка-ссылка.
-    with_link = build_inventory_kb(
-        _inventory_page(), sheet_url="https://docs.google.com/spreadsheets/d/BOOK"
-    )
-    urls = [b.url for row in with_link.inline_keyboard for b in row if b.url]
-    assert urls == ["https://docs.google.com/spreadsheets/d/BOOK"]
+
+
+def test_products_text_shows_sheet_link_only_when_url_present():
+    # Без книги-зеркала ссылки в тексте нет.
+    assert "href" not in products_text(_inventory_page())
+    # С url — в тексте под заголовком появляется HTML-ссылка.
+    text = products_text(_inventory_page(), sheet_url="https://docs.google.com/spreadsheets/d/BOOK")
+    assert 'href="https://docs.google.com/spreadsheets/d/BOOK"' in text

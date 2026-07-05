@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import json
+import re
 import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -34,7 +37,7 @@ from app.config import get_settings
 from app.db.base import get_engine, get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
-from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB
+from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB, ViewRow, _view_data_row
 from app.sheets.client import _STOCK_EXPECTED_HEADERS
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
@@ -152,8 +155,6 @@ def authorize() -> gspread.Client:
     if not raw:
         raise SystemExit("GOOGLE_SA_JSON не настроен (ожидаю ./secrets/service-account.json)")
     if raw.startswith("{"):
-        import json
-
         creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     else:
         creds = Credentials.from_service_account_file(raw, scopes=SCOPES)
@@ -306,27 +307,31 @@ def share_readonly(book: Any, emails: list[str]) -> None:
         book.share(None, perm_type="anyone", role="reader", with_link=True)
 
 
-async def clients_without_view_book() -> list[tuple[str, str]]:
-    """Активные клиенты без книги-зеркала → `(user_id, label)`.
+async def clients_without_view_book() -> list[tuple[str, str, str]]:
+    """Активные клиенты без книги-зеркала → `(user_id, label, source_tab)`.
 
-    `label` = `full_name` или `telegram_id` — как `client_label` в `_sync_view_book`.
+    `label` = `full_name`/`telegram_id` (для названия книги); `source_tab` =
+    `stock_sheet_key` (имя вкладки клиента в основном «Складі» для подтяжки остатков).
     """
     sm = get_sessionmaker()
     async with sm() as session:
         rows = (
             await session.execute(
-                select(User.id, User.full_name, User.telegram_id).where(
+                select(User.id, User.full_name, User.telegram_id, User.stock_sheet_key).where(
                     User.role == UserRole.client,
                     User.status == UserStatus.active,
                     User.stock_view_book_id.is_(None),
                 )
             )
         ).all()
-    return [(str(uid), (name or str(tg)).strip()) for uid, name, tg in rows]
+    return [
+        (str(uid), (name or str(tg)).strip(), (ssk or name or str(tg)).strip())
+        for uid, name, tg, ssk in rows
+    ]
 
 
 async def provision_client_view_books(
-    gc: gspread.Client, clients: list[tuple[str, str]], emails: list[str]
+    gc: gspread.Client, clients: list[tuple[str, str, str]], emails: list[str]
 ) -> int:
     """Создать по книге-зеркалу на клиента, записать id в БД, раздать read-only.
 
@@ -339,11 +344,10 @@ async def provision_client_view_books(
     """
     sm = get_sessionmaker()
     created = 0
-    for user_id, label in clients:
+    for user_id, label, source_tab in clients:
         try:
             book = gc.create(f"Склад — {label}")
-            ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)
-            _drop_empty_defaults(book)
+            format_view_book(gc, book, source_tab)  # оформить «Товари» как основной «Склад»
         except Exception as exc:  # админ-скрипт: логируем и продолжаем со след. клиентом
             print(f"  ! {label}: не вдалося створити книгу: {exc}")
             continue
@@ -367,6 +371,172 @@ async def provision_client_view_books(
         created += 1
         print(f"  • {label}: {book.url}")
     return created
+
+
+# --- Ручная привязка книги-зеркала (SA не может создавать файлы — нет квоты Drive) ---
+# Владелец создаёт книгу личным Google-аккаунтом, шарит на SA как редактора; этот путь
+# лишь проверяет доступ SA и пишет stock_view_book_id. Для ≤15 клиентов — проще OAuth/
+# Shared Drive (те окупаются на сотнях книг). См. docs / план QA #3.
+
+
+def _extract_book_id(url_or_id: str) -> str:
+    """Из ссылки Google Sheets (`…/spreadsheets/d/<id>/…`) или голого id → id книги."""
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id.strip())
+    return match.group(1) if match else url_or_id.strip()
+
+
+def _sa_email() -> str | None:
+    """`client_email` сервис-аккаунта из GOOGLE_SA_JSON — для подсказки про шаринг."""
+    raw = get_settings().google_sa_json.strip()
+    try:
+        if raw.startswith("{"):
+            data = json.loads(raw)
+        else:
+            with open(raw, encoding="utf-8") as fh:
+                data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data.get("client_email")
+
+
+async def _resolve_client(ref: str) -> tuple[str, str, str]:
+    """Клиент по `ref` → `(user_id, label, source_tab)`. Числовой → telegram_id, иначе ILIKE по ПІБ.
+
+    `source_tab` = имя вкладки клиента в основном «Складі» (persisted `stock_sheet_key`;
+    он может расходиться с текущим `full_name` после смены ПІБ — берём именно его, иначе
+    подтяжка остатков не найдёт лист). Требует ровно одно совпадение, иначе `SystemExit`.
+    """
+    ref = ref.strip()
+    cond = User.telegram_id == int(ref) if ref.isdigit() else User.full_name.ilike(f"%{ref}%")
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = (
+            await session.execute(
+                select(User.id, User.full_name, User.telegram_id, User.stock_sheet_key).where(
+                    User.role == UserRole.client, cond
+                )
+            )
+        ).all()
+    if not rows:
+        raise SystemExit(f"Клієнта за '{ref}' не знайдено (role=client).")
+    if len(rows) > 1:
+        names = ", ".join(f"{n or '—'} ({t})" for _, n, t, _ in rows)
+        raise SystemExit(f"За '{ref}' кілька клієнтів: {names}. Уточніть telegram_id.")
+    uid, name, tg, ssk = rows[0]
+    return str(uid), (name or str(tg)), (ssk or name or str(tg))
+
+
+async def _save_view_book_id(user_id: str, book_id: str) -> None:
+    sm = get_sessionmaker()
+    async with sm() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        if user is None:
+            raise SystemExit("Клієнта вже нема в БД.")
+        user.stock_view_book_id = book_id
+        await session.commit()
+
+
+def attach_view_book(gc: gspread.Client, book_id: str, source_tab: str | None = None) -> str:
+    """Проверить доступ SA к вручную созданной книге, оформить «Товари», раздать read-only.
+
+    `source_tab` — лист клиента в основном «Складі» (подтянуть остатки для оформления).
+    Возвращает `book.url`. Падает с внятной подсказкой, если SA не расшарен как редактор.
+    """
+    sa = _sa_email() or "сервіс-акаунт"
+    try:
+        book = gc.open_by_key(book_id)
+    except Exception as exc:  # нет доступа/не тот id
+        raise SystemExit(
+            f"SA не має доступу до книги ({exc}). Поділіться таблицею на {sa} як Редактора."
+        ) from exc
+    try:
+        format_view_book(gc, book, source_tab)  # доступ на запись + оформление «как Склад»
+    except Exception as exc:
+        raise SystemExit(
+            f"SA не може писати в книгу ({exc}). Дайте {sa} доступ Редактора (не Читача)."
+        ) from exc
+    try:
+        share_readonly(book, [])  # «будь-хто з посиланням → Читач» для клиента
+    except Exception as exc:  # у SA может не быть права менять доступ — не критично
+        print(
+            f"  ! link-viewer не виставлено автоматично ({exc}) — зробіть вручну: "
+            "Доступ за посиланням → Читач."
+        )
+    return book.url
+
+
+def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = None) -> None:
+    """Оформить книгу-зеркало клиента ТОЧНО как основной «Склад» — один лист «Товари».
+
+    То же оформление данных, что у клиентского листа «Склада»: тёмная шапка, бэндинг,
+    подсветка низкого остатка, цвет-чипы категорий, автоширина, формула «Доступно».
+    Отдельных листов НЕ создаём. Идемпотентно.
+
+    `source_tab` — имя листа клиента в основном «Складі» (= его stock_sheet_key). Если
+    задан, при оформлении подтягиваем текущие остатки, чтобы чипы/бэндинг/панель сразу
+    совпали с данными (иначе на пустой книге данные-зависимое оформление не наложилось бы).
+    Рантайм-синк далее держит данные свежими (пишет только A2:F).
+
+    Панель — read-only-версия (`write_readonly_summary`, I–L): без дропдаунов (зритель
+    их не меняет — книга только для чтения). Блок «Всього» + статичная таблица разреза
+    «За категорією» (живые формулы, фиксирован лишь список категорий). Секции «За товаром»
+    нет — поиск делает бот, а лист и так построчный.
+    """
+    ensure_locale(book)  # pin uk_UA — обяз. для «;»-формул панели/«Доступно»
+    ws = ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)  # заголовки A1 + freeze(1)
+    # «Без лишних листов»: снести отдельный лист сводки из ранней версии (если остался).
+    with contextlib.suppress(gspread.WorksheetNotFound):
+        book.del_worksheet(book.worksheet(SUMMARY_TITLE))
+    _drop_empty_defaults(book)  # убрать дефолтную «Лист1»/«Sheet1»
+    ws.batch_clear(["A2:G1000"])  # снять старые данные/преамбулу
+    rows = _read_stock_rows(gc, source_tab)  # текущие остатки из основного «Складу»
+    if rows:
+        ws.update(values=rows, range_name=f"A2:F{1 + len(rows)}")
+    meta = next(
+        (s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == ws.id),
+        {},
+    )
+    style_stock_worksheet(book, ws, meta)  # шапка/бэндинг/CF/чипы/автоширина (по данным)
+    write_available_formula(ws)  # G = Кількість − Резерв (ARRAYFORMULA)
+    write_readonly_summary(book, ws)  # read-only-панель «Зведення» (I–L): статичный разрез
+
+
+def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list]:
+    """Остатки клиента из основного «Складу» (лист `source_tab`) → строки «Товари» A–F.
+
+    Порядок колонок — единый источник `_view_data_row` (тот же, что пишет рантайм-синк):
+    строим `ViewRow` из записей «Складу» и прогоняем через него, чтобы контракт A–F жил
+    в одном месте. Нет книги/листа/доступа → пусто (best-effort, не падаем, не маскируем
+    под ошибку доступа к книге-зеркалу — её attach ловит отдельно).
+    """
+    stock_id = get_settings().sheets_stock_book_id
+    if not stock_id or not source_tab:
+        return []
+    try:
+        ws = gc.open_by_key(stock_id).worksheet(source_tab)
+        records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
+    except Exception as exc:
+        print(f"  ! остатки з основного «Складу» не прочитані ({exc}) — оформлюю без даних.")
+        return []
+    rows = []
+    for r in records:
+        if not r.get("Артикул"):
+            continue
+        price = r.get("Ціна", "")
+        rows.append(
+            _view_data_row(
+                ViewRow(
+                    sku=r.get("Артикул", ""),
+                    name=r.get("Назва", ""),
+                    category=r.get("Категорія", "") or None,
+                    price=_to_decimal(price) if price != "" else None,
+                    stock=int(_to_decimal(r.get("Кількість", 0))),
+                    reserved=int(_to_decimal(r.get("Резерв", 0))),
+                    available=0,  # не пишется (G — ARRAYFORMULA); нужен лишь для типа
+                )
+            )
+        )
+    return rows
 
 
 def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
@@ -657,18 +827,102 @@ def build_summary(book: Any, data_ws: Any) -> None:
     book.batch_update({"requests": reqs})
 
 
+# --- Общие билдеры batch-update запросов оформления панели «Зведення» ---------
+# Их зовут ОБЕ панели (write_side_summary — основная, write_readonly_summary —
+# зеркало), чтобы форматирование жило в одном месте и панели не расходились.
+_PANEL_BORDER = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
+_CURRENCY_FMT = "#,##0.00 ₴"
+_INT_FMT = "#,##0"
+
+
+def _col_width_req(sid: int, idx: int, px: int, span: int = 1) -> dict:
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sid,
+                "dimension": "COLUMNS",
+                "startIndex": idx,
+                "endIndex": idx + span,
+            },
+            "properties": {"pixelSize": px},
+            "fields": "pixelSize",
+        }
+    }
+
+
+def _bg_req(sid: int, r0: int, r1: int, c0: int, c1: int, color: dict) -> dict:
+    return {
+        "repeatCell": {
+            "range": _grid(sid, r0, r1, c0, c1),
+            "cell": {"userEnteredFormat": {"backgroundColor": color}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }
+
+
+def _banner_req(sid: int, r0: int, c0: int, c1: int, color: dict, font_size: int) -> dict:
+    return {
+        "repeatCell": {
+            "range": _grid(sid, r0, r0 + 1, c0, c1),
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": color,
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": HEADER_FG,
+                        "fontSize": font_size,
+                    },
+                }
+            },
+            "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+        }
+    }
+
+
+def _numfmt_req(sid: int, r0: int, r1: int, c0: int, c1: int, ntype: str, pattern: str) -> dict:
+    return {
+        "repeatCell": {
+            "range": _grid(sid, r0, r1, c0, c1),
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": ntype, "pattern": pattern}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }
+    }
+
+
+def _merge_req(sid: int, r0: int, r1: int, c0: int, c1: int) -> dict:
+    return {"mergeCells": {"range": _grid(sid, r0, r1, c0, c1), "mergeType": "MERGE_ALL"}}
+
+
+_BORDER_SIDES = ("top", "bottom", "left", "right", "innerHorizontal", "innerVertical")
+
+
+def _borders_req(sid: int, r0: int, r1: int, c0: int, c1: int) -> dict:
+    return {
+        "updateBorders": {
+            "range": _grid(sid, r0, r1, c0, c1),
+            **dict.fromkeys(_BORDER_SIDES, _PANEL_BORDER),
+        }
+    }
+
+
 def side_summary_cells() -> list[list[str]]:
-    """Значения панели «Зведення» (I1:J18): лейбл + формула/селектор (USER_ENTERED).
+    """Значения панели «Зведення» (I1:J19): лейбл + формула/селектор (USER_ENTERED).
 
     Три секции (формулы, не статичные числа → пересчёт живьём при правке остатка
     ботом/приёмкой/руками; открытые диапазоны авто-захватывают новые строки):
       • Всього — позиції/одиниці/вартість по всьому листу;
       • За категорією — фільтр по ячейке-селектору J7 (дропдаун «Всі»+категорії);
-      • За товаром — фільтр по ячейке-селектору J13 (дропдаун артикулів A2:A).
+      • За товаром — фільтр по ячейке-селектору J13 (дропдаун «Назва (Артикул)»:
+        Google фільтрує список по будь-якій частині рядка → пошук і по назві, і по
+        артикулу; артикул у дужках робить пункт унікальним ключем). Реальный ключ
+        lookup — резолв-артикул в J14 (`REGEXEXTRACT` хвоста «(артикул)»).
     Книга в локали с запятой → разделитель аргументов «;».
     """
     cat = f"${_PANEL_VALUE_A1}$7"  # ячейка выбора категории (селектор)
-    sku = f"${_PANEL_VALUE_A1}$13"  # ячейка выбора товара (Артикул)
+    tov = f"${_PANEL_VALUE_A1}$13"  # ячейка выбора товара (комбинированная «Назва (Артикул)»)
+    art = f"${_PANEL_VALUE_A1}$14"  # резолв-артикул из tov — ключ lookup
     return [
         ["📊 Зведення", ""],
         ["Позицій", "=COUNTA(A2:A)"],
@@ -685,14 +939,15 @@ def side_summary_cells() -> list[list[str]]:
         ],
         ["", ""],
         ["За товаром", ""],
-        ["Артикул", ""],
-        ["Назва", f'=IFERROR(VLOOKUP({sku};A2:E;2;0);"")'],
-        ["Категорія", f'=IFERROR(VLOOKUP({sku};A2:E;3;0);"")'],
-        ["Кількість", f'=IF({sku}="";"";SUMIF(A2:A;{sku};D2:D))'],
-        ["Ціна, ₴", f'=IFERROR(VLOOKUP({sku};A2:E;5;0);"")'],
+        ["Товар", ""],
+        ["Артикул", rf'=IFERROR(REGEXEXTRACT({tov};"\(([^)]+)\)\s*$");"")'],
+        ["Назва", f'=IFERROR(VLOOKUP({art};A2:E;2;0);"")'],
+        ["Категорія", f'=IFERROR(VLOOKUP({art};A2:E;3;0);"")'],
+        ["Кількість", f'=IF({art}="";"";SUMIF(A2:A;{art};D2:D))'],
+        ["Ціна, ₴", f'=IFERROR(VLOOKUP({art};A2:E;5;0);"")'],
         [
             "Вартість, ₴",
-            f'=IF({sku}="";"";SUMIF(A2:A;{sku};D2:D)*IFERROR(VLOOKUP({sku};A2:E;5;0);0))',
+            f'=IF({art}="";"";SUMIF(A2:A;{art};D2:D)*IFERROR(VLOOKUP({art};A2:E;5;0);0))',
         ],
     ]
 
@@ -702,17 +957,24 @@ def write_side_summary(book: Any, ws: Any) -> None:
 
     Справа (а не внизу) → строки растут вниз (`appendRow` приёмки/бота) и панель их
     не задевает: итог автоматический и никогда не «сползает», без правки Apps Script.
-    Дропдауны (Data Validation) в ячейках-селекторах J7 (категорія) и J13 (артикул);
-    подсчёты — формулы из `side_summary_cells`. Бот читает A:E с `expected_headers`,
-    лишние колонки справа чтение не ломают (см. app/sheets/client.py).
+    Дропдауны (Data Validation) в ячейках-селекторах J7 (категорія) и J13 (товар —
+    комбинированная «Назва (Артикул)»); подсчёты — формулы из `side_summary_cells`.
+    Список товара — скрытая колонка-помощник L (`Назва (Артикул)`, ARRAYFORMULA),
+    чтобы дропдаун искался и по назві, и по артикулу и авто-захватывал новые строки.
+    Бот читает A:E с `expected_headers`, лишние колонки справа чтение не ломают
+    (см. app/sheets/client.py).
     """
     sid = ws.id
     lbl, val, end = PANEL_LABEL_COL, PANEL_VALUE_COL, PANEL_VALUE_COL + 1
-    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}18"
+    helper_col = PANEL_VALUE_COL + 2  # L — скрытый список «Назва (Артикул)» для дропдауна товара
+    helper_a1 = _col_a1(helper_col)
+    cells = side_summary_cells()
+    last = len(cells)  # число строк панели (exclusive-граница разделов, идущих до конца)
+    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}{last}"
     records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
     safe_title = ws.title.replace("'", "''")
-    sku_range = f"='{safe_title}'!$A$2:$A$1000"
+    tovar_range = f"='{safe_title}'!${helper_a1}$2:${helper_a1}$1000"
 
     # Снимаем прежние merge баннеров ДО записи (иначе запись их «закрытых» ячеек упадёт
     # при повторном прогоне). unmergeCells на не-смерженном диапазоне — безопасный no-op.
@@ -723,70 +985,24 @@ def write_side_summary(book: Any, ws: Any) -> None:
             ]
         }
     )
+    # Лист «Складу» создан ровно под A–J (10 колонок) → расширяем сетку под колонку L.
+    if ws.col_count < helper_col + 1:
+        ws.add_cols(helper_col + 1 - ws.col_count)
+    # Скрытая колонка-помощник L: список «Назва (Артикул)» для дропдауна товара.
+    # ARRAYFORMULA по открытому A2:A → авто-захват новых строк; пустые строки → "".
+    ws.update(
+        values=[['=ARRAYFORMULA(IF(A2:A="";"";B2:B&" ("&A2:A&")"))']],
+        range_name=f"{helper_a1}2",
+        value_input_option=ValueInputOption.user_entered,
+    )
     # raw=True по умолчанию → формулы стали бы текстом; форсим USER_ENTERED.
     ws.update(
-        values=side_summary_cells(),
+        values=cells,
         range_name=panel_range,
         value_input_option=ValueInputOption.user_entered,
     )
 
-    border = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
-
-    def _col_width(idx: int, px: int) -> dict:
-        return {
-            "updateDimensionProperties": {
-                "range": {
-                    "sheetId": sid,
-                    "dimension": "COLUMNS",
-                    "startIndex": idx,
-                    "endIndex": idx + 1,
-                },
-                "properties": {"pixelSize": px},
-                "fields": "pixelSize",
-            }
-        }
-
-    def _bg(r0: int, r1: int, color: dict) -> dict:
-        return {
-            "repeatCell": {
-                "range": _grid(sid, r0, r1, lbl, end),
-                "cell": {"userEnteredFormat": {"backgroundColor": color}},
-                "fields": "userEnteredFormat.backgroundColor",
-            }
-        }
-
-    def _banner(r0: int, color: dict, font_size: int) -> dict:
-        return {
-            "repeatCell": {
-                "range": _grid(sid, r0, r0 + 1, lbl, end),
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": color,
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                        "textFormat": {
-                            "bold": True,
-                            "foregroundColor": HEADER_FG,
-                            "fontSize": font_size,
-                        },
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
-            }
-        }
-
-    def _numfmt(r0: int, r1: int, ntype: str, pattern: str) -> dict:
-        return {
-            "repeatCell": {
-                "range": _grid(sid, r0, r1, val, end),
-                "cell": {
-                    "userEnteredFormat": {"numberFormat": {"type": ntype, "pattern": pattern}}
-                },
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        }
-
-    def _align_left(r0: int, r1: int) -> dict:
+    def _align_left(r0: int, r1: int) -> dict:  # только для селекторов панели, не шарится
         return {
             "repeatCell": {
                 "range": _grid(sid, r0, r1, val, end),
@@ -796,13 +1012,13 @@ def write_side_summary(book: Any, ws: Any) -> None:
         }
 
     reqs = [
-        _col_width(PANEL_GAP_COL, 22),  # разрыв-разделитель (тонкий)
-        _col_width(lbl, 150),  # лейблы
-        _col_width(val, 124),  # значения/селекторы
+        _col_width_req(sid, PANEL_GAP_COL, 22),  # разрыв-разделитель (тонкий)
+        _col_width_req(sid, lbl, 150),  # лейблы
+        _col_width_req(sid, val, 124),  # значения/селекторы
         # база: лейблы bold слева, значения справа, всё по центру вертикали
         {
             "repeatCell": {
-                "range": _grid(sid, 1, 18, lbl, val),
+                "range": _grid(sid, 1, last, lbl, val),
                 "cell": {
                     "userEnteredFormat": {
                         "textFormat": {"bold": True},
@@ -815,7 +1031,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
         },
         {
             "repeatCell": {
-                "range": _grid(sid, 1, 18, val, end),
+                "range": _grid(sid, 1, last, val, end),
                 "cell": {
                     "userEnteredFormat": {
                         "horizontalAlignment": "RIGHT",
@@ -826,28 +1042,28 @@ def write_side_summary(book: Any, ws: Any) -> None:
             }
         },
         # карточки-фон под строками результатов (всього / категорія / товар)
-        _bg(1, 4, BAND2),
-        _bg(7, 10, BAND2),
-        _bg(13, 18, BAND2),
+        _bg_req(sid, 1, 4, lbl, end, BAND2),
+        _bg_req(sid, 7, 10, lbl, end, BAND2),
+        _bg_req(sid, 13, last, lbl, end, BAND2),
         # merge баннера и подзаголовков секций
-        {"mergeCells": {"range": _grid(sid, 0, 1, lbl, end), "mergeType": "MERGE_ALL"}},
-        {"mergeCells": {"range": _grid(sid, 5, 6, lbl, end), "mergeType": "MERGE_ALL"}},
-        {"mergeCells": {"range": _grid(sid, 11, 12, lbl, end), "mergeType": "MERGE_ALL"}},
-        _banner(0, HEADER_BG, 11),
-        _banner(5, SUBHEADER_BG, 10),
-        _banner(11, SUBHEADER_BG, 10),
+        _merge_req(sid, 0, 1, lbl, end),
+        _merge_req(sid, 5, 6, lbl, end),
+        _merge_req(sid, 11, 12, lbl, end),
+        _banner_req(sid, 0, lbl, end, HEADER_BG, 11),
+        _banner_req(sid, 5, lbl, end, SUBHEADER_BG, 10),
+        _banner_req(sid, 11, lbl, end, SUBHEADER_BG, 10),
         # ячейки-селекторы (дропдауны): подсветка + значение по левому краю
-        _bg(6, 7, PICK_BG),
-        _bg(12, 13, PICK_BG),
+        _bg_req(sid, 6, 7, lbl, end, PICK_BG),
+        _bg_req(sid, 12, 13, lbl, end, PICK_BG),
         _align_left(6, 7),
         _align_left(12, 13),
         # форматы чисел: ціле (позиції/одиниці/кількість), валюта (вартість/ціна)
-        _numfmt(1, 3, "NUMBER", "#,##0"),
-        _numfmt(3, 4, "CURRENCY", "#,##0.00 ₴"),
-        _numfmt(7, 9, "NUMBER", "#,##0"),
-        _numfmt(9, 10, "CURRENCY", "#,##0.00 ₴"),
-        _numfmt(15, 16, "NUMBER", "#,##0"),
-        _numfmt(16, 18, "CURRENCY", "#,##0.00 ₴"),
+        _numfmt_req(sid, 1, 3, val, end, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 3, 4, val, end, "CURRENCY", _CURRENCY_FMT),
+        _numfmt_req(sid, 7, 9, val, end, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 9, 10, val, end, "CURRENCY", _CURRENCY_FMT),
+        _numfmt_req(sid, 16, 17, val, end, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 17, last, val, end, "CURRENCY", _CURRENCY_FMT),
         # дропдаун категорій: «Всі» + наявні категорії
         {
             "setDataValidation": {
@@ -862,31 +1078,190 @@ def write_side_summary(book: Any, ws: Any) -> None:
                 },
             }
         },
-        # дропдаун товара: артикули з A2:A
+        # дропдаун товара: «Назва (Артикул)» з прихованої колонки-помічника L
         {
             "setDataValidation": {
                 "range": _grid(sid, 12, 13, val, end),
                 "rule": {
                     "condition": {
                         "type": "ONE_OF_RANGE",
-                        "values": [{"userEnteredValue": sku_range}],
+                        "values": [{"userEnteredValue": tovar_range}],
                     },
                     "showCustomUi": True,
                     "strict": False,
                 },
             }
         },
+        # прячем колонку-помощник L (служебный список для дропдауна товара)
         {
-            "updateBorders": {
-                "range": _grid(sid, 0, 18, lbl, end),
-                "top": border,
-                "bottom": border,
-                "left": border,
-                "right": border,
-                "innerHorizontal": border,
-                "innerVertical": border,
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sid,
+                    "dimension": "COLUMNS",
+                    "startIndex": helper_col,
+                    "endIndex": helper_col + 1,
+                },
+                "properties": {"hiddenByUser": True},
+                "fields": "hiddenByUser",
             }
         },
+        _borders_req(sid, 0, last, lbl, end),
+    ]
+    book.batch_update({"requests": reqs})
+
+
+def readonly_summary_cells(cats: list[str]) -> list[list[str]]:
+    """Значения read-only-панели «Зведення» для книги-зеркала (I1:L…, USER_ENTERED).
+
+    Read-only-версия: без единого дропдауна (зритель их не меняет). Вместо
+    интерактивных селекторов — статичная таблица разреза по категориям: строка на
+    каждую категорию из `cats`. Значения — ЖИВЫЕ формулы (пересчёт при обновлении
+    остатка рантайм-синком), фиксирован лишь СПИСОК категорий (на момент провижна/
+    привязки; новая категория попадёт в разрез после ре-привязки `--attach-book`).
+    Книга в локали с запятой → разделитель аргументов «;».
+    """
+    rows: list[list[str]] = [
+        ["📊 Зведення", "", "", ""],
+        ["Позицій", "=COUNTA(A2:A)", "", ""],
+        ["Одиниць", "=SUM(D2:D)", "", ""],
+        ["Вартість, ₴", "=SUMPRODUCT(D2:D;E2:E)", "", ""],
+        ["", "", "", ""],
+        ["За категорією", "", "", ""],
+        ["Категорія", "Позицій", "Одиниць", "Вартість, ₴"],
+    ]
+    for cat in cats:
+        c = cat.replace('"', '""')  # экранируем кавычки для литерала в формуле
+        # Все три метрики — через SUMPRODUCT (точное сравнение `=`). НЕ COUNTIF/SUMIF:
+        # их критерий трактует `* ? ~` как шаблон → для категории вида «USB*C» счётчик
+        # разошёлся бы с точной вартістю и строка не билась бы с «Разом».
+        rows.append(
+            [
+                cat,
+                f'=SUMPRODUCT((C2:C="{c}")*(A2:A<>""))',
+                f'=SUMPRODUCT((C2:C="{c}")*D2:D)',
+                f'=SUMPRODUCT((C2:C="{c}")*D2:D*E2:E)',
+            ]
+        )
+    rows.append(["Разом", "=COUNTA(A2:A)", "=SUM(D2:D)", "=SUMPRODUCT(D2:D;E2:E)"])
+    return rows
+
+
+def write_readonly_summary(book: Any, ws: Any) -> None:
+    """Read-only-панель «Зведення» СПРАВА от данных (колонки I–L) для книги-зеркала.
+
+    Отличие от `write_side_summary`: НИ ОДНОГО дропдауна (книга у клиента read-only —
+    менять ячейки-селекторы он не может). Блок «Всього» — живые формулы; разрез
+    «За категорією» — статичная таблица (строка на категорию, значения-формулы). Секции
+    «За товаром» нет: лист A–G и так построчный per-товар, а поиск делает бот.
+    Идемпотентно — как основная панель, снимаем прежние merge перед записью.
+    """
+    sid = ws.id
+    lbl = PANEL_LABEL_COL  # I — категорія/лейбл
+    val = PANEL_VALUE_COL  # J — значения «Всього» / Позицій таблицы
+    end4 = lbl + 4  # правая граница таблицы (I,J,K,L)
+    records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
+    cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
+
+    values = readonly_summary_cells(cats)
+    last = len(values)  # число строк панели (exclusive-граница; включает «Разом»)
+    tbl0 = 7  # первая строка данных таблицы категорий (0-based)
+    panel_range = f"{_col_a1(lbl)}1:{_col_a1(end4 - 1)}{last}"
+
+    # Таблица разреза занимает I–L → расширяем сетку, если колонок меньше.
+    if ws.col_count < end4:
+        ws.add_cols(end4 - ws.col_count)
+    # Идемпотентность: полностью зачистить область панели ПЕРЕД записью — иначе при
+    # ре-привязке остаётся «хвост» от прежней (более длинной/интерактивной) панели:
+    # старые значения ниже нового «Разом», дропдауны-валидации и merge. Зачищаем все
+    # колонки от I до конца сетки (данные листа — только A–G, панель их не трогает).
+    # Границы берём по факту (`col_count`/`row_count`): и не выйти за пределы сетки
+    # (иначе «exceeds grid limits» на листе <1000 строк), и накрыть «хвост» при росте.
+    right, bottom = ws.col_count, ws.row_count
+    wipe = _grid(sid, 0, bottom, lbl, right)
+    ws.batch_clear([f"{_col_a1(lbl)}1:{_col_a1(right - 1)}{bottom}"])  # значения
+    book.batch_update(
+        {
+            "requests": [
+                {"unmergeCells": {"range": wipe}},
+                {"setDataValidation": {"range": wipe}},  # без rule → снимает дропдауны
+                # сброс форматирования (фон/шрифт/рамки/числоформат) — иначе от прежней
+                # более длинной панели остаются пустые, но крашеные ячейки ниже «Разом».
+                {
+                    "repeatCell": {
+                        "range": wipe,
+                        "cell": {"userEnteredFormat": {}},
+                        "fields": "userEnteredFormat",
+                    }
+                },
+            ]
+        }
+    )
+    ws.update(
+        values=values,
+        range_name=panel_range,
+        value_input_option=ValueInputOption.user_entered,
+    )
+
+    def _bold_band(r0: int, r1: int) -> dict:  # bold + фон BAND2 (шапка таблицы, «Разом»)
+        return {
+            "repeatCell": {
+                "range": _grid(sid, r0, r1, lbl, end4),
+                "cell": {
+                    "userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}
+                },
+                "fields": "userEnteredFormat(textFormat,backgroundColor)",
+            }
+        }
+
+    reqs = [
+        # ширины: разрыв, категорія, числа (J,K span=2), вартість
+        _col_width_req(sid, PANEL_GAP_COL, 22),
+        _col_width_req(sid, lbl, 150),
+        _col_width_req(sid, val, 92, span=2),
+        _col_width_req(sid, end4 - 1, 112),
+        # база: всё по центру вертикали
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, last, lbl, end4),
+                "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE"}},
+                "fields": "userEnteredFormat.verticalAlignment",
+            }
+        },
+        # «Всього»: лейблы bold слева, значения справа
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 4, lbl, val),
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "LEFT",
+                    }
+                },
+                "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 4, val, val + 1),
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
+            }
+        },
+        _bg_req(sid, 1, 4, lbl, val + 1, BAND2),  # карточка-фон под «Всього»
+        # баннер и подзаголовок секции (merge + тёмный фон)
+        _merge_req(sid, 0, 1, lbl, end4),
+        _merge_req(sid, 5, 6, lbl, end4),
+        _banner_req(sid, 0, lbl, end4, HEADER_BG, 11),
+        _banner_req(sid, 5, lbl, end4, SUBHEADER_BG, 10),
+        _bold_band(6, 7),  # шапка таблицы категорий
+        _bold_band(last - 1, last),  # строка «Разом»
+        # числовые форматы «Всього» (J): позиції/одиниці ціле, вартість валюта
+        _numfmt_req(sid, 1, 3, val, val + 1, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, 3, 4, val, val + 1, "CURRENCY", _CURRENCY_FMT),
+        # таблица категорий: J,K ціле; L валюта (строки данных + «Разом»)
+        _numfmt_req(sid, tbl0, last, val, val + 2, "NUMBER", _INT_FMT),
+        _numfmt_req(sid, tbl0, last, end4 - 1, end4, "CURRENCY", _CURRENCY_FMT),
+        _borders_req(sid, 0, last, lbl, end4),
     ]
     book.batch_update({"requests": reqs})
 
@@ -941,6 +1316,17 @@ def main() -> None:
         action="store_true",
         help="создать персональные read-only книги-зеркала для клиентов без stock_view_book_id",
     )
+    parser.add_argument(
+        "--attach-book",
+        default="",
+        help="URL или id вручную созданной книги-зеркала — привязать к клиенту (--for)",
+    )
+    parser.add_argument(
+        "--for",
+        dest="attach_for",
+        default="",
+        help="клиент для --attach-book: telegram_id или фрагмент ПІБ",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -957,6 +1343,17 @@ def main() -> None:
         return
 
     gc = authorize()
+
+    # --- Привязка вручную созданной книги-зеркала к клиенту ---
+    if args.attach_book:
+        if not args.attach_for:
+            raise SystemExit("--attach-book потребує --for <telegram_id|фрагмент ПІБ>")
+        book_id = _extract_book_id(args.attach_book)
+        user_id, label, source_tab = _run_db(_resolve_client(args.attach_for))
+        url = attach_view_book(gc, book_id, source_tab)
+        _run_db(_save_view_book_id(user_id, book_id))
+        print(f"Привʼязано: {label} → {url}\nstock_view_book_id = {book_id}")
+        return
 
     # --- Персональные книги-зеркала клиентов (read-only) ---
     if args.client_books:
