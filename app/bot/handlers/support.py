@@ -15,6 +15,7 @@ import uuid
 
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,8 +118,50 @@ async def _thread_id_from_state(state: FSMContext) -> uuid.UUID | None:
 
 @router.message(SupportState.client_chatting, F.text == kb.CLIENT_CHAT_EXIT)
 async def client_chat_exit(
+    message: Message,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    """«Завершити чат» реально закрывает обращение (не только выходит из чата).
+
+    Раньше кнопка лишь чистила стейт, тред оставался `open`/`waiting` и «воскресал»
+    при повторном открытии — клиенту казалось, что чат не завершается. Теперь тред
+    переходит в `closed`, дежурный (если был) уведомляется.
+    """
+    thread_id = await _thread_id_from_state(state)
+    thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
+    manager_tid: int | None = None
+    # Сначала закрываем тред и коммитим — только потом чистим стейт: если БД
+    # упадёт, стейт не потеряется, клиент сможет повторить, а не останется с
+    # «воскресающим» открытым тредом и залипшей клавиатурой без подтверждения.
+    if thread is not None and thread.status is not SupportThreadStatus.closed:
+        manager_tid = thread.assigned_manager.telegram_id if thread.assigned_manager else None
+        closed_note = notifications.support_thread_closed_by_client_text(thread.client)
+        await support.close_thread(db_session, thread=thread)
+        await db_session.commit()
+        if manager_tid is not None:
+            await BotNotifier(bot).send_message(manager_tid, closed_note)
+    await state.clear()
+    await _exit_chat_to_home(
+        message, effective_context, texts.chat_closed_text(), default_role=UserRole.client
+    )
+
+
+@router.message(StateFilter(None), F.text == kb.CLIENT_CHAT_EXIT)
+async def client_chat_exit_stale(
     message: Message, effective_context: EffectiveContext, state: FSMContext
 ) -> None:
+    """Fallback: «Завершити чат» вне активного чата (стейт потерян после рестарта).
+
+    Reply-клавиатура в Telegram «залипает» и переживает рестарт бота; без этого
+    хендлера нажатие после потери стейта не матчилось ни с чем и молча
+    игнорировалось. `StateFilter(None)` — срабатывает только когда FSM-стейта нет
+    (именно этот случай), чтобы не перехватывать текст в состояниях менеджера/dev,
+    где та же строка могла быть отправлена осмысленно. Снимаем клавиатуру и
+    возвращаем на головну.
+    """
     await state.clear()
     await _exit_chat_to_home(
         message, effective_context, texts.chat_exited_text(), default_role=UserRole.client

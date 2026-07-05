@@ -67,6 +67,11 @@ def support_thread_closed_text() -> str:
     )
 
 
+def support_thread_closed_by_client_text(client: User) -> str:
+    """Уведомление дежурному менеджеру: клиент сам завершил обращение."""
+    return f"✅ Клієнт {html.escape(_client_label(client))} завершив звернення."
+
+
 def manager_added_text() -> str:
     """Уведомление новому менеджеру о выдаче доступа."""
     return (

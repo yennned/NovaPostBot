@@ -16,6 +16,7 @@ from app.bot.handlers.support import (
     _is_staff,
     cb_open,
     client_chat_exit,
+    client_chat_exit_stale,
     client_chat_message,
     client_open,
     staff_open,
@@ -225,16 +226,47 @@ async def test_staff_reply_message_denies_foreign_thread_access(db_session: Asyn
     assert refreshed.assigned_manager_id == assigned.id
 
 
-async def test_client_chat_exit_restores_role_menu(db_session: AsyncSession):
+async def test_client_chat_exit_closes_thread_and_notifies_manager(db_session: AsyncSession):
     client = await _client(db_session)
-    msg = FakeMessage("/exit")
+    manager = await _manager(db_session)
+    thread = await SupportRepository(db_session).create_thread(
+        client_id=client.id, assigned_manager_id=manager.id, status=SupportThreadStatus.open
+    )
+    state = FakeState({"support_thread_id": str(thread.id)})
+    bot = FakeBot()
+    msg = FakeMessage("⬅️ Завершити чат")
+
+    await client_chat_exit(msg, _ctx(client, UserRole.client), db_session, state, bot)
+
+    refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
+    assert refreshed.status is SupportThreadStatus.closed  # клиент реально закрыл тред
+    assert any(tid == manager.telegram_id for tid, _ in bot.sent)  # дежурный уведомлён
+    assert state.cleared
+    assert isinstance(msg.answers[-1]["reply_markup"], ReplyKeyboardMarkup)
+
+
+async def test_client_chat_exit_without_thread_restores_role_menu(db_session: AsyncSession):
+    client = await _client(db_session)
+    msg = FakeMessage("⬅️ Завершити чат")
     state = FakeState()
 
-    await client_chat_exit(msg, _ctx(client, UserRole.client), state)
+    await client_chat_exit(msg, _ctx(client, UserRole.client), db_session, state, FakeBot())
 
     assert state.cleared
     # Выход из чата возвращает нижнюю reply-панель меню роли (она же заменяет
     # «exit»-клавиатуру) — одним сообщением, без ReplyKeyboardRemove.
+    assert isinstance(msg.answers[-1]["reply_markup"], ReplyKeyboardMarkup)
+
+
+async def test_client_chat_exit_stale_returns_home(db_session: AsyncSession):
+    # «Завершити чат» вне активного чата (стейт потерян) — не молчим, а возвращаем домой.
+    client = await _client(db_session)
+    msg = FakeMessage("⬅️ Завершити чат")
+    state = FakeState()
+
+    await client_chat_exit_stale(msg, _ctx(client, UserRole.client), state)
+
+    assert state.cleared
     assert isinstance(msg.answers[-1]["reply_markup"], ReplyKeyboardMarkup)
 
 
