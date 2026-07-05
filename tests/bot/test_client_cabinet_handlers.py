@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 from app.bot.handlers.client_cabinet import (
+    cb_calendar_day,
     cb_cancel_shipment,
     cb_settings_toggle,
     cb_shipment_card,
@@ -430,3 +431,41 @@ async def test_add_fop_wizard_np_unavailable_keeps_phone_step(db_session: AsyncS
     assert await SenderProfileRepository(db_session).list_for_client(client.id) == []
     assert state.state == SenderProfileCreateState.entering_sender_phone
     assert msg.answers and "недоступна" in str(msg.answers[-1]["text"]).lower()
+
+
+async def test_calendar_range_flow_passes_date_from_to(db_session: AsyncSession, monkeypatch):
+    from datetime import date
+
+    client = await _active_client(db_session, telegram_id=730)
+    ctx = SimpleNamespace(actor_user=client, effective_user=client)
+    state = FakeState()
+    captured: dict = {}
+
+    async def fake_get_client_stats(session, *, client, date_from=None, date_to=None, **kw):
+        captured["from"] = date_from
+        captured["to"] = date_to
+        now = datetime.now(UTC)
+        return ClientStatsSnapshot(
+            period="range",
+            start=now,
+            end=now,
+            shipped_qty=0,
+            returns_qty=0,
+            losses_qty=0,
+            net_sales_qty=0,
+            total_available=0,
+            top_skus=[],
+        )
+
+    monkeypatch.setattr("app.bot.handlers.client_cabinet.get_client_stats", fake_get_client_stats)
+
+    # Первый клик — начало диапазона: только запоминаем, не считаем.
+    await cb_calendar_day(FakeCallback("cal:day:2026-07-01"), ctx, db_session, state)
+    assert state._data["stats_cal_from"] == "2026-07-01"
+    assert captured == {}
+
+    # Второй клик — конец диапазона: применяем.
+    await cb_calendar_day(FakeCallback("cal:day:2026-07-05"), ctx, db_session, state)
+    assert captured["from"] == date(2026, 7, 1)
+    assert captured["to"] == date(2026, 7, 5)
+    assert state._data.get("stats_cal_from") is None  # состояние сброшено
