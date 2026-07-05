@@ -903,6 +903,9 @@ def write_side_summary(book: Any, ws: Any) -> None:
             ]
         }
     )
+    # Лист «Складу» создан ровно под A–J (10 колонок) → расширяем сетку под колонку L.
+    if ws.col_count < helper_col + 1:
+        ws.add_cols(helper_col + 1 - ws.col_count)
     # Скрытая колонка-помощник L: список «Назва (Артикул)» для дропдауна товара.
     # ARRAYFORMULA по открытому A2:A → авто-захват новых строк; пустые строки → "".
     ws.update(
@@ -1146,9 +1149,27 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
     tbl_end = last  # exclusive: включает «Разом» (последняя строка)
     panel_range = f"{_col_a1(lbl)}1:{_col_a1(end4 - 1)}{last}"
 
-    # Снять прежние merge баннера/подзаголовка (повторная привязка).
+    # Таблица разреза занимает I–L → расширяем сетку, если колонок меньше.
+    if ws.col_count < end4:
+        ws.add_cols(end4 - ws.col_count)
+    # Идемпотентность: полностью зачистить область панели ПЕРЕД записью — иначе при
+    # ре-привязке остаётся «хвост» от прежней (более длинной/интерактивной) панели:
+    # старые значения ниже нового «Разом», дропдауны-валидации и merge. Зачищаем все
+    # колонки от I до конца сетки (данные листа — только A–G, панель их не трогает);
+    # правую границу берём по факту (`col_count`), чтобы не выйти за пределы сетки.
+    right = ws.col_count
+    wipe = _grid(sid, 0, 1000, lbl, right)
+    ws.batch_clear([f"{_col_a1(lbl)}1:{_col_a1(right - 1)}1000"])  # значения
     book.batch_update(
-        {"requests": [{"unmergeCells": {"range": _grid(sid, r, r + 1, lbl, end4)}} for r in (0, 5)]}
+        {
+            "requests": [
+                {"unmergeCells": {"range": wipe}},
+                {"setDataValidation": {"range": wipe}},  # без rule → снимает дропдауны
+                # сброс форматирования (фон/шрифт/рамки/числоформат) — иначе от прежней
+                # более длинной панели остаются пустые, но крашеные ячейки ниже «Разом».
+                {"repeatCell": {"range": wipe, "cell": {"userEnteredFormat": {}}, "fields": "userEnteredFormat"}},
+            ]
+        }
     )
     ws.update(
         values=values,

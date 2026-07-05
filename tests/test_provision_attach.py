@@ -77,5 +77,9 @@ def test_readonly_summary_escapes_quotes_in_category_literal():
 
 
 def test_readonly_summary_panel_has_no_dropdowns():
-    # Read-only книга: панель зеркала не должна ставить ни одной валидации-дропдауна.
-    assert "setDataValidation" not in inspect.getsource(write_readonly_summary)
+    # Read-only книга: панель зеркала не создаёт ни одного дропдауна. Валидацию она
+    # только СНИМАЕТ (setDataValidation без rule при зачистке), поэтому проверяем, что
+    # нет типов-условий дропдауна — ни списком, ни диапазоном.
+    src = inspect.getsource(write_readonly_summary)
+    assert "ONE_OF_LIST" not in src
+    assert "ONE_OF_RANGE" not in src
