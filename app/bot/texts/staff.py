@@ -37,7 +37,7 @@ def card_text(card: StaffCard) -> str:
     lines = [
         f"👔 <b>{name}</b>",
         f"Телефон: {phone}",
-        f"Telegram-ID: <code>{card.telegram_id}</code>",
+        f"Telegram-ID: <code>{card.telegram_id or '—'}</code>",
         f"Статус: {_STATUS_LABELS.get(card.status, card.status.value)} · {duty}",
         "",
         "<b>Права:</b>",
@@ -52,20 +52,32 @@ def card_text(card: StaffCard) -> str:
 
 def delete_confirm_text(card: StaffCard) -> str:
     return (
-        f"Видалити менеджера <b>{_esc(card.full_name or str(card.telegram_id))}</b>?\n"
+        f"Видалити менеджера <b>{_esc(_card_label(card))}</b>?\n"
         "Ми заблокуємо доступ, знімемо роль менеджера, а відкриті звернення повернуться в чергу."
     )
 
 
 def add_prompt_text() -> str:
     return (
-        "Введіть <b>Telegram-ID</b> або <b>номер телефону</b> нового менеджера.\n"
-        "За телефоном можна додати лише того, хто вже користувався ботом."
+        "Введіть <b>номер телефону</b> (0…, 380…, +380…) або <b>Telegram-ID</b> "
+        "нового менеджера.\n"
+        "За телефоном можна додати навіть того, хто ще не користувався ботом — "
+        "він стане менеджером одразу після першого входу за цим номером."
     )
 
 
+def _card_label(card: StaffCard) -> str:
+    """Человекочитаемая метка менеджера: ПІБ → телефон → Telegram-ID."""
+    return card.full_name or card.phone or str(card.telegram_id or "—")
+
+
 def added_text(card: StaffCard) -> str:
-    name = _esc(card.full_name or str(card.telegram_id))
+    name = _esc(_card_label(card))
+    if card.telegram_id is None:
+        return (
+            f"✅ {name} доданий менеджером. Він активується автоматично після "
+            "першого входу в бота за цим номером. Усі права увімкнені."
+        )
     return f"✅ {name} тепер менеджер. Усі права увімкнені за замовчуванням."
 
 
@@ -78,4 +90,4 @@ def not_owner_text() -> str:
 
 
 def invalid_add_input_text() -> str:
-    return "Не схоже на Telegram-ID чи телефон. Спробуйте ще раз або поверніться в меню."
+    return "Не схоже на телефон чи Telegram-ID. Спробуйте ще раз або поверніться в меню."

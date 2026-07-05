@@ -42,7 +42,7 @@ class StaffPermissionState:
 @dataclass(frozen=True, slots=True)
 class StaffListItem:
     id: uuid.UUID
-    telegram_id: int
+    telegram_id: int | None
     full_name: str | None
     phone: str | None
     status: UserStatus
@@ -61,7 +61,7 @@ class StaffPage:
 @dataclass(frozen=True, slots=True)
 class StaffCard:
     id: uuid.UUID
-    telegram_id: int
+    telegram_id: int | None
     full_name: str | None
     phone: str | None
     status: UserStatus
@@ -72,7 +72,9 @@ class StaffCard:
 @dataclass(frozen=True, slots=True)
 class AddManagerResult:
     card: StaffCard
-    telegram_id: int  # для пуша приветствия новому менеджеру
+    # telegram_id для пуша приветствия новому менеджеру; None — если заведён по
+    # телефону и ещё не входил в бота (пуш отправим при первом входе).
+    telegram_id: int | None
 
 
 def _require_owner(actor: User, settings: Settings | None) -> None:
@@ -175,20 +177,21 @@ async def add_manager(
 ) -> AddManagerResult:
     """Назначить менеджера по Telegram-ID или телефону.
 
-    Существующий не-клиент-владелец/уже-менеджер отклоняется; активного клиента
-    нельзя «переназначить» в менеджеры. Найм по телефону работает только если
-    пользователь уже есть в БД (иначе нет `telegram_id` для записи) — иначе
-    подсказываем добавить по Telegram-ID. Все флаги прав включены по умолчанию.
+    Существующего владельца/уже-менеджера отклоняем; активного клиента нельзя
+    «переназначить» в менеджеры. Если по телефону пользователь ещё не найден —
+    заводим предзаготовленную запись менеджера (`telegram_id` пуст): при первом
+    входе по контакту `register_contact` подхватит её по номеру. Все флаги прав
+    включены по умолчанию.
     """
     _require_owner(actor, settings)
-    if (telegram_id is None) == (phone is None):
-        raise StaffPromotionForbidden("вкажіть або Telegram-ID, або телефон")
+    provided = [x for x in (telegram_id, phone) if x is not None]
+    if len(provided) != 1:
+        raise StaffPromotionForbidden("вкажіть Telegram-ID або телефон")
     users = UserRepository(session)
-    existing = (
-        await users.get_by_telegram_id(telegram_id)
-        if telegram_id is not None
-        else await users.get_by_phone(phone)
-    )
+    if telegram_id is not None:
+        existing = await users.get_by_telegram_id(telegram_id)
+    else:
+        existing = await users.get_by_phone(phone)
 
     if existing is not None:
         if existing.role is UserRole.manager:
@@ -202,12 +205,13 @@ async def add_manager(
         await users.set_permissions(existing, {})
         manager, action = existing, "manager_promoted"
     else:
-        if telegram_id is None:
-            raise StaffPromotionForbidden(
-                "користувач із таким телефоном ще не користувався ботом — додайте за Telegram-ID"
-            )
+        # По телефону — предзаготовка (telegram_id пуст, подхват при входе);
+        # по Telegram-ID — обычное создание на лету.
         manager = await users.create(
-            telegram_id=telegram_id, role=UserRole.manager, status=UserStatus.active
+            telegram_id=telegram_id,
+            phone=phone,
+            role=UserRole.manager,
+            status=UserStatus.active,
         )
         action = "manager_added"
 

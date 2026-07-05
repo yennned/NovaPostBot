@@ -98,6 +98,42 @@ async def test_staff_add_input_creates_and_notifies(db_session: AsyncSession):
     assert any(tid == 555 for tid, _ in bot.sent)  # приветствие новому менеджеру
 
 
+async def test_staff_add_input_by_bare_phone_promotes(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    users = UserRepository(db_session)
+    await users.create(
+        telegram_id=772,
+        phone="380671112233",  # формат НП, как хранит register_contact
+        role=UserRole.client,
+        status=UserStatus.pending,
+    )
+    # Ввод без «+» (0-формат) — handler нормализует и НЕ примет за Telegram-ID.
+    await staff_add_input(
+        FakeMessage("0671112233"), _owner_ctx(owner), db_session, FakeState(), FakeBot()
+    )
+    assert (await users.get_by_telegram_id(772)).role is UserRole.manager
+
+
+async def test_staff_add_input_by_phone_with_separators_precreates(db_session: AsyncSession):
+    """Номер с пробелами/дефисами и незнакомый боту → предзаготовка менеджера."""
+    owner = await _owner(db_session)
+    users = UserRepository(db_session)
+    await staff_add_input(
+        FakeMessage("+380 50 999 88 77"), _owner_ctx(owner), db_session, FakeState(), FakeBot()
+    )
+    precreated = await users.get_by_phone("380509998877")
+    assert precreated is not None
+    assert precreated.telegram_id is None
+    assert precreated.role is UserRole.manager
+
+
+async def test_staff_add_input_rejects_garbage(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    msg = FakeMessage("не телефон")
+    await staff_add_input(msg, _owner_ctx(owner), db_session, FakeState(), FakeBot())
+    assert msg.answers and "телефон" in str(msg.answers[0]["text"]).lower()
+
+
 async def test_cb_flag_toggles_permission(db_session: AsyncSession):
     owner = await _owner(db_session)
     manager = await _manager(db_session)

@@ -64,6 +64,26 @@ async def test_notify_support_queued_goes_to_support_managers_not_owner(db_sessi
     assert "черзі" in notifier.sent[0][1]
 
 
+async def test_notify_support_queued_skips_phone_precreated_manager(db_session: AsyncSession):
+    """Менеджер, заведённый по телефону (telegram_id=None), не ломает рассылку."""
+    users = UserRepository(db_session)
+    await users.create(telegram_id=2, role=UserRole.manager, status=UserStatus.active)
+    # Предзаготовка по телефону: telegram_id пуст, право на поддержку по умолчанию on.
+    await users.create(
+        telegram_id=None, phone="380509998877", role=UserRole.manager, status=UserStatus.active
+    )
+
+    notifier = FakeNotifier()
+    await notifications.notify_support_queued_to_managers(
+        db_session, notifier, client_label="Іван (+380001)"
+    )
+
+    # Живой менеджер получил пуш; None-получателя нет, рассылка не упала.
+    recipients = {tid for tid, _ in notifier.sent}
+    assert recipients == {2}
+    assert None not in recipients
+
+
 async def test_notify_client_approved(db_session: AsyncSession):
     users = UserRepository(db_session)
     client = await users.create(telegram_id=100, role=UserRole.client, status=UserStatus.active)

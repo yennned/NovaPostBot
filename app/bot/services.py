@@ -9,6 +9,7 @@ from app.bot.types import DevSession, EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, UserRepository
+from app.utils.phone import normalize_phone
 
 
 class UserStore(Protocol):
@@ -97,15 +98,25 @@ class StartService:
         self.user_store = user_store
 
     async def register_contact(self, telegram_id: int, phone: str, full_name: str) -> StartResult:
+        # Храним телефон в формате НП (380XXXXXXXXX): так найм менеджера по телефону
+        # («Персонал») сверяет нормализованный ввод с колонкой точным равенством.
+        phone = normalize_phone(phone) or phone
         existing = await self.user_store.get_by_telegram_id(telegram_id)
         if existing is not None:
             if existing.phone != phone:
-                existing.phone = phone
+                # phone — UNIQUE. Если номер уже держит другая запись (напр. менеджер,
+                # заведённый по этому телефону), НЕ перезаписываем — иначе IntegrityError
+                # и падение /start. Оставляем старый номер (редкий кейс перевыпуска SIM).
+                other = await self.user_store.get_by_phone(phone)
+                if other is None or other.id == existing.id:
+                    existing.phone = phone
             if full_name and existing.full_name != full_name:
                 existing.full_name = full_name
             await self.user_store.save(existing)
             return StartResult(user=existing, created=False)
 
+        # Адопция по номеру: сюда попадает и заранее заведённый по телефону менеджер
+        # (telegram_id пуст) — проставляем telegram_id, роль/статус сохраняются.
         by_phone = await self.user_store.get_by_phone(phone)
         if by_phone is not None:
             by_phone.telegram_id = telegram_id

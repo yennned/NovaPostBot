@@ -103,7 +103,7 @@ async def test_start_command_handles_archived_user_status() -> None:
 async def test_receive_contact_handles_active_user_status() -> None:
     active_user = make_user(status=UserStatus.active, role=UserRole.manager)
     message = FakeMessage(
-        SimpleNamespace(id=123, full_name="Step User"),
+        SimpleNamespace(id=123, full_name="Step User", username="step"),
         contact=SimpleNamespace(user_id=123, phone_number="+380501112233"),
     )
     state = FakeState(state=StartStates.waiting_for_contact.state)
@@ -120,7 +120,7 @@ async def test_receive_contact_handles_active_user_status() -> None:
 async def test_receive_contact_ignores_contact_outside_waiting_state() -> None:
     active_user = make_user(status=UserStatus.active, role=UserRole.manager)
     message = FakeMessage(
-        SimpleNamespace(id=123, full_name="Step User"),
+        SimpleNamespace(id=123, full_name="Step User", username="step"),
         contact=SimpleNamespace(user_id=123, phone_number="+380501112233"),
     )
     state = FakeState(state=None)
