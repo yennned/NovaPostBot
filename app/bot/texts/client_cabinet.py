@@ -173,12 +173,58 @@ def profile_edit_prompt(field: str) -> str:
 def sender_profiles_text(profiles: list[SenderProfileView]) -> str:
     lines = ["🏢 <b>Мої ФОП</b>"]
     if not profiles:
-        lines.append("Профілів поки немає. Зверніться до менеджера для створення.")
+        lines.append("Профілів поки немає. Натисніть «➕ Додати ФОП», щоб створити.")
     else:
         for profile in profiles:
             suffix = " · основний" if profile.is_default else ""
             lines.append(f"• <b>{profile.name}</b>{suffix}")
+        lines.append("Можна додати ще один через «➕ Додати ФОП».")
     return "\n".join(lines)
+
+
+def new_profile_name_prompt() -> str:
+    return (
+        "➕ <b>Новий ФОП</b>\n"
+        "Введіть назву ФОП (як вам зручно розрізняти профілі, напр. «ФОП Іваненко»)."
+    )
+
+
+def new_profile_key_prompt() -> str:
+    return (
+        "Введіть <b>ключ API Нової Пошти</b> цього ФОП.\n"
+        "Ключ перевіримо в НП і одразу приберемо повідомлення з чату."
+    )
+
+
+def new_profile_sender_name_prompt() -> str:
+    return "Введіть <b>ПІБ контактної особи</b> відправника (як у кабінеті НП)."
+
+
+def new_profile_phone_prompt() -> str:
+    return "Введіть <b>телефон відправника</b> (0XXXXXXXXX або +380XXXXXXXXX)."
+
+
+def new_profile_created_text(profile: SenderProfileView) -> str:
+    suffix = " (основний)" if profile.is_default else ""
+    return f"✅ ФОП «{profile.name}»{suffix} додано і перевірено в НП."
+
+
+def new_profile_key_invalid_text() -> str:
+    return (
+        "❌ Ключ НП недійсний або у відправника не налаштований контрагент. "
+        "Введіть правильний ключ ще раз."
+    )
+
+
+def new_profile_invalid_phone_text() -> str:
+    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+
+
+def new_profile_np_unavailable_text() -> str:
+    return (
+        "⚠️ НП тимчасово недоступна — не вдалося перевірити ключ. "
+        "Надішліть номер телефону ще раз за хвилину."
+    )
 
 
 def sender_profile_text(profile: SenderProfileView) -> str:

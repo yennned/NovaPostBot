@@ -93,15 +93,19 @@ async def _resolve_sender(
     return profile
 
 
-async def resolve_default_sender_id(
-    session: AsyncSession, *, client: User, settings: Settings | None = None
+async def resolve_sender_id(
+    session: AsyncSession,
+    *,
+    client: User,
+    profile_id: uuid.UUID | None = None,
+    settings: Settings | None = None,
 ) -> uuid.UUID:
-    """ID дефолтного ФОП клиента, готового к відправленню — для раннего гейта UI.
+    """ID ФОП клиента (явного или дефолтного), готового к відправленню — гейт UI.
 
     Бросает то же доменное исключение, что и `create_shipment` (NotConfigured /
-    NotValidated / Incomplete / DispatchNotConfigured), чтобы вход в FSM и сабмит
-    вели себя одинаково. Без побочных эффектов и обращений к НП."""
-    profile = await _resolve_sender(session, client, None, settings or get_settings())
+    NotValidated / Incomplete / DispatchNotConfigured), чтобы вход в FSM, выбор ФОП
+    и сабмит вели себя одинаково. Без побочных эффектов и обращений к НП."""
+    profile = await _resolve_sender(session, client, profile_id, settings or get_settings())
     return profile.id
 
 

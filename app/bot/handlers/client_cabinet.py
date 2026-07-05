@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import date
 
@@ -25,8 +26,16 @@ from app.bot.keyboards.client import (
     build_stats_kb,
 )
 from app.bot.screen import edit_stored_screen, remember_screen
-from app.bot.states import ClientCabinetState
+from app.bot.states import ClientCabinetState, SenderProfileCreateState
 from app.bot.texts.client_cabinet import (
+    new_profile_created_text,
+    new_profile_invalid_phone_text,
+    new_profile_key_invalid_text,
+    new_profile_key_prompt,
+    new_profile_name_prompt,
+    new_profile_np_unavailable_text,
+    new_profile_phone_prompt,
+    new_profile_sender_name_prompt,
     product_search_prompt,
     products_text,
     profile_edit_prompt,
@@ -39,13 +48,16 @@ from app.bot.texts.client_cabinet import (
     stats_text,
 )
 from app.bot.types import EffectiveContext
+from app.db.models.enums import OrgType
 from app.novaposhta.client import NovaPoshtaClient
+from app.novaposhta.exceptions import NovaPoshtaError
 from app.services import client_settings, sender_profile
 from app.services.exceptions import (
     InvalidNotificationSetting,
     PermissionDenied,
     PhoneAlreadyTaken,
     SenderProfileIncomplete,
+    SenderProfileKeyInvalid,
     SenderProfileNotFound,
     ShipmentActionForbidden,
     ShipmentNotFound,
@@ -1302,3 +1314,110 @@ async def receive_sender_profile_edit(
             reply_markup=build_sender_profile_kb(profile),
             parse_mode="HTML",
         )
+
+
+# --------------------------------------------- мастер «➕ Додати ФОП» (self-service)
+
+
+@router.callback_query(F.data == "cab:set:padd")
+async def cb_sender_profile_add(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    await state.set_state(SenderProfileCreateState.entering_name)
+    await state.update_data(new_profile={})
+    await callback.message.answer(new_profile_name_prompt(), parse_mode="HTML")
+    await callback.answer()
+
+
+async def _new_profile_data(state: FSMContext) -> dict:
+    return (await state.get_data()).get("new_profile") or {}
+
+
+@router.message(SenderProfileCreateState.entering_name, F.text, ~F.text.startswith("/"))
+async def receive_new_profile_name(message: Message, state: FSMContext) -> None:
+    draft = await _new_profile_data(state)
+    draft["name"] = message.text.strip()
+    if not draft["name"]:
+        await message.answer(new_profile_name_prompt(), parse_mode="HTML")
+        return
+    await state.update_data(new_profile=draft)
+    await state.set_state(SenderProfileCreateState.entering_api_key)
+    await message.answer(new_profile_key_prompt(), parse_mode="HTML")
+
+
+@router.message(SenderProfileCreateState.entering_api_key, F.text, ~F.text.startswith("/"))
+async def receive_new_profile_key(message: Message, state: FSMContext) -> None:
+    draft = await _new_profile_data(state)
+    draft["np_api_key"] = message.text.strip()
+    await state.update_data(new_profile=draft)
+    # Ключ — секрет: убираем сообщение из истории чата (best-effort: нет прав/старое —
+    # не критично).
+    with contextlib.suppress(Exception):
+        await message.delete()
+    await state.set_state(SenderProfileCreateState.entering_sender_full_name)
+    await message.answer(new_profile_sender_name_prompt(), parse_mode="HTML")
+
+
+@router.message(SenderProfileCreateState.entering_sender_full_name, F.text, ~F.text.startswith("/"))
+async def receive_new_profile_sender_name(message: Message, state: FSMContext) -> None:
+    draft = await _new_profile_data(state)
+    draft["sender_full_name"] = message.text.strip()
+    await state.update_data(new_profile=draft)
+    await state.set_state(SenderProfileCreateState.entering_sender_phone)
+    await message.answer(new_profile_phone_prompt(), parse_mode="HTML")
+
+
+@router.message(SenderProfileCreateState.entering_sender_phone, F.text, ~F.text.startswith("/"))
+async def receive_new_profile_phone(
+    message: Message,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient | None,
+) -> None:
+    phone = normalize_phone(message.text or "")
+    if phone is None:
+        await message.answer(new_profile_invalid_phone_text())
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await state.set_state(None)
+        await message.answer("Спочатку авторизуйтесь через /start.")
+        return
+    draft = await _new_profile_data(state)
+    try:
+        profile = await sender_profile.create_profile(
+            db_session,
+            actor=client,
+            client_id=client.id,
+            name=draft.get("name", ""),
+            np_api_key=draft.get("np_api_key", ""),
+            org_type=OrgType.fop,
+            sender_full_name=draft.get("sender_full_name"),
+            sender_phone=phone,
+            np_client=np_client,
+        )
+    except SenderProfileKeyInvalid:
+        # Ключ не прошёл проверку НП — вернёмся на шаг ключа, данные сохранены.
+        await state.set_state(SenderProfileCreateState.entering_api_key)
+        await message.answer(new_profile_key_invalid_text())
+        return
+    except NovaPoshtaError:
+        # НП недоступна (не «ключ невалиден», а сеть/5xx) — остаёмся на шаге
+        # телефона с сохранённым черновиком, клиент повторит отправку позже.
+        await message.answer(new_profile_np_unavailable_text())
+        return
+    except (SenderProfileIncomplete, PermissionDenied) as exc:
+        await state.set_state(None)
+        await message.answer(str(exc))
+        return
+    await state.update_data(new_profile=None)
+    await state.set_state(None)
+    profiles = await sender_profile.list_profiles(db_session, actor=client, client_id=client.id)
+    await message.answer(new_profile_created_text(profile))
+    await message.answer(
+        sender_profiles_text(profiles),
+        reply_markup=build_sender_profiles_kb(profiles),
+        parse_mode="HTML",
+    )
