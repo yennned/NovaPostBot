@@ -342,8 +342,7 @@ async def provision_client_view_books(
     for user_id, label in clients:
         try:
             book = gc.create(f"Склад — {label}")
-            ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)
-            _drop_empty_defaults(book)
+            format_view_book(book)  # оформить «Товари» + лист «📊 Зведення»
         except Exception as exc:  # админ-скрипт: логируем и продолжаем со след. клиентом
             print(f"  ! {label}: не вдалося створити книгу: {exc}")
             continue
@@ -443,8 +442,7 @@ def attach_view_book(gc: gspread.Client, book_id: str) -> str:
             f"SA не має доступу до книги ({exc}). Поділіться таблицею на {sa} як Редактора."
         ) from exc
     try:
-        ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)  # проверяет доступ на запись
-        _drop_empty_defaults(book)  # убрать дефолтную «Лист1»/«Sheet1» у ручной книги
+        format_view_book(book)  # проверяет доступ на запись + оформляет «Товари»/«Зведення»
     except Exception as exc:
         raise SystemExit(
             f"SA не може писати в книгу ({exc}). Дайте {sa} доступ Редактора (не Читача)."
@@ -457,6 +455,150 @@ def attach_view_book(gc: gspread.Client, book_id: str) -> str:
             "Доступ за посиланням → Читач."
         )
     return book.url
+
+
+def format_view_book(book: Any) -> None:
+    """Оформить книгу-зеркало клиента «как основной Склад» (read-only-вариант). Идемпотентно.
+
+    Вкладка «Товари»: тёмная шапка, бэндинг, условное форматирование низкого остатка,
+    автоширина (+ цвет-чипы категорий, если данные уже есть) + формула «Доступно».
+    Плюс лист «📊 Зведення»: живые KPI-формулы и pivot по категориям. Интерактивной
+    боковой панели «Склада» здесь НЕТ — её селекторы недоступны зрителю read-only книги;
+    разрез «за категорією» даёт pivot, «за товаром» — сама таблица.
+    """
+    ensure_locale(book)  # pin uk_UA — обяз. для «;»-формул «Доступно»/сводки
+    ws = ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)  # заголовки A1 + freeze(1)
+    _drop_empty_defaults(book)  # убрать дефолтную «Лист1»/«Sheet1»
+    ws.batch_clear(["A2:G1000"])  # снять старую преамбулу/данные при ре-привязке
+    meta = next(
+        (s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == ws.id),
+        {},
+    )
+    # band_rows: книга при провижне пустая → чередование по щедрому диапазону, иначе
+    # полос не было бы вовсе (клиентский склад — до пары сотен позиций).
+    style_stock_worksheet(book, ws, meta, band_rows=200)  # шапка/бэндинг/CF/автоширина
+    write_available_formula(ws)  # G = Кількість − Резерв (ARRAYFORMULA)
+    build_view_summary(book, ws)  # лист «📊 Зведення»: KPI + pivot по категориям
+
+
+def build_view_summary(book: Any, data_ws: Any) -> None:
+    """Лист «📊 Зведення» книги-зеркала (read-only): живые KPI-формулы + pivot по категориям.
+
+    В отличие от `build_summary` (статические Python-KPI, фикс-диапазон под уже
+    заполненный «Склад») — здесь всё формулами и щедрым диапазоном A1:E1000, т.к. книга
+    при провижне пустая, а строки наполняет рантайм-синк позже. Идемпотентно.
+    """
+    ref = f"'{data_ws.title}'"  # 'Товари'
+    try:
+        ws = book.worksheet(SUMMARY_TITLE)
+    except gspread.WorksheetNotFound:
+        ws = book.add_worksheet(title=SUMMARY_TITLE, rows=200, cols=8)
+    ws.clear()
+    sid = ws.id
+    ws.update(
+        values=[
+            [f"📊 Зведення складу — {data_ws.title}"],
+            [],
+            ["Позицій", f"=COUNTA({ref}!A2:A)"],
+            ["Одиниць", f"=SUM({ref}!D2:D)"],
+            ["Вартість, ₴", f"=SUMPRODUCT({ref}!D2:D;{ref}!E2:E)"],
+        ],
+        range_name="A1",
+        value_input_option=ValueInputOption.user_entered,
+    )
+    meta = next(
+        s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == sid
+    )
+    reqs = _clear_dynamic(meta, sid)
+    reqs.append({"mergeCells": {"range": _grid(sid, 0, 1, 0, 4), "mergeType": "MERGE_ALL"}})
+    reqs.append(
+        {
+            "repeatCell": {
+                "range": _grid(sid, 0, 1, 0, 4),
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": HEADER_BG,
+                        "horizontalAlignment": "CENTER",
+                        "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": 13},
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
+            }
+        }
+    )
+    reqs.append(
+        {
+            "repeatCell": {
+                "range": _grid(sid, 2, 5, 0, 1),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat",
+            }
+        }
+    )
+    reqs.append(
+        {
+            "repeatCell": {
+                "range": _grid(sid, 4, 5, 1, 2),
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 ₴"}
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
+    )
+    reqs.append(
+        {
+            "updateCells": {
+                "start": {"sheetId": sid, "rowIndex": 7, "columnIndex": 0},
+                "fields": "pivotTable",
+                "rows": [
+                    {
+                        "values": [
+                            {
+                                "pivotTable": {
+                                    # Щедрый A1:E1000 — pivot ловит будущие строки без пересборки.
+                                    "source": _grid(data_ws.id, 0, 1000, 0, 5),
+                                    "rows": [
+                                        {
+                                            "sourceColumnOffset": 2,  # Категорія
+                                            "showTotals": True,
+                                            "sortOrder": "ASCENDING",
+                                        }
+                                    ],
+                                    "values": [
+                                        {
+                                            "summarizeFunction": "COUNTA",
+                                            "sourceColumnOffset": 0,
+                                            "name": "Позицій",
+                                        },
+                                        {
+                                            "summarizeFunction": "SUM",
+                                            "sourceColumnOffset": 3,  # Кількість
+                                            "name": "Одиниць",
+                                        },
+                                    ],
+                                    # Прятать пустые строки диапазона → нет группы «(blank)».
+                                    "filterSpecs": [
+                                        {
+                                            "columnOffsetIndex": 2,
+                                            "filterCriteria": {
+                                                "condition": {"type": "NOT_BLANK"},
+                                                "visibleByDefault": True,
+                                            },
+                                        }
+                                    ],
+                                    "valueLayout": "HORIZONTAL",
+                                }
+                            }
+                        ]
+                    }
+                ],
+            }
+        }
+    )
+    book.batch_update({"requests": reqs})
 
 
 def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
@@ -475,16 +617,23 @@ def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
     return reqs
 
 
-def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
+def style_stock_worksheet(
+    book: Any, ws: Any, sheet_meta: dict, *, band_rows: int | None = None
+) -> int:
     """Богатое оформление листа «Склад» клиента. Возвращает число строк данных.
 
     ВАЖНО: на Кількість/Ціна НЕ ставим numberFormat — в книге локаль с запятой,
     «0.00» показал бы «259,00», а gspread.get_all_records прочитал бы это как 25900
     (×100) и сломал цену боту. Только выравнивание + очистка формата (голые числа).
+
+    `band_rows` — для книги-зеркала клиента (наполняется рантаймом позже, при провижне
+    пустая): чередование накладываем на щедрый диапазон строк, а не по факту данных,
+    иначе на пустой книге полос не будет вовсе. Основной «Склад» зовёт без него.
     """
     records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     n = sum(1 for r in records if r.get("Артикул"))  # без «фантом»-строк панели справа
     last = n + 1
+    band_last = (band_rows + 1) if band_rows is not None else last
     sid = ws.id
     ncol = len(STOCK_HEADERS)  # 7: A-E данные + Резерв(F)/Доступно(G)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
@@ -514,12 +663,12 @@ def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
             }
         }
     )
-    if last >= 2:
+    if band_last >= 2:
         reqs.append(
             {
                 "addBanding": {
                     "bandedRange": {
-                        "range": _grid(sid, 0, last, 0, ncol),
+                        "range": _grid(sid, 0, band_last, 0, ncol),
                         "rowProperties": {
                             "headerColor": HEADER_BG,
                             "firstBandColor": _rgb(1, 1, 1),

@@ -7,10 +7,17 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import UserRepository
-from app.services.client_sheet_sync import sync_client_sheets
+from app.services.client_sheet_sync import (
+    _VIEW_HEADERS,
+    ViewRow,
+    _view_data_row,
+    sync_client_sheets,
+)
 from app.sheets.client import SheetsClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,3 +129,42 @@ async def test_view_book_not_created_at_runtime(
     )
 
     assert client.stock_view_book_id is None
+
+
+def _view_row(**over) -> ViewRow:
+    base = {
+        "sku": "SKU-1",
+        "name": "Кава",
+        "category": "Напої",
+        "price": Decimal("125.50"),
+        "stock": 7,
+        "reserved": 2,
+        "available": 5,
+    }
+    return ViewRow(**{**base, **over})
+
+
+def test_view_headers_match_sklad_order():
+    # Порядок = как в основной книге «Склад»: D=Кількість, E=Ціна, F=Резерв, G=Доступно.
+    # От этого зависит переиспользование форматирования/pivot провижна (build_view_summary,
+    # style_stock_worksheet зашиты под этот порядок).
+    assert _VIEW_HEADERS == [
+        "Артикул",
+        "Назва",
+        "Категорія",
+        "Кількість",
+        "Ціна",
+        "Резерв",
+        "Доступно",
+    ]
+
+
+def test_view_data_row_order_and_types():
+    # A–F: Артикул, Назва, Категорія, Кількість, Ціна, Резерв. «Доступно» (G) — формула.
+    assert _view_data_row(_view_row()) == ["SKU-1", "Кава", "Напої", 7, 125.5, 2]
+    # Цена — число (float), не строка: comma-локаль книги иначе исказит "125.50".
+    assert isinstance(_view_data_row(_view_row())[4], float)
+
+
+def test_view_data_row_handles_missing_price_and_category():
+    assert _view_data_row(_view_row(price=None, category=None)) == ["SKU-1", "Кава", "", 7, "", 2]
