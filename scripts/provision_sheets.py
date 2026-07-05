@@ -37,7 +37,7 @@ from app.config import get_settings
 from app.db.base import get_engine, get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
-from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB
+from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB, ViewRow, _view_data_row
 from app.sheets.client import _STOCK_EXPECTED_HEADERS
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
@@ -501,32 +501,41 @@ def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = Non
 
 
 def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list]:
-    """Остатки клиента из основного «Складу» (лист `source_tab`) в порядке «Товари» A–F:
-    Артикул, Назва, Категорія, Кількість, Ціна, Резерв. Нет книги/листа → пусто (не падаем)."""
+    """Остатки клиента из основного «Складу» (лист `source_tab`) → строки «Товари» A–F.
+
+    Порядок колонок — единый источник `_view_data_row` (тот же, что пишет рантайм-синк):
+    строим `ViewRow` из записей «Складу» и прогоняем через него, чтобы контракт A–F жил
+    в одном месте. Нет книги/листа/доступа → пусто (best-effort, не падаем, не маскируем
+    под ошибку доступа к книге-зеркалу — её attach ловит отдельно).
+    """
     stock_id = get_settings().sheets_stock_book_id
     if not stock_id or not source_tab:
         return []
-    # Seed-чтение остатков — best-effort: сбой (нет доступа к «Складу», нет листа, 5xx)
-    # не должен ронять оформление и не должен маскироваться под «нет доступа к книге-
-    # зеркалу» (attach ловит write-ошибки зеркала отдельно). Не смогли — оформим без данных.
     try:
         ws = gc.open_by_key(stock_id).worksheet(source_tab)
         records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     except Exception as exc:
         print(f"  ! остатки з основного «Складу» не прочитані ({exc}) — оформлюю без даних.")
         return []
-    return [
-        [
-            r.get("Артикул", ""),
-            r.get("Назва", ""),
-            r.get("Категорія", ""),
-            r.get("Кількість", ""),
-            r.get("Ціна", ""),
-            r.get("Резерв", "") or 0,
-        ]
-        for r in records
-        if r.get("Артикул")
-    ]
+    rows = []
+    for r in records:
+        if not r.get("Артикул"):
+            continue
+        price = r.get("Ціна", "")
+        rows.append(
+            _view_data_row(
+                ViewRow(
+                    sku=r.get("Артикул", ""),
+                    name=r.get("Назва", ""),
+                    category=r.get("Категорія", "") or None,
+                    price=_to_decimal(price) if price != "" else None,
+                    stock=int(_to_decimal(r.get("Кількість", 0))),
+                    reserved=int(_to_decimal(r.get("Резерв", 0))),
+                    available=0,  # не пишется (G — ARRAYFORMULA); нужен лишь для типа
+                )
+            )
+        )
+    return rows
 
 
 def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
