@@ -307,27 +307,31 @@ def share_readonly(book: Any, emails: list[str]) -> None:
         book.share(None, perm_type="anyone", role="reader", with_link=True)
 
 
-async def clients_without_view_book() -> list[tuple[str, str]]:
-    """Активные клиенты без книги-зеркала → `(user_id, label)`.
+async def clients_without_view_book() -> list[tuple[str, str, str]]:
+    """Активные клиенты без книги-зеркала → `(user_id, label, source_tab)`.
 
-    `label` = `full_name` или `telegram_id` — как `client_label` в `_sync_view_book`.
+    `label` = `full_name`/`telegram_id` (для названия книги); `source_tab` =
+    `stock_sheet_key` (имя вкладки клиента в основном «Складі» для подтяжки остатков).
     """
     sm = get_sessionmaker()
     async with sm() as session:
         rows = (
             await session.execute(
-                select(User.id, User.full_name, User.telegram_id).where(
+                select(User.id, User.full_name, User.telegram_id, User.stock_sheet_key).where(
                     User.role == UserRole.client,
                     User.status == UserStatus.active,
                     User.stock_view_book_id.is_(None),
                 )
             )
         ).all()
-    return [(str(uid), (name or str(tg)).strip()) for uid, name, tg in rows]
+    return [
+        (str(uid), (name or str(tg)).strip(), (ssk or name or str(tg)).strip())
+        for uid, name, tg, ssk in rows
+    ]
 
 
 async def provision_client_view_books(
-    gc: gspread.Client, clients: list[tuple[str, str]], emails: list[str]
+    gc: gspread.Client, clients: list[tuple[str, str, str]], emails: list[str]
 ) -> int:
     """Создать по книге-зеркалу на клиента, записать id в БД, раздать read-only.
 
@@ -340,10 +344,10 @@ async def provision_client_view_books(
     """
     sm = get_sessionmaker()
     created = 0
-    for user_id, label in clients:
+    for user_id, label, source_tab in clients:
         try:
             book = gc.create(f"Склад — {label}")
-            format_view_book(gc, book, label)  # оформить «Товари» как основной «Склад»
+            format_view_book(gc, book, source_tab)  # оформить «Товари» как основной «Склад»
         except Exception as exc:  # админ-скрипт: логируем и продолжаем со след. клиентом
             print(f"  ! {label}: не вдалося створити книгу: {exc}")
             continue
@@ -395,10 +399,12 @@ def _sa_email() -> str | None:
     return data.get("client_email")
 
 
-async def _resolve_client(ref: str) -> tuple[str, str]:
-    """Клиент по `ref` → `(user_id, label)`. Числовой → telegram_id, иначе ILIKE по ПІБ.
+async def _resolve_client(ref: str) -> tuple[str, str, str]:
+    """Клиент по `ref` → `(user_id, label, source_tab)`. Числовой → telegram_id, иначе ILIKE по ПІБ.
 
-    Требует ровно одно совпадение (role=client), иначе `SystemExit` с подсказкой.
+    `source_tab` = имя вкладки клиента в основном «Складі» (persisted `stock_sheet_key`;
+    он может расходиться с текущим `full_name` после смены ПІБ — берём именно его, иначе
+    подтяжка остатков не найдёт лист). Требует ровно одно совпадение, иначе `SystemExit`.
     """
     ref = ref.strip()
     cond = User.telegram_id == int(ref) if ref.isdigit() else User.full_name.ilike(f"%{ref}%")
@@ -406,7 +412,7 @@ async def _resolve_client(ref: str) -> tuple[str, str]:
     async with sm() as session:
         rows = (
             await session.execute(
-                select(User.id, User.full_name, User.telegram_id).where(
+                select(User.id, User.full_name, User.telegram_id, User.stock_sheet_key).where(
                     User.role == UserRole.client, cond
                 )
             )
@@ -414,10 +420,10 @@ async def _resolve_client(ref: str) -> tuple[str, str]:
     if not rows:
         raise SystemExit(f"Клієнта за '{ref}' не знайдено (role=client).")
     if len(rows) > 1:
-        names = ", ".join(f"{n or '—'} ({t})" for _, n, t in rows)
+        names = ", ".join(f"{n or '—'} ({t})" for _, n, t, _ in rows)
         raise SystemExit(f"За '{ref}' кілька клієнтів: {names}. Уточніть telegram_id.")
-    uid, name, tg = rows[0]
-    return str(uid), (name or str(tg))
+    uid, name, tg, ssk = rows[0]
+    return str(uid), (name or str(tg)), (ssk or name or str(tg))
 
 
 async def _save_view_book_id(user_id: str, book_id: str) -> None:
@@ -500,11 +506,15 @@ def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list]:
     stock_id = get_settings().sheets_stock_book_id
     if not stock_id or not source_tab:
         return []
+    # Seed-чтение остатков — best-effort: сбой (нет доступа к «Складу», нет листа, 5xx)
+    # не должен ронять оформление и не должен маскироваться под «нет доступа к книге-
+    # зеркалу» (attach ловит write-ошибки зеркала отдельно). Не смогли — оформим без данных.
     try:
         ws = gc.open_by_key(stock_id).worksheet(source_tab)
-    except gspread.WorksheetNotFound:
+        records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
+    except Exception as exc:
+        print(f"  ! остатки з основного «Складу» не прочитані ({exc}) — оформлюю без даних.")
         return []
-    records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     return [
         [
             r.get("Артикул", ""),
@@ -1124,9 +1134,8 @@ def main() -> None:
         if not args.attach_for:
             raise SystemExit("--attach-book потребує --for <telegram_id|фрагмент ПІБ>")
         book_id = _extract_book_id(args.attach_book)
-        user_id, label = _run_db(_resolve_client(args.attach_for))
-        # label = full_name = имя листа клиента в основном «Складі» (stock_sheet_key).
-        url = attach_view_book(gc, book_id, label)
+        user_id, label, source_tab = _run_db(_resolve_client(args.attach_for))
+        url = attach_view_book(gc, book_id, source_tab)
         _run_db(_save_view_book_id(user_id, book_id))
         print(f"Привʼязано: {label} → {url}\nstock_view_book_id = {book_id}")
         return

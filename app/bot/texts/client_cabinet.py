@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -49,7 +50,11 @@ def products_text(page: InventoryPage, *, sheet_url: str | None = None) -> str:
     if sheet_url:
         # Ссылка на персональную read-only Google-таблицу склада — в тексте под
         # заголовком, чтобы клиент мог свериться (web-preview у сообщения отключён).
-        parts.append(f'🔗 <a href="{sheet_url}">Моя таблиця складу (перегляд)</a>')
+        # Экранируем URL: book_id мог прийти из сырого ввода оператора (--attach-book),
+        # неэкранированные `"`/`<`/`&` иначе ломают HTML → Telegram 400 на всём экране.
+        parts.append(
+            f'🔗 <a href="{html.escape(sheet_url, quote=True)}">Моя таблиця складу (перегляд)</a>'
+        )
     if page.categories:
         parts.append("Категорії: " + ", ".join(page.categories[:5]))
     if not page.items:

@@ -244,10 +244,11 @@ def _sync_view_book(gc, *, stock_view_book_id: str | None, rows: list[ViewRow]) 
     try:
         ws = book.worksheet(_VIEW_TAB)
     except WorksheetNotFound:
-        # Непровиженная книга (нет оформленной вкладки) — degraded-путь: заведём голую
-        # «Товари» с заголовками. Оформление/pivot появятся при (ре-)провижне.
-        ws = book.add_worksheet(title=_VIEW_TAB, rows=1000, cols=10)
-        ws.update(values=[_VIEW_HEADERS], range_name="A1")
+        # Нет вкладки «Товари» → книга не была провижена (провижн всегда создаёт вкладку
+        # + оформление + формулу «Доступно»). Не «дооформляем» наполовину — иначе получим
+        # книгу без формулы/стилей и замаскируем пробел провижна. Логируем и пропускаем.
+        logger.warning("view_book_not_provisioned", stock_view_book_id=stock_view_book_id)
+        return None
     # Пишем ТОЛЬКО данные (A2:F): заголовки/оформление/бэндинг/CF/формула «Доступно»(G)
     # и лист «📊 Зведення» ставит провижн один раз; `values:clear` их не трогает.
     # Цену — числом (RAW), иначе comma-локаль книги исказит "12.34".

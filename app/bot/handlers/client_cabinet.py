@@ -152,9 +152,13 @@ async def _show_inventory(
     )
     await _remember_if_possible(state, target)
     # Синк-на-входе: зеркалим текущий склад в персональную Google-книгу, чтобы за
-    # ссылкой были свежие данные. Экран уже показан → задержка записи не видна;
-    # сбой Google глотается в лог (best_effort) и не роняет экран.
-    await best_effort_sync(session, client=client, log_key="inventory_open_sheet_sync_failed")
+    # ссылкой были свежие данные. Экран уже показан → задержка записи не видна; сбой
+    # Google глотается в лог (best_effort) и не роняет экран. Только когда клиент
+    # открывает СВОЙ склад: под импперсонизацией owner/dev (`/as client`) просмотр чужого
+    # склада не должен писать в его Google-таблицы и мутировать его строку в БД.
+    actor = context.actor_user
+    if actor is not None and client.id == actor.id:
+        await best_effort_sync(session, client=client, log_key="inventory_open_sheet_sync_failed")
 
 
 async def _edit_inventory(

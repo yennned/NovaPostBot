@@ -74,7 +74,7 @@
   онбординге. Добавлен хелпер `provision_sheets.py --attach-book <url|id> --for <ref>`:
   проверяет доступ SA (open_by_key + ensure «Товари»), раздаёт link-viewer, пишет
   `stock_view_book_id`. `_extract_book_id`/`_sa_email`/`_resolve_client`. SA-email для
-  шаринга: `np-sheets@numeric-datum-500315-t2.iam.gserviceaccount.com`.
+  шаринга берётся из `GOOGLE_SA_JSON` (`client_email`) — печатается хелпером `_sa_email()`.
 - **Дальше:** владелец создаёт тест-книгу + шарит на SA → `--attach-book` → E2E #3.
 - **Открытые вопросы:** OAuth-as-user/Shared Drive — только если клиентов станет много.
 
