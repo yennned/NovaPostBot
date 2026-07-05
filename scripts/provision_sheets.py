@@ -838,7 +838,12 @@ _INT_FMT = "#,##0"
 def _col_width_req(sid: int, idx: int, px: int, span: int = 1) -> dict:
     return {
         "updateDimensionProperties": {
-            "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": idx, "endIndex": idx + span},
+            "range": {
+                "sheetId": sid,
+                "dimension": "COLUMNS",
+                "startIndex": idx,
+                "endIndex": idx + span,
+            },
             "properties": {"pixelSize": px},
             "fields": "pixelSize",
         }
@@ -864,7 +869,11 @@ def _banner_req(sid: int, r0: int, c0: int, c1: int, color: dict, font_size: int
                     "backgroundColor": color,
                     "horizontalAlignment": "CENTER",
                     "verticalAlignment": "MIDDLE",
-                    "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": font_size},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": HEADER_FG,
+                        "fontSize": font_size,
+                    },
                 }
             },
             "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
@@ -1177,7 +1186,13 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
                 {"setDataValidation": {"range": wipe}},  # без rule → снимает дропдауны
                 # сброс форматирования (фон/шрифт/рамки/числоформат) — иначе от прежней
                 # более длинной панели остаются пустые, но крашеные ячейки ниже «Разом».
-                {"repeatCell": {"range": wipe, "cell": {"userEnteredFormat": {}}, "fields": "userEnteredFormat"}},
+                {
+                    "repeatCell": {
+                        "range": wipe,
+                        "cell": {"userEnteredFormat": {}},
+                        "fields": "userEnteredFormat",
+                    }
+                },
             ]
         }
     )
@@ -1191,7 +1206,9 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
         return {
             "repeatCell": {
                 "range": _grid(sid, r0, r1, lbl, end4),
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}},
+                "cell": {
+                    "userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}
+                },
                 "fields": "userEnteredFormat(textFormat,backgroundColor)",
             }
         }
@@ -1214,7 +1231,12 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
         {
             "repeatCell": {
                 "range": _grid(sid, 1, 4, lbl, val),
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "horizontalAlignment": "LEFT"}},
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "LEFT",
+                    }
+                },
                 "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
             }
         },
