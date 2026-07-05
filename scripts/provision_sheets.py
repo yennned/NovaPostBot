@@ -1115,11 +1115,14 @@ def readonly_summary_cells(cats: list[str]) -> list[list[str]]:
     ]
     for cat in cats:
         c = cat.replace('"', '""')  # экранируем кавычки для литерала в формуле
+        # Все три метрики — через SUMPRODUCT (точное сравнение `=`). НЕ COUNTIF/SUMIF:
+        # их критерий трактует `* ? ~` как шаблон → для категории вида «USB*C» счётчик
+        # разошёлся бы с точной вартістю и строка не билась бы с «Разом».
         rows.append(
             [
                 cat,
-                f'=COUNTIF(C2:C;"{c}")',
-                f'=SUMIF(C2:C;"{c}";D2:D)',
+                f'=SUMPRODUCT((C2:C="{c}")*(A2:A<>""))',
+                f'=SUMPRODUCT((C2:C="{c}")*D2:D)',
                 f'=SUMPRODUCT((C2:C="{c}")*D2:D*E2:E)',
             ]
         )
@@ -1155,11 +1158,12 @@ def write_readonly_summary(book: Any, ws: Any) -> None:
     # Идемпотентность: полностью зачистить область панели ПЕРЕД записью — иначе при
     # ре-привязке остаётся «хвост» от прежней (более длинной/интерактивной) панели:
     # старые значения ниже нового «Разом», дропдауны-валидации и merge. Зачищаем все
-    # колонки от I до конца сетки (данные листа — только A–G, панель их не трогает);
-    # правую границу берём по факту (`col_count`), чтобы не выйти за пределы сетки.
-    right = ws.col_count
-    wipe = _grid(sid, 0, 1000, lbl, right)
-    ws.batch_clear([f"{_col_a1(lbl)}1:{_col_a1(right - 1)}1000"])  # значения
+    # колонки от I до конца сетки (данные листа — только A–G, панель их не трогает).
+    # Границы берём по факту (`col_count`/`row_count`): и не выйти за пределы сетки
+    # (иначе «exceeds grid limits» на листе <1000 строк), и накрыть «хвост» при росте.
+    right, bottom = ws.col_count, ws.row_count
+    wipe = _grid(sid, 0, bottom, lbl, right)
+    ws.batch_clear([f"{_col_a1(lbl)}1:{_col_a1(right - 1)}{bottom}"])  # значения
     book.batch_update(
         {
             "requests": [

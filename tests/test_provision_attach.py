@@ -55,8 +55,8 @@ def test_readonly_summary_row_per_category_with_totals():
     assert rows[6] == ["Категорія", "Позицій", "Одиниць", "Вартість, ₴"]
     assert rows[7] == [
         "Кава",
-        '=COUNTIF(C2:C;"Кава")',
-        '=SUMIF(C2:C;"Кава";D2:D)',
+        '=SUMPRODUCT((C2:C="Кава")*(A2:A<>""))',
+        '=SUMPRODUCT((C2:C="Кава")*D2:D)',
         '=SUMPRODUCT((C2:C="Кава")*D2:D*E2:E)',
     ]
     assert rows[8][0] == "Чай"
@@ -73,7 +73,15 @@ def test_readonly_summary_empty_categories_still_valid():
 
 def test_readonly_summary_escapes_quotes_in_category_literal():
     rows = readonly_summary_cells(['Кабель "USB"'])
-    assert rows[7][1] == '=COUNTIF(C2:C;"Кабель ""USB""")'
+    assert rows[7][1] == '=SUMPRODUCT((C2:C="Кабель ""USB""")*(A2:A<>""))'
+
+
+def test_readonly_summary_category_metrics_exact_match_not_wildcard():
+    # Категория с '*' не должна трактоваться как шаблон (COUNTIF/SUMIF трактуют) —
+    # все метрики через SUMPRODUCT с точным '='.
+    rows = readonly_summary_cells(["USB*C"])
+    assert "COUNTIF" not in rows[7][1] and "SUMIF" not in rows[7][2]
+    assert rows[7][1] == '=SUMPRODUCT((C2:C="USB*C")*(A2:A<>""))'
 
 
 def test_readonly_summary_panel_has_no_dropdowns():
