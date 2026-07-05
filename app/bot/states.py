@@ -20,6 +20,15 @@ class ClientCabinetState(StatesGroup):
     waiting_for_sender_profile_edit = State()
 
 
+class SenderProfileCreateState(StatesGroup):
+    """Мастер «➕ Додати ФОП» (клиент вводит свой ключ НП). Данные — в FSM-data."""
+
+    entering_name = State()  # название ФОП (метка для клиента)
+    entering_api_key = State()  # ключ НП (валидируется в НП; сообщение удаляем)
+    entering_sender_full_name = State()  # ПІБ/контакт отправителя
+    entering_sender_phone = State()  # телефон отправителя (обязателен для НП)
+
+
 class ManagerShipmentState(StatesGroup):
     waiting_for_search = State()
     inspecting_return = State()
@@ -59,6 +68,7 @@ class CreateTtnState(StatesGroup):
     добавят PR 9b–9d.
     """
 
+    picking_sender = State()  # выбор ФОП-отправителя (если у клиента их >1)
     picking_items = State()  # просмотр товаров/набор корзины (callbacks)
     entering_item_search = State()  # текстовый поиск товара в рамках создания ТТН
     entering_qty = State()  # текстовый ввод количества для выбранной позиции

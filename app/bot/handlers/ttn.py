@@ -23,6 +23,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.types.base import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards.client import build_sender_pick_kb
 from app.bot.keyboards.ttn import (
     DEFAULT_SIZE_TOKEN,
     SIZE_DEFAULT_WEIGHT,
@@ -51,7 +52,7 @@ from app.bot.types import EffectiveContext
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
-from app.services import address, pricing
+from app.services import address, pricing, sender_profile
 from app.services.exceptions import (
     ClientServiceError,
     InsufficientStock,
@@ -63,7 +64,7 @@ from app.services.exceptions import (
     TtnCreationFailed,
 )
 from app.services.inventory import InventoryItem, list_inventory
-from app.services.shipment import create_shipment, resolve_default_sender_id
+from app.services.shipment import create_shipment, resolve_sender_id
 from app.utils.phone import normalize_phone as _normalize_phone
 
 router = Router(name="create_ttn")
@@ -126,26 +127,50 @@ async def start_create_ttn(
     *,
     edit: bool = False,
 ) -> None:
-    """Вход в поток: ранний резолв ФОП (configured/validated), затем кошик."""
+    """Вход в поток. Если у клиента >1 ФОП — сначала выбор отправителя, иначе кошик."""
     client = _effective_client(effective_context)
     if client is None:
         await message.answer("Спочатку авторизуйтесь через /start.")
         return
-    # Гейт ФОП = предусловие create_shipment (один источник правды в shipment.py):
-    # не пускаем в happy-path профиль, на котором НП-сабмит заведомо упадёт.
+    profiles = await sender_profile.list_profiles(db_session, actor=client, client_id=client.id)
+    if len(profiles) > 1:
+        await state.clear()
+        await state.set_state(CreateTtnState.picking_sender)
+        kb = build_sender_pick_kb(profiles)
+        if edit:
+            await message.edit_text(texts.pick_sender_text(), reply_markup=kb, parse_mode="HTML")
+            if isinstance(message, Message):
+                await remember_screen(state, message)
+        else:
+            await message.answer(texts.pick_sender_text(), reply_markup=kb, parse_mode="HTML")
+        return
+    # 0/1 ФОП → прежний строгий гейт по дефолтному (единственному) профилю.
+    await _resolve_sender_and_begin(message, state, client, db_session, profile_id=None, edit=edit)
+
+
+async def _resolve_sender_and_begin(
+    target: Message | TelegramObject,
+    state: FSMContext,
+    client,
+    session: AsyncSession,
+    *,
+    profile_id: uuid.UUID | None,
+    edit: bool,
+) -> None:
+    """Гейт ФОП (предусловие create_shipment) → вход в кошик выбранным профилем."""
     try:
-        sender_profile_id = await resolve_default_sender_id(db_session, client=client)
+        sender_profile_id = await resolve_sender_id(session, client=client, profile_id=profile_id)
     except SenderProfileNotConfigured:
-        await message.answer(texts.no_profile_text(), parse_mode="HTML")
+        await target.answer(texts.no_profile_text(), parse_mode="HTML")
         return
     except SenderProfileNotValidated:
-        await message.answer(texts.not_validated_text(), parse_mode="HTML")
+        await target.answer(texts.not_validated_text(), parse_mode="HTML")
         return
     except SenderProfileIncomplete:
-        await message.answer(texts.sender_incomplete_text(), parse_mode="HTML")
+        await target.answer(texts.sender_incomplete_text(), parse_mode="HTML")
         return
     except SenderDispatchNotConfigured:
-        await message.answer(texts.sender_dispatch_not_configured_text(), parse_mode="HTML")
+        await target.answer(texts.sender_dispatch_not_configured_text(), parse_mode="HTML")
         return
 
     await state.clear()
@@ -159,9 +184,34 @@ async def start_create_ttn(
         nonce=uuid.uuid4().hex,
     )
     try:
-        await _show_picker(message, db_session, client, state, offset=0, edit=edit)
+        await _show_picker(target, session, client, state, offset=0, edit=edit)
     except PermissionDenied as exc:
-        await message.answer(str(exc))
+        await target.answer(str(exc))
+
+
+@router.callback_query(CreateTtnState.picking_sender, F.data.startswith("ttn:sender:"))
+async def cb_pick_sender(
+    callback: CallbackQuery,
+    state: FSMContext,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        profile_id = uuid.UUID(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await _resolve_sender_and_begin(
+        callback.message, state, client, db_session, profile_id=profile_id, edit=True
+    )
+    await callback.answer()
 
 
 # --------------------------------------------------------------------- рендеры

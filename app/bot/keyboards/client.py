@@ -230,7 +230,23 @@ def build_sender_profiles_kb(profiles: list[SenderProfileView]) -> InlineKeyboar
         ]
         for profile in profiles
     ]
+    rows.append([InlineKeyboardButton(text="➕ Додати ФОП", callback_data="cab:set:padd")])
     rows.append([InlineKeyboardButton(text="◀ До налаштувань", callback_data="cab:set:back")])
+    rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_sender_pick_kb(profiles: list[SenderProfileView]) -> InlineKeyboardMarkup:
+    """Выбор ФОП-отправителя на входе в создание ТТН (когда профилей > 1)."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=("⭐ " if profile.is_default else "") + profile.name,
+                callback_data=f"ttn:sender:{profile.id}",
+            )
+        ]
+        for profile in profiles
+    ]
     rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
