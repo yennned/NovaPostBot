@@ -101,3 +101,14 @@ async def test_inventory_missing_sheet_degrades_to_empty(db_session: AsyncSessio
     assert page.total == 0
     assert page.items == []
     assert page.categories == []
+
+
+def test_stock_view_book_url_none_until_provisioned():
+    from types import SimpleNamespace
+
+    client = SimpleNamespace(stock_view_book_id=None)
+    assert inventory.stock_view_book_url(client) is None
+    client = SimpleNamespace(stock_view_book_id="BOOK123")
+    assert inventory.stock_view_book_url(client) == (
+        "https://docs.google.com/spreadsheets/d/BOOK123"
+    )

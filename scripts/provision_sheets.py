@@ -25,14 +25,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import gspread
 from app.config import get_settings
-from app.db.base import get_sessionmaker
+from app.db.base import get_engine, get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
+from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB
 from app.sheets.client import _STOCK_EXPECTED_HEADERS
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
@@ -282,6 +284,89 @@ def setup_intake_validation(book: Any, ws: Any) -> None:
 def share(book: Any, emails: list[str]) -> None:
     for email in emails:
         book.share(email, perm_type="user", role="writer", notify=False)
+
+
+# --- Персональные книги-зеркала клиента (read-only) --------------------------
+
+# Вкладку/заголовки берём из client_sheet_sync (единый источник) — их наполняет
+# рантайм `_sync_view_book`, провижн лишь создаёт книгу + вкладку и раздаёт доступ.
+
+
+def share_readonly(book: Any, emails: list[str]) -> None:
+    """Дать клиенту read-only доступ. Без email — «будь-хто з посиланням» (viewer).
+
+    `with_link=True` — доступ только по ссылке (allowFileDiscovery=false), книга не
+    индексируется поиском; ссылку клиенту отдаёт только бот (кнопка в «📦 Товари»).
+    Книга персональная — чужой склад по ней не откроется.
+    """
+    if emails:
+        for email in emails:
+            book.share(email, perm_type="user", role="reader", notify=False)
+    else:
+        book.share(None, perm_type="anyone", role="reader", with_link=True)
+
+
+async def clients_without_view_book() -> list[tuple[str, str]]:
+    """Активные клиенты без книги-зеркала → `(user_id, label)`.
+
+    `label` = `full_name` или `telegram_id` — как `client_label` в `_sync_view_book`.
+    """
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = (
+            await session.execute(
+                select(User.id, User.full_name, User.telegram_id).where(
+                    User.role == UserRole.client,
+                    User.status == UserStatus.active,
+                    User.stock_view_book_id.is_(None),
+                )
+            )
+        ).all()
+    return [(str(uid), (name or str(tg)).strip()) for uid, name, tg in rows]
+
+
+async def provision_client_view_books(
+    gc: gspread.Client, clients: list[tuple[str, str]], emails: list[str]
+) -> int:
+    """Создать по книге-зеркалу на клиента, записать id в БД, раздать read-only.
+
+    Порядок: создать книгу → записать `stock_view_book_id` (свой короткий сеанс,
+    БД-соединение не висит на медленных вызовах Drive) → только потом шаринг. Так ни
+    сбой шаринга, ни сбой на другом клиенте не оставляют созданную книгу без записи в
+    БД, и повторный прогон не плодит дубли-сироты. Если шаринг упал — книга уже
+    отслежена, её нужно расшарить вручную (логируется). Возвращает число полностью
+    успешных (создана + записана + расшарена).
+    """
+    sm = get_sessionmaker()
+    created = 0
+    for user_id, label in clients:
+        try:
+            book = gc.create(f"Склад — {label}")
+            ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)
+            _drop_empty_defaults(book)
+        except Exception as exc:  # админ-скрипт: логируем и продолжаем со след. клиентом
+            print(f"  ! {label}: не вдалося створити книгу: {exc}")
+            continue
+        # book_id фиксируем в БД СРАЗУ после создания — до шаринга: даже если шаринг
+        # упадёт, книга «отслежена» и повторный прогон не создаст дубль-сироту.
+        async with sm() as session:
+            user = await session.get(User, uuid.UUID(user_id))
+            if user is None:
+                print(f"  ! {label}: клієнта вже нема в БД — книга {book.url} осиротіла")
+                continue
+            user.stock_view_book_id = book.id
+            await session.commit()
+        try:
+            share_readonly(book, emails)
+        except Exception as exc:
+            print(
+                f"  ! {label}: книга {book.url} створена й записана, але шаринг не вдався "
+                f"({exc}) — поділіться вручну (read-only)."
+            )
+            continue
+        created += 1
+        print(f"  • {label}: {book.url}")
+    return created
 
 
 def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
@@ -829,15 +914,37 @@ def ensure_locale(book: Any, locale: str = "uk_UA") -> None:
     )
 
 
+def _run_db(coro):
+    """`asyncio.run` + dispose кэшированного движка в том же цикле.
+
+    Движок SQLAlchemy кэшируется на уровне модуля, а asyncpg-соединения привязаны к
+    циклу событий. Без dispose следующий `asyncio.run` получил бы протухшее
+    loop-bound соединение из пула → «RuntimeError: Event loop is closed».
+    """
+
+    async def _wrap():
+        try:
+            return await coro
+        finally:
+            await get_engine().dispose()
+
+    return asyncio.run(_wrap())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--share", default="", help="email(ы) через запятую — дать доступ writer")
     parser.add_argument("--clients", default="", help="доп. имена листов (тестовые), через запятую")
     parser.add_argument("--dry-run", action="store_true", help="только показать план, без записи")
+    parser.add_argument(
+        "--client-books",
+        action="store_true",
+        help="создать персональные read-only книги-зеркала для клиентов без stock_view_book_id",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
-    db_tabs = asyncio.run(active_client_tabs())
+    db_tabs = _run_db(active_client_tabs())
     extra = [c.strip() for c in args.clients.split(",") if c.strip()]
     # Уникальные, с сохранением порядка: клиенты из БД + тестовые из флага.
     tabs: list[str] = list(dict.fromkeys(db_tabs + extra))
@@ -850,6 +957,16 @@ def main() -> None:
         return
 
     gc = authorize()
+
+    # --- Персональные книги-зеркала клиентов (read-only) ---
+    if args.client_books:
+        pending = _run_db(clients_without_view_book())
+        print(f"\nКниги-зеркала для клиентов без stock_view_book_id: {len(pending)}")
+        if pending:
+            created = _run_db(provision_client_view_books(gc, pending, emails))
+            print(f"stock_view_book_id записан для {created} з {len(pending)} клиентів.")
+        # Наполнение строк «Товари» делает рантайм-синк при следующей операции клиента.
+        return
 
     # --- «Склад» ---
     stock, _ = open_or_create(gc, settings.sheets_stock_book_id, STOCK_TITLE)

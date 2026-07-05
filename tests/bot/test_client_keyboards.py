@@ -123,3 +123,16 @@ def test_inventory_reset_button_only_with_active_filter():
         "cab:pclear" in cb
         for cb in _all_callbacks(build_inventory_kb(_inventory_page(), active_category="Одяг"))
     )
+
+
+def test_inventory_shows_sheet_link_only_when_url_present():
+    # Без книги-зеркала ссылки нет.
+    no_link = build_inventory_kb(_inventory_page())
+    urls = [b.url for row in no_link.inline_keyboard for b in row if b.url]
+    assert urls == []
+    # С url — появляется кнопка-ссылка.
+    with_link = build_inventory_kb(
+        _inventory_page(), sheet_url="https://docs.google.com/spreadsheets/d/BOOK"
+    )
+    urls = [b.url for row in with_link.inline_keyboard for b in row if b.url]
+    assert urls == ["https://docs.google.com/spreadsheets/d/BOOK"]

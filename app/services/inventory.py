@@ -48,6 +48,16 @@ def stock_sheet_key(client: User) -> str:
     return client.stock_sheet_key or client.full_name or str(client.telegram_id)
 
 
+def stock_view_book_url(client: User) -> str | None:
+    """Ссылка на персональную read-only Google-таблицу склада клиента.
+
+    `None`, пока книга-зеркало не заведена провижином (`users.stock_view_book_id`).
+    """
+    if not client.stock_view_book_id:
+        return None
+    return f"https://docs.google.com/spreadsheets/d/{client.stock_view_book_id}"
+
+
 def _build_items(rows: list[StockRow], reserved: dict[str, int]) -> list[InventoryItem]:
     items: list[InventoryItem] = []
     for row in rows:

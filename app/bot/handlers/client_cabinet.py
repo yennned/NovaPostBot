@@ -73,7 +73,7 @@ from app.services.exceptions import (
     ShipmentNotFound,
     TtnCancelFailed,
 )
-from app.services.inventory import list_inventory
+from app.services.inventory import list_inventory, stock_view_book_url
 from app.services.shipment import cancel_shipment
 from app.services.shipments import get_shipment_card, list_shipments
 from app.services.stats import get_client_stats
@@ -145,7 +145,12 @@ async def _show_inventory(
     await state.update_data(product_categories=page.categories)
     await target.answer(
         products_text(page),
-        reply_markup=build_inventory_kb(page, active_category=category, query=query),
+        reply_markup=build_inventory_kb(
+            page,
+            active_category=category,
+            query=query,
+            sheet_url=stock_view_book_url(client),
+        ),
         parse_mode="HTML",
     )
     await _remember_if_possible(state, target)
@@ -174,7 +179,12 @@ async def _edit_inventory(
     await state.update_data(product_categories=page.categories)
     await message.edit_text(
         products_text(page),
-        reply_markup=build_inventory_kb(page, active_category=category, query=query),
+        reply_markup=build_inventory_kb(
+            page,
+            active_category=category,
+            query=query,
+            sheet_url=stock_view_book_url(client),
+        ),
         parse_mode="HTML",
     )
     await remember_screen(state, message)
@@ -299,7 +309,12 @@ async def _edit_inventory_screen(
         bot,
         state,
         text=products_text(page),
-        reply_markup=build_inventory_kb(page, active_category=category, query=query),
+        reply_markup=build_inventory_kb(
+            page,
+            active_category=category,
+            query=query,
+            sheet_url=stock_view_book_url(client),
+        ),
         parse_mode="HTML",
     )
 
