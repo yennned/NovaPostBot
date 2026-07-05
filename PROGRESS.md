@@ -15,6 +15,21 @@
 
 ---
 
+## 2026-07-05 · fix/alex-reset-button · кнопка «🧹 Скинути» (QA #7)
+- **Зачем:** по QA-проходу владельца кнопка «Скинути» в кабинете клиента казалась
+  сломанной: рисовалась всегда, без активного фильтра сброс = no-op-редактирование
+  → Telegram «message is not modified» → ошибка глотается, экран не меняется.
+- **Сделано:** `build_shipments_kb` и `build_inventory_kb`
+  ([app/bot/keyboards/client.py](app/bot/keyboards/client.py)) показывают «🧹 Скинути`
+  только при активном фильтре (поиск; для товаров — поиск ИЛИ категория) — как уже
+  сделано в менеджерской очереди. Проброшен `query` из хендлеров
+  ([client_cabinet.py](app/bot/handlers/client_cabinet.py), 6 call-site). Тесты
+  видимости кнопки — [tests/bot/test_client_keyboards.py](tests/bot/test_client_keyboards.py).
+- **Дальше:** WS-2 (#1) — добавление менеджера по телефону/@нику.
+- **Открытые вопросы:** нет.
+
+---
+
 ## 2026-07-05 · feat/alex-coderabbit-cli · доки CodeRabbit CLI + autofix
 - **Зачем:** закрепить локальный уровень ревью «до пуша». Кроме CodeRabbit App на
   PR добавлен **CodeRabbit CLI** (`coderabbit`/`cr`, авторизован) — ревью diff в

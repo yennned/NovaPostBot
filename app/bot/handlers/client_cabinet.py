@@ -123,7 +123,7 @@ async def _show_inventory(
     await state.update_data(product_categories=page.categories)
     await target.answer(
         products_text(page),
-        reply_markup=build_inventory_kb(page, active_category=category),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
     )
     await _remember_if_possible(state, target)
@@ -152,7 +152,7 @@ async def _edit_inventory(
     await state.update_data(product_categories=page.categories)
     await message.edit_text(
         products_text(page),
-        reply_markup=build_inventory_kb(page, active_category=category),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
     )
     await remember_screen(state, message)
@@ -183,7 +183,7 @@ async def _show_shipments(
     await state.update_data(shipment_bucket=bucket)
     await target.answer(
         shipments_text(page, bucket),
-        reply_markup=build_shipments_kb(page, bucket),
+        reply_markup=build_shipments_kb(page, bucket, query=query),
         parse_mode="HTML",
     )
     await _remember_if_possible(state, target)
@@ -213,7 +213,7 @@ async def _edit_shipments(
     await state.update_data(shipment_bucket=bucket)
     await message.edit_text(
         shipments_text(page, bucket),
-        reply_markup=build_shipments_kb(page, bucket),
+        reply_markup=build_shipments_kb(page, bucket, query=query),
         parse_mode="HTML",
     )
     await remember_screen(state, message)
@@ -277,7 +277,7 @@ async def _edit_inventory_screen(
         bot,
         state,
         text=products_text(page),
-        reply_markup=build_inventory_kb(page, active_category=category),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
     )
 
@@ -308,7 +308,7 @@ async def _edit_shipments_screen(
         bot,
         state,
         text=shipments_text(page, bucket),
-        reply_markup=build_shipments_kb(page, bucket),
+        reply_markup=build_shipments_kb(page, bucket, query=query),
         parse_mode="HTML",
     )
 

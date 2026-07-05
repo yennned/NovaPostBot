@@ -56,14 +56,15 @@ def _nav_row(
 
 
 def build_inventory_kb(
-    page: InventoryPage, *, active_category: str | None = None
+    page: InventoryPage, *, active_category: str | None = None, query: str | None = None
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:psearch"),
-            InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:pclear"),
-        ]
-    ]
+    # «🧹 Скинути» показываем только при активном фильтре (поиск или категория) —
+    # иначе сброс был бы no-op-редактированием (Telegram «message is not modified»)
+    # и кнопка казалась бы сломанной.
+    search_row = [InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:psearch")]
+    if query or active_category:
+        search_row.append(InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:pclear"))
+    rows: list[list[InlineKeyboardButton]] = [search_row]
     rows.extend(category_chips(page.categories, prefix="cab:pcat", active=active_category))
     for item in page.items:
         price = f"{item.price:.2f} ₴" if item.price is not None else "—"
@@ -84,17 +85,24 @@ def build_inventory_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_shipments_kb(page: ShipmentPage, bucket: str) -> InlineKeyboardMarkup:
+def build_shipments_kb(
+    page: ShipmentPage, bucket: str, *, query: str | None = None
+) -> InlineKeyboardMarkup:
+    # «🧹 Скинути» показываем только при активном поиске — без него сброс был бы
+    # no-op-редактированием (Telegram «message is not modified») → кнопка казалась
+    # бы сломанной. Статус-фильтр — это вкладки-бакеты, «Скинути» их не трогает.
+    search_row = [InlineKeyboardButton(text="🔎 Пошук", callback_data=f"cab:ssearch:{bucket}")]
+    if query:
+        search_row.append(
+            InlineKeyboardButton(text="🧹 Скинути", callback_data=f"cab:sclear:{bucket}")
+        )
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="Створені", callback_data="cab:shipments:created:0"),
             InlineKeyboardButton(text="Підтверджені", callback_data="cab:shipments:confirmed:0"),
             InlineKeyboardButton(text="Повернення", callback_data="cab:shipments:returns:0"),
         ],
-        [
-            InlineKeyboardButton(text="🔎 Пошук", callback_data=f"cab:ssearch:{bucket}"),
-            InlineKeyboardButton(text="🧹 Скинути", callback_data=f"cab:sclear:{bucket}"),
-        ],
+        search_row,
     ]
     for item in page.items:
         label = item.ttn_number or item.recipient_name
