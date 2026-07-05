@@ -44,8 +44,12 @@ def _fmt_dt(value: datetime) -> str:
     return fmt_dt(value, "%d.%m.%Y %H:%M")
 
 
-def products_text(page: InventoryPage) -> str:
+def products_text(page: InventoryPage, *, sheet_url: str | None = None) -> str:
     parts = [f"📦 <b>Товари</b> · {page.total} позицій"]
+    if sheet_url:
+        # Ссылка на персональную read-only Google-таблицу склада — в тексте под
+        # заголовком, чтобы клиент мог свериться (web-preview у сообщения отключён).
+        parts.append(f'🔗 <a href="{sheet_url}">Моя таблиця складу (перегляд)</a>')
     if page.categories:
         parts.append("Категорії: " + ", ".join(page.categories[:5]))
     if not page.items:

@@ -68,10 +68,10 @@ class FakeMessage:
         self.edits: list[dict] = []
         self.deleted = False
 
-    async def answer(self, text, reply_markup=None, parse_mode=None) -> None:
+    async def answer(self, text, reply_markup=None, parse_mode=None, **kwargs) -> None:
         self.answers.append({"text": text, "reply_markup": reply_markup, "parse_mode": parse_mode})
 
-    async def edit_text(self, text, reply_markup=None, parse_mode=None) -> None:
+    async def edit_text(self, text, reply_markup=None, parse_mode=None, **kwargs) -> None:
         self.edits.append({"text": text, "reply_markup": reply_markup, "parse_mode": parse_mode})
 
     async def delete(self) -> None:
