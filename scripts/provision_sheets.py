@@ -468,18 +468,19 @@ def attach_view_book(gc: gspread.Client, book_id: str, source_tab: str | None = 
 def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = None) -> None:
     """Оформить книгу-зеркало клиента ТОЧНО как основной «Склад» — один лист «Товари».
 
-    То же оформление, что у клиентского листа «Склада»: тёмная шапка, бэндинг, подсветка
-    низкого остатка, цвет-чипы категорий, автоширина, формула «Доступно» и боковая панель
-    «Зведення» (I–J: Всього / За категорією / За товаром). Отдельных листов НЕ создаём —
-    как в основной таблице. Идемпотентно.
+    То же оформление данных, что у клиентского листа «Склада»: тёмная шапка, бэндинг,
+    подсветка низкого остатка, цвет-чипы категорий, автоширина, формула «Доступно».
+    Отдельных листов НЕ создаём. Идемпотентно.
 
     `source_tab` — имя листа клиента в основном «Складі» (= его stock_sheet_key). Если
     задан, при оформлении подтягиваем текущие остатки, чтобы чипы/бэндинг/панель сразу
     совпали с данными (иначе на пустой книге данные-зависимое оформление не наложилось бы).
     Рантайм-синк далее держит данные свежими (пишет только A2:F).
 
-    Панель read-only: селекторы «За категорією/За товаром» зритель не меняет (нет прав) —
-    работает секция «Всього» и живые формулы; так же выглядит и основная таблица.
+    Панель — read-only-версия (`write_readonly_summary`, I–L): без дропдаунов (зритель
+    их не меняет — книга только для чтения). Блок «Всього» + статичная таблица разреза
+    «За категорією» (живые формулы, фиксирован лишь список категорий). Секции «За товаром»
+    нет — поиск делает бот, а лист и так построчный.
     """
     ensure_locale(book)  # pin uk_UA — обяз. для «;»-формул панели/«Доступно»
     ws = ensure_worksheet(book, _VIEW_TAB, _VIEW_HEADERS)  # заголовки A1 + freeze(1)
@@ -497,7 +498,7 @@ def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = Non
     )
     style_stock_worksheet(book, ws, meta)  # шапка/бэндинг/CF/чипы/автоширина (по данным)
     write_available_formula(ws)  # G = Кількість − Резерв (ARRAYFORMULA)
-    write_side_summary(book, ws)  # боковая панель «Зведення» (I–J) — как в основной
+    write_readonly_summary(book, ws)  # read-only-панель «Зведення» (I–L): статичный разрез
 
 
 def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list]:
@@ -827,17 +828,21 @@ def build_summary(book: Any, data_ws: Any) -> None:
 
 
 def side_summary_cells() -> list[list[str]]:
-    """Значения панели «Зведення» (I1:J18): лейбл + формула/селектор (USER_ENTERED).
+    """Значения панели «Зведення» (I1:J19): лейбл + формула/селектор (USER_ENTERED).
 
     Три секции (формулы, не статичные числа → пересчёт живьём при правке остатка
     ботом/приёмкой/руками; открытые диапазоны авто-захватывают новые строки):
       • Всього — позиції/одиниці/вартість по всьому листу;
       • За категорією — фільтр по ячейке-селектору J7 (дропдаун «Всі»+категорії);
-      • За товаром — фільтр по ячейке-селектору J13 (дропдаун артикулів A2:A).
+      • За товаром — фільтр по ячейке-селектору J13 (дропдаун «Назва (Артикул)»:
+        Google фільтрує список по будь-якій частині рядка → пошук і по назві, і по
+        артикулу; артикул у дужках робить пункт унікальним ключем). Реальный ключ
+        lookup — резолв-артикул в J14 (`REGEXEXTRACT` хвоста «(артикул)»).
     Книга в локали с запятой → разделитель аргументов «;».
     """
     cat = f"${_PANEL_VALUE_A1}$7"  # ячейка выбора категории (селектор)
-    sku = f"${_PANEL_VALUE_A1}$13"  # ячейка выбора товара (Артикул)
+    tov = f"${_PANEL_VALUE_A1}$13"  # ячейка выбора товара (комбинированная «Назва (Артикул)»)
+    art = f"${_PANEL_VALUE_A1}$14"  # резолв-артикул из tov — ключ lookup
     return [
         ["📊 Зведення", ""],
         ["Позицій", "=COUNTA(A2:A)"],
@@ -854,14 +859,15 @@ def side_summary_cells() -> list[list[str]]:
         ],
         ["", ""],
         ["За товаром", ""],
-        ["Артикул", ""],
-        ["Назва", f'=IFERROR(VLOOKUP({sku};A2:E;2;0);"")'],
-        ["Категорія", f'=IFERROR(VLOOKUP({sku};A2:E;3;0);"")'],
-        ["Кількість", f'=IF({sku}="";"";SUMIF(A2:A;{sku};D2:D))'],
-        ["Ціна, ₴", f'=IFERROR(VLOOKUP({sku};A2:E;5;0);"")'],
+        ["Товар", ""],
+        ["Артикул", rf'=IFERROR(REGEXEXTRACT({tov};"\(([^)]+)\)\s*$");"")'],
+        ["Назва", f'=IFERROR(VLOOKUP({art};A2:E;2;0);"")'],
+        ["Категорія", f'=IFERROR(VLOOKUP({art};A2:E;3;0);"")'],
+        ["Кількість", f'=IF({art}="";"";SUMIF(A2:A;{art};D2:D))'],
+        ["Ціна, ₴", f'=IFERROR(VLOOKUP({art};A2:E;5;0);"")'],
         [
             "Вартість, ₴",
-            f'=IF({sku}="";"";SUMIF(A2:A;{sku};D2:D)*IFERROR(VLOOKUP({sku};A2:E;5;0);0))',
+            f'=IF({art}="";"";SUMIF(A2:A;{art};D2:D)*IFERROR(VLOOKUP({art};A2:E;5;0);0))',
         ],
     ]
 
@@ -871,17 +877,22 @@ def write_side_summary(book: Any, ws: Any) -> None:
 
     Справа (а не внизу) → строки растут вниз (`appendRow` приёмки/бота) и панель их
     не задевает: итог автоматический и никогда не «сползает», без правки Apps Script.
-    Дропдауны (Data Validation) в ячейках-селекторах J7 (категорія) и J13 (артикул);
-    подсчёты — формулы из `side_summary_cells`. Бот читает A:E с `expected_headers`,
-    лишние колонки справа чтение не ломают (см. app/sheets/client.py).
+    Дропдауны (Data Validation) в ячейках-селекторах J7 (категорія) и J13 (товар —
+    комбинированная «Назва (Артикул)»); подсчёты — формулы из `side_summary_cells`.
+    Список товара — скрытая колонка-помощник L (`Назва (Артикул)`, ARRAYFORMULA),
+    чтобы дропдаун искался и по назві, и по артикулу и авто-захватывал новые строки.
+    Бот читает A:E с `expected_headers`, лишние колонки справа чтение не ломают
+    (см. app/sheets/client.py).
     """
     sid = ws.id
     lbl, val, end = PANEL_LABEL_COL, PANEL_VALUE_COL, PANEL_VALUE_COL + 1
-    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}18"
+    helper_col = PANEL_VALUE_COL + 2  # L — скрытый список «Назва (Артикул)» для дропдауна товара
+    helper_a1 = _col_a1(helper_col)
+    panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}19"
     records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
     safe_title = ws.title.replace("'", "''")
-    sku_range = f"='{safe_title}'!$A$2:$A$1000"
+    tovar_range = f"='{safe_title}'!${helper_a1}$2:${helper_a1}$1000"
 
     # Снимаем прежние merge баннеров ДО записи (иначе запись их «закрытых» ячеек упадёт
     # при повторном прогоне). unmergeCells на не-смерженном диапазоне — безопасный no-op.
@@ -891,6 +902,13 @@ def write_side_summary(book: Any, ws: Any) -> None:
                 {"unmergeCells": {"range": _grid(sid, r, r + 1, lbl, end)}} for r in (0, 5, 11)
             ]
         }
+    )
+    # Скрытая колонка-помощник L: список «Назва (Артикул)» для дропдауна товара.
+    # ARRAYFORMULA по открытому A2:A → авто-захват новых строк; пустые строки → "".
+    ws.update(
+        values=[['=ARRAYFORMULA(IF(A2:A="";"";B2:B&" ("&A2:A&")"))']],
+        range_name=f"{helper_a1}2",
+        value_input_option=ValueInputOption.user_entered,
     )
     # raw=True по умолчанию → формулы стали бы текстом; форсим USER_ENTERED.
     ws.update(
@@ -971,7 +989,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
         # база: лейблы bold слева, значения справа, всё по центру вертикали
         {
             "repeatCell": {
-                "range": _grid(sid, 1, 18, lbl, val),
+                "range": _grid(sid, 1, 19, lbl, val),
                 "cell": {
                     "userEnteredFormat": {
                         "textFormat": {"bold": True},
@@ -984,7 +1002,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
         },
         {
             "repeatCell": {
-                "range": _grid(sid, 1, 18, val, end),
+                "range": _grid(sid, 1, 19, val, end),
                 "cell": {
                     "userEnteredFormat": {
                         "horizontalAlignment": "RIGHT",
@@ -997,7 +1015,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
         # карточки-фон под строками результатов (всього / категорія / товар)
         _bg(1, 4, BAND2),
         _bg(7, 10, BAND2),
-        _bg(13, 18, BAND2),
+        _bg(13, 19, BAND2),
         # merge баннера и подзаголовков секций
         {"mergeCells": {"range": _grid(sid, 0, 1, lbl, end), "mergeType": "MERGE_ALL"}},
         {"mergeCells": {"range": _grid(sid, 5, 6, lbl, end), "mergeType": "MERGE_ALL"}},
@@ -1015,8 +1033,8 @@ def write_side_summary(book: Any, ws: Any) -> None:
         _numfmt(3, 4, "CURRENCY", "#,##0.00 ₴"),
         _numfmt(7, 9, "NUMBER", "#,##0"),
         _numfmt(9, 10, "CURRENCY", "#,##0.00 ₴"),
-        _numfmt(15, 16, "NUMBER", "#,##0"),
-        _numfmt(16, 18, "CURRENCY", "#,##0.00 ₴"),
+        _numfmt(16, 17, "NUMBER", "#,##0"),
+        _numfmt(17, 19, "CURRENCY", "#,##0.00 ₴"),
         # дропдаун категорій: «Всі» + наявні категорії
         {
             "setDataValidation": {
@@ -1031,23 +1049,255 @@ def write_side_summary(book: Any, ws: Any) -> None:
                 },
             }
         },
-        # дропдаун товара: артикули з A2:A
+        # дропдаун товара: «Назва (Артикул)» з прихованої колонки-помічника L
         {
             "setDataValidation": {
                 "range": _grid(sid, 12, 13, val, end),
                 "rule": {
                     "condition": {
                         "type": "ONE_OF_RANGE",
-                        "values": [{"userEnteredValue": sku_range}],
+                        "values": [{"userEnteredValue": tovar_range}],
                     },
                     "showCustomUi": True,
                     "strict": False,
                 },
             }
         },
+        # прячем колонку-помощник L (служебный список для дропдауна товара)
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sid,
+                    "dimension": "COLUMNS",
+                    "startIndex": helper_col,
+                    "endIndex": helper_col + 1,
+                },
+                "properties": {"hiddenByUser": True},
+                "fields": "hiddenByUser",
+            }
+        },
         {
             "updateBorders": {
-                "range": _grid(sid, 0, 18, lbl, end),
+                "range": _grid(sid, 0, 19, lbl, end),
+                "top": border,
+                "bottom": border,
+                "left": border,
+                "right": border,
+                "innerHorizontal": border,
+                "innerVertical": border,
+            }
+        },
+    ]
+    book.batch_update({"requests": reqs})
+
+
+def readonly_summary_cells(cats: list[str]) -> list[list[str]]:
+    """Значения read-only-панели «Зведення» для книги-зеркала (I1:L…, USER_ENTERED).
+
+    Read-only-версия: без единого дропдауна (зритель их не меняет). Вместо
+    интерактивных селекторов — статичная таблица разреза по категориям: строка на
+    каждую категорию из `cats`. Значения — ЖИВЫЕ формулы (пересчёт при обновлении
+    остатка рантайм-синком), фиксирован лишь СПИСОК категорий (на момент провижна/
+    привязки; новая категория попадёт в разрез после ре-привязки `--attach-book`).
+    Книга в локали с запятой → разделитель аргументов «;».
+    """
+    rows: list[list[str]] = [
+        ["📊 Зведення", "", "", ""],
+        ["Позицій", "=COUNTA(A2:A)", "", ""],
+        ["Одиниць", "=SUM(D2:D)", "", ""],
+        ["Вартість, ₴", "=SUMPRODUCT(D2:D;E2:E)", "", ""],
+        ["", "", "", ""],
+        ["За категорією", "", "", ""],
+        ["Категорія", "Позицій", "Одиниць", "Вартість, ₴"],
+    ]
+    for cat in cats:
+        c = cat.replace('"', '""')  # экранируем кавычки для литерала в формуле
+        rows.append(
+            [
+                cat,
+                f'=COUNTIF(C2:C;"{c}")',
+                f'=SUMIF(C2:C;"{c}";D2:D)',
+                f'=SUMPRODUCT((C2:C="{c}")*D2:D*E2:E)',
+            ]
+        )
+    rows.append(["Разом", "=COUNTA(A2:A)", "=SUM(D2:D)", "=SUMPRODUCT(D2:D;E2:E)"])
+    return rows
+
+
+def write_readonly_summary(book: Any, ws: Any) -> None:
+    """Read-only-панель «Зведення» СПРАВА от данных (колонки I–L) для книги-зеркала.
+
+    Отличие от `write_side_summary`: НИ ОДНОГО дропдауна (книга у клиента read-only —
+    менять ячейки-селекторы он не может). Блок «Всього» — живые формулы; разрез
+    «За категорією» — статичная таблица (строка на категорию, значения-формулы). Секции
+    «За товаром» нет: лист A–G и так построчный per-товар, а поиск делает бот.
+    Идемпотентно — как основная панель, снимаем прежние merge перед записью.
+    """
+    sid = ws.id
+    lbl = PANEL_LABEL_COL  # I — категорія/лейбл
+    val = PANEL_VALUE_COL  # J — значения «Всього» / Позицій таблицы
+    end4 = lbl + 4  # правая граница таблицы (I,J,K,L)
+    records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
+    cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
+
+    values = readonly_summary_cells(cats)
+    last = len(values)  # число строк панели
+    tbl0 = 7  # первая строка данных таблицы категорий (0-based)
+    tbl_end = last  # exclusive: включает «Разом» (последняя строка)
+    panel_range = f"{_col_a1(lbl)}1:{_col_a1(end4 - 1)}{last}"
+
+    # Снять прежние merge баннера/подзаголовка (повторная привязка).
+    book.batch_update(
+        {"requests": [{"unmergeCells": {"range": _grid(sid, r, r + 1, lbl, end4)}} for r in (0, 5)]}
+    )
+    ws.update(
+        values=values,
+        range_name=panel_range,
+        value_input_option=ValueInputOption.user_entered,
+    )
+
+    border = {"style": "SOLID", "color": _rgb(0.78, 0.80, 0.85)}
+    reqs = [
+        # ширины: разрыв, категорія, числа, вартість
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": PANEL_GAP_COL, "endIndex": PANEL_GAP_COL + 1},
+                "properties": {"pixelSize": 22},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": lbl, "endIndex": lbl + 1},
+                "properties": {"pixelSize": 150},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": val, "endIndex": val + 2},
+                "properties": {"pixelSize": 92},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": end4 - 1, "endIndex": end4},
+                "properties": {"pixelSize": 112},
+                "fields": "pixelSize",
+            }
+        },
+        # база: всё по центру вертикали, лейблы/числа по своим краям
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, last, lbl, end4),
+                "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE"}},
+                "fields": "userEnteredFormat.verticalAlignment",
+            }
+        },
+        # «Всього»: лейблы bold слева, значения справа
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 4, lbl, val),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "horizontalAlignment": "LEFT"}},
+                "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 4, val, val + 1),
+                "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+                "fields": "userEnteredFormat.horizontalAlignment",
+            }
+        },
+        # карточка-фон под «Всього»
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 4, lbl, val + 1),
+                "cell": {"userEnteredFormat": {"backgroundColor": BAND2}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        },
+        # баннер и подзаголовок секции (merge + тёмный фон)
+        {"mergeCells": {"range": _grid(sid, 0, 1, lbl, end4), "mergeType": "MERGE_ALL"}},
+        {"mergeCells": {"range": _grid(sid, 5, 6, lbl, end4), "mergeType": "MERGE_ALL"}},
+        {
+            "repeatCell": {
+                "range": _grid(sid, 0, 1, lbl, end4),
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": HEADER_BG,
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": 11},
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": _grid(sid, 5, 6, lbl, end4),
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": SUBHEADER_BG,
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": 10},
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+            }
+        },
+        # шапка таблицы категорий (bold + светлый фон)
+        {
+            "repeatCell": {
+                "range": _grid(sid, 6, 7, lbl, end4),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}},
+                "fields": "userEnteredFormat(textFormat,backgroundColor)",
+            }
+        },
+        # строка «Разом» — bold
+        {
+            "repeatCell": {
+                "range": _grid(sid, last - 1, last, lbl, end4),
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": BAND2}},
+                "fields": "userEnteredFormat(textFormat,backgroundColor)",
+            }
+        },
+        # числовые форматы «Всього» (J): позиції/одиниці ціле, вартість валюта
+        {
+            "repeatCell": {
+                "range": _grid(sid, 1, 3, val, val + 1),
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": _grid(sid, 3, 4, val, val + 1),
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 ₴"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        },
+        # числовые форматы таблицы категорий: J,K ціле; L валюта (строки данных + «Разом»)
+        {
+            "repeatCell": {
+                "range": _grid(sid, tbl0, tbl_end, val, val + 2),
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": _grid(sid, tbl0, tbl_end, end4 - 1, end4),
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 ₴"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        },
+        {
+            "updateBorders": {
+                "range": _grid(sid, 0, last, lbl, end4),
                 "top": border,
                 "bottom": border,
                 "left": border,
