@@ -1,0 +1,92 @@
+name: Codex review
+
+# Авто-ревью PR через OpenAI Codex (openai/codex-action).
+# Репозиторий публичный → запуск ограничен нашими логинами (allow-users), иначе
+# любой чужой PR жёг бы наш API-баланс. Ключ живёт только в secrets.OPENAI_API_KEY
+# и доступен воркфлоу лишь на PR из веток этого репозитория (форки секретов не видят).
+on:
+  pull_request:
+    # opened/reopened — обязательное ревью; synchronize — переревью после новых
+    # пушей в PR. Не нужен лишний шум — убери synchronize, останется 1 ревью на PR.
+    types: [opened, reopened, synchronize]
+
+# Быстрые пуши подряд не копят параллельные прогоны — старый отменяется.
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      final_message: ${{ steps.run_codex.outputs.final-message }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Явно берём merge-коммит PR (как PR ляжет в main).
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+
+      - name: Pre-fetch base and head refs for the PR
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin \
+            "$PR_BASE_REF" \
+            "+refs/pull/$PR_NUMBER/head"
+
+      - name: Run Codex
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # :workspace — песочница без сети (ключ проксируется, код PR не может его выкачать).
+          permission-profile: ":workspace"
+          # Гейт по автору PR: Codex вообще не стартует для чужих логинов.
+          allow-users: yennned,Stepandj
+          prompt: |
+            Це PR #${{ github.event.pull_request.number }} для ${{ github.repository }}.
+
+            Проєкт — Telegram-бот кабінету фулфілменту Нової Пошти
+            (Python 3.12 · aiogram 3 · SQLAlchemy async · Google Sheets · Nova Poshta API).
+
+            Ревʼю ТІЛЬКИ зміни цього PR:
+               git log --oneline ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+               git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+
+            Шукай реальні баги, проблеми безпеки (робота з ключами НП/Fernet, RBAC,
+            витік секретів), гонки, порушення шарів (services/db не імпортують aiogram),
+            та можливі спрощення. Будь стислим і конкретним, посилайся на файли й рядки.
+            Якщо серйозних проблем немає — коротко це підтверди. Відповідь — українською.
+
+            Заголовок і опис PR:
+            ----
+            ${{ github.event.pull_request.title }}
+            ${{ github.event.pull_request.body }}
+
+  post_feedback:
+    runs-on: ubuntu-latest
+    needs: codex
+    # Порожнє повідомлення = Codex не запускався (напр. автор поза allow-users) → без коментаря.
+    if: needs.codex.outputs.final_message != ''
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Report Codex feedback
+        uses: actions/github-script@v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.codex.outputs.final_message }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `🤖 **Codex review**\n\n${process.env.CODEX_FINAL_MESSAGE}`,
+            });
