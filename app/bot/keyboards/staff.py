@@ -20,7 +20,9 @@ def build_list_kb(page: StaffPage) -> InlineKeyboardMarkup:
     ]
     for item in page.items:
         status_mark = "🚫" if item.status is UserStatus.blocked else ("🟢" if item.on_duty else "•")
-        name = item.full_name or str(item.telegram_id)
+        # ПІБ → телефон → Telegram-ID: у менеджера, заведённого по телефону, ещё нет
+        # ни имени, ни telegram_id — показываем номер, а не «None».
+        name = item.full_name or item.phone or str(item.telegram_id or "—")
         rows.append(
             [
                 InlineKeyboardButton(

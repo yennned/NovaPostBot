@@ -187,7 +187,13 @@ async def _manager_recipient_ids(session: AsyncSession) -> set[int]:
     users = UserRepository(session)
     recipient_ids: set[int] = set()
     for manager in await users.list_by_role(UserRole.manager):
-        if manager.status is UserStatus.active and manager.on_duty:
+        # telegram_id может быть None у менеджера, заведённого по телефону и ещё не
+        # вошедшего в бота (адопция при первом входе) — таким пуш не отправляем.
+        if (
+            manager.telegram_id is not None
+            and manager.status is UserStatus.active
+            and manager.on_duty
+        ):
             recipient_ids.add(manager.telegram_id)
     return recipient_ids
 
@@ -201,8 +207,13 @@ async def _support_manager_recipient_ids(
     current_settings = settings or get_settings()
     recipient_ids: set[int] = set()
     for manager in await UserRepository(session).list_by_role(UserRole.manager):
-        if manager.status is UserStatus.active and permissions.has_permission(
-            manager, permissions.CAN_HANDLE_SUPPORT, current_settings
+        # Пропускаем предзаготовленного по телефону менеджера без telegram_id.
+        if (
+            manager.telegram_id is not None
+            and manager.status is UserStatus.active
+            and permissions.has_permission(
+                manager, permissions.CAN_HANDLE_SUPPORT, current_settings
+            )
         ):
             recipient_ids.add(manager.telegram_id)
     return recipient_ids
@@ -247,7 +258,9 @@ async def _notification_enabled(
 
 
 async def _send_many(notifier: Notifier, recipient_ids: Iterable[int], text: str) -> None:
-    unique_ids = list(dict.fromkeys(recipient_ids))
+    # Отсекаем None (напр. менеджер по телефону без telegram_id): send_message(None)
+    # упал бы и через gather оборвал бы рассылку остальным.
+    unique_ids = [tid for tid in dict.fromkeys(recipient_ids) if tid is not None]
     await asyncio.gather(*(notifier.send_message(tid, text) for tid in unique_ids))
 
 

@@ -90,6 +90,50 @@ async def test_add_manager_already_manager(db_session: AsyncSession):
         await staff.add_manager(db_session, actor=owner, telegram_id=manager.telegram_id)
 
 
+async def test_add_manager_by_normalized_phone_promotes(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    users = UserRepository(db_session)
+    # Хранится в формате НП (как теперь пишет register_contact).
+    await users.create(
+        telegram_id=888,
+        phone="380671234567",
+        role=UserRole.client,
+        status=UserStatus.pending,
+    )
+
+    # Найм по тому же номеру в НП-формате (handler нормализует 0.../+380... к нему).
+    result = await staff.add_manager(db_session, actor=owner, phone="380671234567")
+
+    assert result.telegram_id == 888
+    assert (await users.get_by_telegram_id(888)).role is UserRole.manager
+
+
+async def test_add_manager_by_phone_precreates_unknown(db_session: AsyncSession):
+    """Незнакомый номер → предзаготовка менеджера без telegram_id (подхват при входе)."""
+    owner = await _owner(db_session)
+    users = UserRepository(db_session)
+
+    result = await staff.add_manager(db_session, actor=owner, phone="380509998877")
+
+    assert result.telegram_id is None  # ещё не входил в бота
+    precreated = await users.get_by_phone("380509998877")
+    assert precreated is not None
+    assert precreated.telegram_id is None
+    assert precreated.role is UserRole.manager
+    assert precreated.status is UserStatus.active
+    assert perm.has_permission(precreated, perm.CAN_HANDLE_SUPPORT)
+    assert "manager_added" in await _audit_actions(db_session)
+
+
+async def test_add_manager_requires_exactly_one_identifier(db_session: AsyncSession):
+    owner = await _owner(db_session)
+
+    with pytest.raises(StaffPromotionForbidden):
+        await staff.add_manager(db_session, actor=owner)
+    with pytest.raises(StaffPromotionForbidden):
+        await staff.add_manager(db_session, actor=owner, telegram_id=5, phone="380671112233")
+
+
 async def test_set_permission_toggles_and_audits(db_session: AsyncSession):
     owner = await _owner(db_session)
     manager = await _manager(db_session)

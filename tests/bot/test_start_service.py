@@ -8,16 +8,13 @@ from app.db.models.user import User
 @dataclass(slots=True)
 class FakeUserStore:
     users_by_telegram_id: dict[int, User] = field(default_factory=dict)
-    phone_to_telegram_id: dict[str, int] = field(default_factory=dict)
+    users_by_phone: dict[str, User] = field(default_factory=dict)
 
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         return self.users_by_telegram_id.get(telegram_id)
 
     async def get_by_phone(self, phone: str) -> User | None:
-        telegram_id = self.phone_to_telegram_id.get(phone)
-        if telegram_id is None:
-            return None
-        return self.users_by_telegram_id.get(telegram_id)
+        return self.users_by_phone.get(phone)
 
     async def create_pending_client(self, telegram_id: int, phone: str, full_name: str) -> User:
         user = User(
@@ -28,14 +25,14 @@ class FakeUserStore:
             status=UserStatus.pending,
             permissions={},
         )
-        self.users_by_telegram_id[telegram_id] = user
-        self.phone_to_telegram_id[phone] = telegram_id
+        await self.save(user)
         return user
 
     async def save(self, user: User) -> User:
-        self.users_by_telegram_id[user.telegram_id] = user
+        if user.telegram_id is not None:
+            self.users_by_telegram_id[user.telegram_id] = user
         if user.phone:
-            self.phone_to_telegram_id[user.phone] = user.telegram_id
+            self.users_by_phone[user.phone] = user
         return user
 
 
@@ -76,3 +73,30 @@ async def test_register_contact_keeps_existing_active_user():
     assert result.user.role is UserRole.manager
     assert result.user.status is UserStatus.active
     assert result.user.full_name == "Manager Updated"
+
+
+async def test_register_contact_adopts_precreated_manager_by_phone():
+    """Менеджер, заведённый владельцем по телефону (telegram_id пуст), при первом
+    входе подхватывается по номеру и получает telegram_id, сохраняя роль/статус."""
+    store = FakeUserStore()
+    precreated = User(
+        telegram_id=None,
+        phone="380509998877",  # формат НП, как хранит add_manager
+        role=UserRole.manager,
+        status=UserStatus.active,
+        permissions={},
+    )
+    await store.save(precreated)
+    service = StartService(store)
+
+    result = await service.register_contact(
+        telegram_id=303,
+        phone="+380509998877",  # тот же номер, ненормализованный ввод контакта
+        full_name="New Manager",
+    )
+
+    assert result.created is False
+    assert result.user.telegram_id == 303
+    assert result.user.role is UserRole.manager
+    assert result.user.status is UserStatus.active
+    assert result.user.full_name == "New Manager"

@@ -23,6 +23,7 @@ from app.bot.types import EffectiveContext
 from app.db.models.enums import UserRole
 from app.services import notifications, staff
 from app.services.exceptions import ClientServiceError, StaffNotFound
+from app.utils.phone import normalize_phone
 
 router = Router(name="staff")
 
@@ -317,21 +318,31 @@ async def staff_add_input(
     raw = message.text.strip()
     telegram_id: int | None = None
     phone: str | None = None
-    if raw.startswith("+"):
-        phone = raw
+    normalized_phone = normalize_phone(raw)
+    if normalized_phone is not None:
+        # Украинский номер (0…/380…/+380…, с разделителями) → телефон в формате НП.
+        # По телефону найм работает и для тех, кто ещё не запускал бота.
+        phone = normalized_phone
     elif raw.isdigit():
+        # Голые цифры, не телефон → Telegram-ID (нового создаём на лету).
         telegram_id = int(raw)
     else:
         await message.answer(texts.invalid_add_input_text())
         return
     try:
         result = await staff.add_manager(
-            db_session, actor=_actor(effective_context), telegram_id=telegram_id, phone=phone
+            db_session,
+            actor=_actor(effective_context),
+            telegram_id=telegram_id,
+            phone=phone,
         )
     except ClientServiceError as exc:
         await message.answer(str(exc))
         return
     await db_session.commit()
-    await BotNotifier(bot).send_message(result.telegram_id, notifications.manager_added_text())
+    # Пуш приветствия — только если менеджер уже входил в бота (есть telegram_id);
+    # заведённый по телефону получит его при первом входе.
+    if result.telegram_id is not None:
+        await BotNotifier(bot).send_message(result.telegram_id, notifications.manager_added_text())
     await message.answer(texts.added_text(result.card))
     await _render_list(message, db_session, effective_context, offset=0, query=None, edit=False)

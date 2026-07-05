@@ -26,7 +26,7 @@ class UserRepository(BaseRepository):
     async def create(
         self,
         *,
-        telegram_id: int,
+        telegram_id: int | None = None,
         phone: str | None = None,
         full_name: str | None = None,
         stock_sheet_key: str | None = None,
@@ -39,7 +39,7 @@ class UserRepository(BaseRepository):
             telegram_id=telegram_id,
             phone=phone,
             full_name=full_name,
-            stock_sheet_key=stock_sheet_key or full_name or str(telegram_id),
+            stock_sheet_key=stock_sheet_key or full_name or phone or str(telegram_id),
             stock_view_book_id=stock_view_book_id,
             role=role,
             status=status,

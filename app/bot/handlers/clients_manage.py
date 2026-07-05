@@ -48,6 +48,7 @@ from app.db.models.user import User
 from app.db.repositories import UserRepository
 from app.services import clients, manager_returns, notifications
 from app.services.exceptions import ClientServiceError, PermissionDenied
+from app.utils.phone import normalize_phone
 
 router = Router(name="clients")
 
@@ -430,9 +431,20 @@ async def receive_edit(
         return
     token = data.get("token", "all")
     client_id = uuid.UUID(data["client_id"])
+    value = message.text.strip()
+    if field == "phone":
+        # Храним телефон в формате НП (380…) — иначе найм менеджера по номеру и
+        # поиск клиента по телефону разъедутся с сохранённым значением.
+        normalized = normalize_phone(value)
+        if normalized is None:
+            await message.answer(
+                "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+            )
+            return
+        value = normalized
     try:
         card = await clients.update_client_profile(
-            db_session, actor=actor, client_id=client_id, **{field: message.text.strip()}
+            db_session, actor=actor, client_id=client_id, **{field: value}
         )
     except ClientServiceError as exc:
         await message.answer(client_error_text(exc))

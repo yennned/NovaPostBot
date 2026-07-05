@@ -89,7 +89,7 @@ async def _manager(session: AsyncSession, telegram_id: int = 9):
 async def _pending(session: AsyncSession, telegram_id: int = 100):
     return await UserRepository(session).create(
         telegram_id=telegram_id,
-        phone=f"+3800{telegram_id}",
+        phone=f"380{telegram_id:09d}",  # валидный НП-формат (нормализованный)
         full_name="Іван Клієнт",
         role=UserRole.client,
         status=UserStatus.pending,

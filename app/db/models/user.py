@@ -22,8 +22,12 @@ if TYPE_CHECKING:
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
 
-    # Telegram-идентификатор (основной ключ авторизации).
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    # Telegram-идентификатор (основной ключ авторизации). Nullable: владелец может
+    # завести менеджера по одному телефону (ещё не запускавшего бота) — telegram_id
+    # проставится при первом входе по контакту (адопция по номеру в register_contact).
+    telegram_id: Mapped[int | None] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=True
+    )
     # Телефон появляется после request_contact → nullable до этого момента.
     phone: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
