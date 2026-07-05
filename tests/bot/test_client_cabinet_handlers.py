@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 from app.bot.handlers.client_cabinet import (
     cb_cancel_shipment,
     cb_settings_toggle,
@@ -15,9 +17,16 @@ from app.bot.handlers.client_cabinet import (
     open_products,
     open_settings,
     open_shipments,
+    receive_new_profile_key,
+    receive_new_profile_name,
+    receive_new_profile_phone,
+    receive_new_profile_sender_name,
 )
+from app.bot.states import SenderProfileCreateState
+from app.config import Settings
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
-from app.db.repositories import UserRepository
+from app.db.repositories import SenderProfileRepository, UserRepository
+from app.novaposhta.client import NovaPoshtaClient
 from app.services.client_settings import ClientSettingsView, NotificationSettingView
 from app.services.inventory import InventoryItem, InventoryPage
 from app.services.shipments import (
@@ -52,15 +61,20 @@ class FakeState:
 
 
 class FakeMessage:
-    def __init__(self) -> None:
+    def __init__(self, text: str = "") -> None:
+        self.text = text
         self.answers: list[dict] = []
         self.edits: list[dict] = []
+        self.deleted = False
 
     async def answer(self, text, reply_markup=None, parse_mode=None) -> None:
         self.answers.append({"text": text, "reply_markup": reply_markup, "parse_mode": parse_mode})
 
     async def edit_text(self, text, reply_markup=None, parse_mode=None) -> None:
         self.edits.append({"text": text, "reply_markup": reply_markup, "parse_mode": parse_mode})
+
+    async def delete(self) -> None:
+        self.deleted = True
 
 
 class FakeCallback:
@@ -324,3 +338,95 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
 
     assert cb.message.edits
     assert "Статистика" in cb.message.edits[0]["text"]
+
+
+def _np_client(routes: dict) -> NovaPoshtaClient:
+    settings = Settings(_env_file=None)
+    settings.np_retry_backoff = 0.0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        result = routes[(body["modelName"], body["calledMethod"])]
+        if isinstance(result, httpx.Response):
+            return result
+        return httpx.Response(
+            200, json={"success": True, "data": result, "errors": [], "errorCodes": []}
+        )
+
+    return NovaPoshtaClient(settings=settings, transport=httpx.MockTransport(handler))
+
+
+_VALID_KEY_ROUTES = {
+    ("Counterparty", "getCounterparties"): [{"Ref": "sender-cp"}],
+    ("Counterparty", "getCounterpartyContactPersons"): [{"Ref": "sender-contact"}],
+}
+
+
+async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=710)
+    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    state = FakeState()
+
+    await receive_new_profile_name(FakeMessage("ФОП Тест"), state)
+    assert state.state == SenderProfileCreateState.entering_api_key
+
+    key_msg = FakeMessage("np-secret-key")
+    await receive_new_profile_key(key_msg, state)
+    assert key_msg.deleted  # секрет удалён из истории чата
+
+    await receive_new_profile_sender_name(FakeMessage("Іван Відправник"), state)
+    await receive_new_profile_phone(
+        FakeMessage("0501112233"), state, ctx, db_session, _np_client(_VALID_KEY_ROUTES)
+    )
+
+    profiles = await SenderProfileRepository(db_session).list_for_client(client.id)
+    assert len(profiles) == 1
+    assert profiles[0].name == "ФОП Тест"
+    assert profiles[0].is_default is True  # первый ФОП — основной
+    assert profiles[0].np_sender_ref == "sender-cp"  # ключ провалидирован в НП
+    assert profiles[0].sender_phone == "380501112233"  # телефон нормализован
+
+
+async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
+    client = await _active_client(db_session, telegram_id=711)
+    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    state = FakeState()
+    await receive_new_profile_name(FakeMessage("ФОП Х"), state)
+    await receive_new_profile_key(FakeMessage("bad-key"), state)
+    await receive_new_profile_sender_name(FakeMessage("Іван"), state)
+
+    bad_np = _np_client(
+        {
+            ("Counterparty", "getCounterparties"): httpx.Response(
+                200,
+                json={"success": False, "data": [], "errors": [], "errorCodes": ["20000200068"]},
+            )
+        }
+    )
+    msg = FakeMessage("0501112233")
+    await receive_new_profile_phone(msg, state, ctx, db_session, bad_np)
+
+    # Профиль не создан, вернулись на шаг ключа для повторного ввода.
+    assert await SenderProfileRepository(db_session).list_for_client(client.id) == []
+    assert state.state == SenderProfileCreateState.entering_api_key
+
+
+async def test_add_fop_wizard_np_unavailable_keeps_phone_step(db_session: AsyncSession):
+    """НП недоступна (5xx) при проверке ключа → черновик цел, шаг телефона держим."""
+    client = await _active_client(db_session, telegram_id=712)
+    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    state = FakeState()
+    await receive_new_profile_name(FakeMessage("ФОП Down"), state)
+    await receive_new_profile_key(FakeMessage("np-secret-key"), state)
+    await receive_new_profile_sender_name(FakeMessage("Іван"), state)
+
+    down_np = _np_client(
+        {("Counterparty", "getCounterparties"): httpx.Response(500, text="upstream error")}
+    )
+    msg = FakeMessage("0501112233")
+    await receive_new_profile_phone(msg, state, ctx, db_session, down_np)
+
+    # Профиль не создан, остаёмся на шаге телефона (не падаем без ответа).
+    assert await SenderProfileRepository(db_session).list_for_client(client.id) == []
+    assert state.state == SenderProfileCreateState.entering_sender_phone
+    assert msg.answers and "недоступна" in str(msg.answers[-1]["text"]).lower()

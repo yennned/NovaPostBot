@@ -1,6 +1,6 @@
 """Тесты потока создания ТТН — каркас + кошик (Фаза 4, PR 9a).
 
-ФОП-гейт входа идёт на реальном Postgres (через `shipment.resolve_default_sender_id`
+ФОП-гейт входа идёт на реальном Postgres (через `shipment.resolve_sender_id`
 — то же предусловие, что и у `create_shipment`); набор корзины/степпер/параметри —
 чистые (инвентарь замокан, БД не нужна).
 """
@@ -192,6 +192,56 @@ async def test_entry_ok_shows_picker(db_session: AsyncSession, monkeypatch):
     assert state._data["cart"] == {}
     assert state._data["nonce"]
     assert "Створення ТТН" in msg.answers[-1]["text"]
+
+
+async def _dispatchable_profile(session, client, name, *, is_default):
+    return await SenderProfileRepository(session).create(
+        client_id=client.id,
+        name=name,
+        np_api_key="k",
+        is_default=is_default,
+        np_sender_ref="cp-1",
+        np_contact_ref="ct-1",
+        sender_phone="+380501112233",
+    )
+
+
+def _callbacks(markup) -> list[str]:
+    return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+
+
+async def test_entry_multi_profile_shows_sender_picker(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 910)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    await _dispatchable_profile(db_session, client, "ФОП A", is_default=True)
+    await _dispatchable_profile(db_session, client, "ФОП B", is_default=False)
+    msg = FakeMessage()
+    state = FakeState()
+
+    await h.start_create_ttn(msg, state, _ctx(client), db_session)
+
+    assert state.state == CreateTtnState.picking_sender
+    callbacks = _callbacks(msg.answers[-1]["reply_markup"])
+    assert sum(cb.startswith("ttn:sender:") for cb in callbacks) == 2
+
+
+async def test_cb_pick_sender_begins_cart(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 911)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    await _dispatchable_profile(db_session, client, "ФОП A", is_default=True)
+    chosen = await _dispatchable_profile(db_session, client, "ФОП B", is_default=False)
+    _patch_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
+    state = FakeState()
+    await state.set_state(CreateTtnState.picking_sender)
+    cb = FakeCallback(f"ttn:sender:{chosen.id}")
+
+    await h.cb_pick_sender(cb, state, _ctx(client), db_session)
+
+    assert state.state == CreateTtnState.picking_items
+    assert state._data["sender_profile_id"] == str(chosen.id)  # ушёл выбранный, не дефолт
+    assert cb.message.edits  # кошик отрисован
 
 
 # ----------------------------------------------------------------- кошик (чистые)
