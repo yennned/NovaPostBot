@@ -42,9 +42,20 @@ class FakeState:
         return self._data
 
 
+class FakeBot:
+    """Минимальный бот: только то, что нужно хендлерам поиска (chat action)."""
+
+    def __init__(self) -> None:
+        self.actions: list[dict] = []
+
+    async def send_chat_action(self, **kw) -> None:
+        self.actions.append(kw)
+
+
 class FakeMessage:
     def __init__(self, text: str | None = None) -> None:
         self.text = text
+        self.chat = SimpleNamespace(id=1)
         self.answers: list[dict] = []
         self.edits: list[dict] = []
 
@@ -579,9 +590,11 @@ async def test_city_query_shows_results(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Київ")
-    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
+    bot = FakeBot()
+    await h.receive_city_query(msg, bot, state, _ctx(_CLIENT), None, object(), object())
     assert state._data["cities"][0]["ref"] == "c1"
     assert msg.answers[-1]["reply_markup"] is not None
+    assert bot.actions and bot.actions[-1]["action"] == "typing"  # индикатор загрузки
 
 
 async def test_city_query_not_found(monkeypatch):
@@ -589,7 +602,7 @@ async def test_city_query_not_found(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Хххх")
-    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
     assert "cities" not in state._data
     assert "Нічого не знайшли" in msg.answers[-1]["text"]
 
