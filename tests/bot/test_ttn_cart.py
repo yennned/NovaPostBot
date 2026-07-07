@@ -342,6 +342,42 @@ async def test_cart_remove(monkeypatch):
     assert list(state._data["cart"].keys()) == ["B"]
 
 
+async def test_search_clear_empties_cart(db_session: AsyncSession, monkeypatch):
+    """«🧹 Скинути» очищает и фильтры, и корзину, перерисовывая пикер."""
+    client = await _active_client(db_session, 960)
+    _patch_inventory(monkeypatch, _page([_item("A", "Кава", 10)]))
+    state = FakeState(
+        cart={"A": {"qty": 3, "name": "Кава", "price": "100"}},
+        ttn_query="кава",
+        ttn_category="напої",
+        pending={"sku": "B"},
+    )
+    cb = FakeCallback("cab:ttn:searchclear")
+    await h.cb_search_clear(cb, _ctx(client), db_session, state)
+    assert state._data["cart"] == {}
+    assert state._data["ttn_query"] is None
+    assert state._data["ttn_category"] is None
+    assert state._data["pending"] is None
+    assert state.state == CreateTtnState.picking_items
+    assert cb.message.edits  # пикер перерисован
+
+
+def test_cart_picker_reset_button_guarded():
+    """«🧹 Скинути» скрыта без корзины/фильтра и показана, когда есть что сбросить."""
+    from app.bot.keyboards.ttn import build_cart_picker_kb
+
+    page = _page([_item("A", "Кава", 10)])
+    hidden_kb = build_cart_picker_kb(page, cart_count=0)
+    hidden = [b.text for row in hidden_kb.inline_keyboard for b in row]
+    assert "🧹 Скинути" not in hidden
+    shown = [
+        b.text
+        for row in build_cart_picker_kb(page, cart_count=1, has_reset=True).inline_keyboard
+        for b in row
+    ]
+    assert "🧹 Скинути" in shown
+
+
 # --------------------------------------------------------- параметри посилки
 
 
