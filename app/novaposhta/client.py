@@ -73,10 +73,15 @@ class NovaPoshtaClient:
         model: str,
         method: str,
         props: dict[str, Any] | None = None,
+        attempts: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> list[dict[str, Any]]:
         """Вызвать метод НП и вернуть `data` при успехе.
 
         Бросает подтип `NovaPoshtaError` на сбое (после ретраев временных).
+
+        `attempts`/`timeout_seconds` переопределяют дефолты клиента для конкретного
+        вызова (интерактивный поиск справочников хочет быстрый фейл, а не 3×15с).
         """
         payload = {
             "apiKey": api_key,
@@ -84,7 +89,7 @@ class NovaPoshtaClient:
             "calledMethod": method,
             "methodProperties": props or {},
         }
-        retries = max(1, self._settings.np_max_retries)
+        retries = max(1, attempts if attempts is not None else self._settings.np_max_retries)
         async for attempt in AsyncRetrying(
             retry=retry_if_exception_type(NovaPoshtaUnavailable),
             stop=stop_after_attempt(retries),
@@ -92,13 +97,18 @@ class NovaPoshtaClient:
             reraise=True,
         ):
             with attempt:
-                return await self._request(payload)
+                return await self._request(payload, timeout_seconds=timeout_seconds)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    async def _request(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _request(
+        self, payload: dict[str, Any], *, timeout_seconds: float | None = None
+    ) -> list[dict[str, Any]]:
         """Один сетевой вызов + декод конверта (без ретраев)."""
+        # В httpx `timeout=None` ОТКЛЮЧАЕТ таймаут; чтобы «взять клиентский по
+        # умолчанию», нужен sentinel USE_CLIENT_DEFAULT.
+        timeout_arg = httpx.USE_CLIENT_DEFAULT if timeout_seconds is None else timeout_seconds
         try:
-            response = await self._client.post(self._url, json=payload)
+            response = await self._client.post(self._url, json=payload, timeout=timeout_arg)
         except httpx.HTTPError as exc:
             raise NovaPoshtaUnavailable(f"мережева помилка НП: {exc}") from exc
 

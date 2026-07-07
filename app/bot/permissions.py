@@ -26,7 +26,6 @@ _ROLE_RANK: dict[UserRole, int] = {
 # Единый источник правды — на них ссылаются сервисы (`services/clients`,
 # `services/staff`) и экран «👔 Персонал» (рендер тоглов из `PERMISSION_FLAGS`).
 CAN_MANAGE_CLIENTS = "can_manage_clients"
-CAN_EDIT_CLIENTS = "can_edit_clients"
 CAN_HANDLE_SUPPORT = "can_handle_support"
 CAN_VIEW_REPORTS = "can_view_reports"
 
@@ -45,12 +44,7 @@ PERMISSION_FLAGS: tuple[PermissionFlag, ...] = (
     PermissionFlag(
         CAN_MANAGE_CLIENTS,
         "Керування клієнтами",
-        "Підтвердження, блокування та архівування клієнтів",
-    ),
-    PermissionFlag(
-        CAN_EDIT_CLIENTS,
-        "Редагування клієнтів",
-        "Зміна ПІБ і телефону клієнта",
+        "Підтвердження та блокування клієнтів",
     ),
     PermissionFlag(
         CAN_HANDLE_SUPPORT,
@@ -143,3 +137,17 @@ def require_can_manage(
         raise PermissionDenied("немає прав керувати цим користувачем")
     if not has_permission(actor, flag, settings):
         raise PermissionDenied(f"право {flag} відкликано")
+
+
+def require_owner(actor: User, settings: Settings | None = None) -> None:
+    """Гейт действий уровня владельца (напр. правка профиля клиента).
+
+    Редактирование данных клиента — только владелец (per-flag убран, менеджерам
+    недоступно). dev обходит проверку; иначе актёр должен быть активным владельцем.
+    """
+    if is_dev(actor.telegram_id, settings):
+        return
+    if actor.status is not UserStatus.active:
+        raise PermissionDenied("обліковий запис неактивний")
+    if actor.role is not UserRole.owner:
+        raise PermissionDenied("потрібна роль власника")

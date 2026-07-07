@@ -42,9 +42,24 @@ class FakeState:
         return self._data
 
 
+class FakeBot:
+    """Минимальный бот: chat action + edit_message_text (для edit_stored_screen)."""
+
+    def __init__(self) -> None:
+        self.actions: list[dict] = []
+        self.edits: list[dict] = []
+
+    async def send_chat_action(self, **kw) -> None:
+        self.actions.append(kw)
+
+    async def edit_message_text(self, text, reply_markup=None, **kw) -> None:
+        self.edits.append({"text": text, "reply_markup": reply_markup})
+
+
 class FakeMessage:
     def __init__(self, text: str | None = None) -> None:
         self.text = text
+        self.chat = SimpleNamespace(id=1)
         self.answers: list[dict] = []
         self.edits: list[dict] = []
 
@@ -342,6 +357,63 @@ async def test_cart_remove(monkeypatch):
     assert list(state._data["cart"].keys()) == ["B"]
 
 
+async def test_search_clear_empties_cart(db_session: AsyncSession, monkeypatch):
+    """«🧹 Скинути» очищает и фильтры, и корзину, перерисовывая пикер."""
+    client = await _active_client(db_session, 960)
+    _patch_inventory(monkeypatch, _page([_item("A", "Кава", 10)]))
+    state = FakeState(
+        cart={"A": {"qty": 3, "name": "Кава", "price": "100"}},
+        ttn_query="кава",
+        ttn_category="напої",
+        pending={"sku": "B"},
+    )
+    cb = FakeCallback("cab:ttn:searchclear")
+    await h.cb_search_clear(cb, _ctx(client), db_session, state)
+    assert state._data["cart"] == {}
+    assert state._data["ttn_query"] is None
+    assert state._data["ttn_category"] is None
+    assert state._data["pending"] is None
+    assert state.state == CreateTtnState.picking_items
+    assert cb.message.edits  # пикер перерисован
+
+
+async def test_item_search_keeps_reset_button(monkeypatch):
+    """После текстового поиска «🧹 Скинути» остаётся на экране (has_reset передан).
+
+    Регрессия: второй вызов build_cart_picker_kb в receive_item_search шёл без
+    has_reset → кнопка сброса пропадала после поиска.
+    """
+    _patch_inventory(monkeypatch, _page([_item("A", "Кава", 10)]))
+    state = FakeState(
+        cart={"A": {"qty": 1, "name": "Кава", "price": "100"}},
+        _screen_chat_id=1,
+        _screen_message_id=10,
+    )
+    await state.set_state(CreateTtnState.entering_item_search)
+    bot = FakeBot()
+    msg = FakeMessage(text="кава")
+    await h.receive_item_search(msg, bot, state, _ctx(_CLIENT), None)
+    kb = bot.edits[-1]["reply_markup"]
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "🧹 Скинути" in labels
+
+
+def test_cart_picker_reset_button_guarded():
+    """«🧹 Скинути» скрыта без корзины/фильтра и показана, когда есть что сбросить."""
+    from app.bot.keyboards.ttn import build_cart_picker_kb
+
+    page = _page([_item("A", "Кава", 10)])
+    hidden_kb = build_cart_picker_kb(page, cart_count=0)
+    hidden = [b.text for row in hidden_kb.inline_keyboard for b in row]
+    assert "🧹 Скинути" not in hidden
+    shown = [
+        b.text
+        for row in build_cart_picker_kb(page, cart_count=1, has_reset=True).inline_keyboard
+        for b in row
+    ]
+    assert "🧹 Скинути" in shown
+
+
 # --------------------------------------------------------- параметри посилки
 
 
@@ -579,9 +651,11 @@ async def test_city_query_shows_results(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Київ")
-    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
+    bot = FakeBot()
+    await h.receive_city_query(msg, bot, state, _ctx(_CLIENT), None, object(), object())
     assert state._data["cities"][0]["ref"] == "c1"
     assert msg.answers[-1]["reply_markup"] is not None
+    assert bot.actions and bot.actions[-1]["action"] == "typing"  # индикатор загрузки
 
 
 async def test_city_query_not_found(monkeypatch):
@@ -589,7 +663,7 @@ async def test_city_query_not_found(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Хххх")
-    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
     assert "cities" not in state._data
     assert "Нічого не знайшли" in msg.answers[-1]["text"]
 

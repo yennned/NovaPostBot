@@ -86,6 +86,18 @@ async def _manager(session: AsyncSession, telegram_id: int = 9):
     )
 
 
+async def _owner(session: AsyncSession, telegram_id: int = 8):
+    return await UserRepository(session).create(
+        telegram_id=telegram_id, role=UserRole.owner, status=UserStatus.active
+    )
+
+
+def _ctx(actor, *, effective_role: UserRole | None = None):
+    """Мини-EffectiveContext для хендлеров: actor + эффективная роль."""
+    role = effective_role if effective_role is not None else (actor.role if actor else None)
+    return SimpleNamespace(actor_user=actor, effective_role=role)
+
+
 async def _pending(session: AsyncSession, telegram_id: int = 100):
     return await UserRepository(session).create(
         telegram_id=telegram_id,
@@ -119,7 +131,7 @@ async def test_cb_card_shows_card(db_session: AsyncSession):
     manager = await _manager(db_session)
     client = await _pending(db_session)
     cb = FakeCallback(data=f"cl:card:pending:{client.id}")
-    await cb_card(cb, SimpleNamespace(actor_user=manager), db_session)
+    await cb_card(cb, _ctx(manager), db_session)
     assert cb.message.edits
     assert "Іван Клієнт" in str(cb.message.edits[0]["text"])
     assert cb.acks  # callback acknowledged
@@ -131,7 +143,7 @@ async def test_cb_action_approve_changes_status_and_notifies(db_session: AsyncSe
     bot = FakeBot()
     cb = FakeCallback(data=f"cl:act:approve:{client.id}")
 
-    await cb_action(cb, SimpleNamespace(actor_user=manager), db_session, bot)
+    await cb_action(cb, _ctx(manager), db_session, bot)
 
     refreshed = await UserRepository(db_session).get_by_id(client.id)
     assert refreshed.status is UserStatus.active
@@ -140,35 +152,46 @@ async def test_cb_action_approve_changes_status_and_notifies(db_session: AsyncSe
 
 
 async def test_cb_edit_field_sets_state(db_session: AsyncSession):
+    owner = await _owner(db_session)
     client = await _pending(db_session)
     state = FakeState()
     cb = FakeCallback(data=f"cl:editf:full_name:pending:{client.id}")
-    await cb_edit_field(cb, state)
+    await cb_edit_field(cb, _ctx(owner), state)
     assert state.state == ClientManageState.waiting_for_edit
     assert state._data["field"] == "full_name"
     assert state._data["client_id"] == str(client.id)
 
 
-async def test_receive_edit_updates_name(db_session: AsyncSession):
+async def test_cb_edit_field_denied_for_manager(db_session: AsyncSession):
     manager = await _manager(db_session)
+    client = await _pending(db_session)
+    state = FakeState()
+    cb = FakeCallback(data=f"cl:editf:full_name:pending:{client.id}")
+    await cb_edit_field(cb, _ctx(manager), state)
+    assert state.state is None  # состояние правки не выставлено
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_receive_edit_updates_name(db_session: AsyncSession):
+    owner = await _owner(db_session)
     client = await _pending(db_session)
     state = FakeState({"client_id": str(client.id), "field": "full_name", "token": "pending"})
     msg = FakeMessage()
     msg.text = "Оновлене Імʼя"
-    await receive_edit(msg, state, SimpleNamespace(actor_user=manager), db_session)
+    await receive_edit(msg, state, _ctx(owner), db_session)
     refreshed = await UserRepository(db_session).get_by_id(client.id)
     assert refreshed.full_name == "Оновлене Імʼя"
     assert any("оновлено" in str(a["text"]).lower() for a in msg.answers)
 
 
 async def test_receive_edit_phone_collision(db_session: AsyncSession):
-    manager = await _manager(db_session)
+    owner = await _owner(db_session)
     a = await _pending(db_session, telegram_id=500)
     b = await _pending(db_session, telegram_id=501)
     state = FakeState({"client_id": str(a.id), "field": "phone", "token": "pending"})
     msg = FakeMessage()
     msg.text = b.phone
-    await receive_edit(msg, state, SimpleNamespace(actor_user=manager), db_session)
+    await receive_edit(msg, state, _ctx(owner), db_session)
     assert any("зайнят" in str(x["text"]) for x in msg.answers)
 
 
@@ -180,9 +203,21 @@ async def test_cb_action_forbidden_transition_alerts(db_session: AsyncSession):
     bot = FakeBot()
     # approve активного → AlreadyInStatus → alert, статус не меняется
     cb = FakeCallback(data=f"cl:act:approve:{active_client.id}")
-    await cb_action(cb, SimpleNamespace(actor_user=manager), db_session, bot)
+    await cb_action(cb, _ctx(manager), db_session, bot)
     assert cb.acks and cb.acks[-1]["show_alert"] is True
     assert bot.sent == []
+
+
+async def test_cb_action_unknown_action_alerts(db_session: AsyncSession):
+    """Устаревшая кнопка (напр. «Архів») → alert, а не тихий no-op; статус цел."""
+    manager = await _manager(db_session)
+    client = await _pending(db_session)
+    bot = FakeBot()
+    cb = FakeCallback(data=f"cl:act:archive:{client.id}")
+    await cb_action(cb, _ctx(manager), db_session, bot)
+    assert cb.acks and cb.acks[-1]["show_alert"] is True
+    refreshed = await UserRepository(db_session).get_by_id(client.id)
+    assert refreshed.status is UserStatus.pending  # действие не выполнено
 
 
 async def test_cb_returns_shows_client_return_list(db_session: AsyncSession, monkeypatch):
