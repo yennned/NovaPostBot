@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -150,10 +150,11 @@ async def home_callback(
     # Reply-панель меню роли живёт на нижней клавиатуре, а её нельзя переустановить
     # через edit_text инлайн-сообщения. Раньше «Головна» лишь чистила инлайн-экран и
     # надеялась на «прилипшую» панель — но в чате поддержки/ТТН она заменена другой
-    # reply-клавиатурой, и меню не появлялось. Снимаем инлайн-кнопки старого экрана и
-    # отправляем меню роли новым сообщением (как `_render_home`/`_exit_chat_to_home`).
-    with contextlib.suppress(TelegramBadRequest):
-        # сообщение без разметки/устарело — не критично
-        await callback.message.edit_reply_markup(reply_markup=None)
+    # reply-клавиатурой, и меню не появлялось. Сперва ОТПРАВЛЯЕМ меню роли (главное —
+    # чтобы оно точно появилось), затем best-effort снимаем инлайн-кнопки старого
+    # экрана. Порядок важен: если снятие разметки упадёт (Forbidden/сеть), меню уже
+    # отправлено. Глушим весь TelegramAPIError — очистка старого экрана не критична.
     await _render_home(callback.message, effective_context)
+    with contextlib.suppress(TelegramAPIError):
+        await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()

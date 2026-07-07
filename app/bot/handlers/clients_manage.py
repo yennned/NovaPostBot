@@ -326,7 +326,9 @@ async def cb_action(
         return
     handler = _ACTIONS.get(action)
     if handler is None:
-        await callback.answer()
+        # Устаревшая кнопка (напр. «Архів» со старой карточки после объединения с
+        # блокировкой): не молчим, а подсказываем переоткрыть карточку.
+        await callback.answer(_STALE_BUTTON, show_alert=True)
         return
 
     try:
@@ -398,7 +400,7 @@ async def cb_edit(callback: CallbackQuery, effective_context: EffectiveContext) 
         await callback.answer(_STALE_BUTTON, show_alert=True)
         return
     if not _can_edit_clients(effective_context):
-        await callback.answer("Недостатньо прав для цієї дії.", show_alert=True)
+        await callback.answer(client_error_text(PermissionDenied()), show_alert=True)
         return
     try:
         _, _, token, client_raw = callback.data.split(":")
@@ -418,7 +420,7 @@ async def cb_edit_field(
         await callback.answer(_STALE_BUTTON, show_alert=True)
         return
     if not _can_edit_clients(effective_context):
-        await callback.answer("Недостатньо прав для цієї дії.", show_alert=True)
+        await callback.answer(client_error_text(PermissionDenied()), show_alert=True)
         return
     try:
         _, _, field, token, client_raw = callback.data.split(":")

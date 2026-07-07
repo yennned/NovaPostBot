@@ -38,6 +38,24 @@ async def _profile_key(
     return profile.np_api_key  # EncryptedString расшифровывает при чтении
 
 
+async def _key_and_limits(
+    session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None
+) -> tuple[str, dict[str, int | float]]:
+    """Ключ ФОП + «интерактивные» лимиты НП для одного lookup'а.
+
+    Зовётся ТОЛЬКО из loader'а (т.е. на промахе кэша), поэтому резолв ключа
+    (запрос в БД + расшифровка Fernet) не бьёт по попаданиям в кэш. Лимиты —
+    жёсткий таймаут/меньше ретраев (быстрый фейл вместо зависания).
+    """
+    settings = get_settings()
+    api_key = await _profile_key(session, client, sender_profile_id)
+    limits: dict[str, int | float] = {
+        "attempts": settings.np_lookup_max_retries,
+        "timeout_seconds": settings.np_lookup_timeout_seconds,
+    }
+    return api_key, limits
+
+
 async def search_cities(
     session: AsyncSession,
     *,
@@ -47,23 +65,11 @@ async def search_cities(
     cache: NPReferenceCache,
     sender_profile_id: uuid.UUID | None = None,
 ) -> list[City]:
-    """Найти города по подстроке (через кэш справочников НП).
-
-    Ключ ФОП резолвим ЛЕНИВО — только на промахе кэша (внутри `loader`), чтобы
-    попадание в кэш не тянуло лишний запрос в БД + расшифровку ключа на каждый
-    ввод. Таймаут/ретраи — «интерактивные» (быстрый фейл вместо зависания).
-    """
-    settings = get_settings()
+    """Найти города по подстроке (через кэш справочников НП; ключ ФОП — лениво)."""
 
     async def loader() -> list[City]:
-        api_key = await _profile_key(session, client, sender_profile_id)
-        return await methods.get_cities(
-            np_client,
-            api_key=api_key,
-            query=query,
-            attempts=settings.np_lookup_max_retries,
-            timeout_seconds=settings.np_lookup_timeout_seconds,
-        )
+        api_key, limits = await _key_and_limits(session, client, sender_profile_id)
+        return await methods.get_cities(np_client, api_key=api_key, query=query, **limits)
 
     return await cache.cities(query, loader=loader)
 
@@ -78,21 +84,12 @@ async def search_warehouses(
     query: str | None = None,
     sender_profile_id: uuid.UUID | None = None,
 ) -> list[Warehouse]:
-    """Найти відділення в городе (опц. поиск по номеру/строке).
-
-    Ключ ФОП резолвим лениво (внутри `loader`) — попадание в кэш не ходит в БД.
-    """
-    settings = get_settings()
+    """Найти відділення в городе (опц. поиск; ключ ФОП резолвим лениво в `loader`)."""
 
     async def loader() -> list[Warehouse]:
-        api_key = await _profile_key(session, client, sender_profile_id)
+        api_key, limits = await _key_and_limits(session, client, sender_profile_id)
         return await methods.get_warehouses(
-            np_client,
-            api_key=api_key,
-            city_ref=city_ref,
-            query=query,
-            attempts=settings.np_lookup_max_retries,
-            timeout_seconds=settings.np_lookup_timeout_seconds,
+            np_client, api_key=api_key, city_ref=city_ref, query=query, **limits
         )
 
     return await cache.warehouses(city_ref, loader=loader, query=query)

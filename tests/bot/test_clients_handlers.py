@@ -208,6 +208,18 @@ async def test_cb_action_forbidden_transition_alerts(db_session: AsyncSession):
     assert bot.sent == []
 
 
+async def test_cb_action_unknown_action_alerts(db_session: AsyncSession):
+    """Устаревшая кнопка (напр. «Архів») → alert, а не тихий no-op; статус цел."""
+    manager = await _manager(db_session)
+    client = await _pending(db_session)
+    bot = FakeBot()
+    cb = FakeCallback(data=f"cl:act:archive:{client.id}")
+    await cb_action(cb, _ctx(manager), db_session, bot)
+    assert cb.acks and cb.acks[-1]["show_alert"] is True
+    refreshed = await UserRepository(db_session).get_by_id(client.id)
+    assert refreshed.status is UserStatus.pending  # действие не выполнено
+
+
 async def test_cb_returns_shows_client_return_list(db_session: AsyncSession, monkeypatch):
     manager = await _manager(db_session)
     client = await _pending(db_session, telegram_id=600)
