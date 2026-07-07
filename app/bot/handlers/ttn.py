@@ -548,11 +548,18 @@ async def receive_item_search(
     )
     await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
     data = await state.get_data()
+    cart_count = len(data.get("cart", {}))
+    category = data.get("ttn_category")
+    # Как в `_show_picker`: «🧹 Скинути» показываем, когда есть что сбрасывать
+    # (после поиска `query` активен → кнопка нужна, чтобы очистить фильтр/корзину).
+    has_reset = cart_count > 0 or bool(query) or bool(category)
     if not await edit_stored_screen(
         bot,
         state,
-        text=texts.cart_picker_text(page, cart_count=len(data.get("cart", {}))),
-        reply_markup=build_cart_picker_kb(page, cart_count=len(data.get("cart", {}))),
+        text=texts.cart_picker_text(page, cart_count=cart_count),
+        reply_markup=build_cart_picker_kb(
+            page, cart_count=cart_count, active_category=category, has_reset=has_reset
+        ),
         parse_mode="HTML",
     ):
         await _show_picker(message, db_session, client, state, offset=0, edit=False)

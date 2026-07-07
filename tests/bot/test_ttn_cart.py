@@ -43,13 +43,17 @@ class FakeState:
 
 
 class FakeBot:
-    """Минимальный бот: только то, что нужно хендлерам поиска (chat action)."""
+    """Минимальный бот: chat action + edit_message_text (для edit_stored_screen)."""
 
     def __init__(self) -> None:
         self.actions: list[dict] = []
+        self.edits: list[dict] = []
 
     async def send_chat_action(self, **kw) -> None:
         self.actions.append(kw)
+
+    async def edit_message_text(self, text, reply_markup=None, **kw) -> None:
+        self.edits.append({"text": text, "reply_markup": reply_markup})
 
 
 class FakeMessage:
@@ -371,6 +375,27 @@ async def test_search_clear_empties_cart(db_session: AsyncSession, monkeypatch):
     assert state._data["pending"] is None
     assert state.state == CreateTtnState.picking_items
     assert cb.message.edits  # пикер перерисован
+
+
+async def test_item_search_keeps_reset_button(monkeypatch):
+    """После текстового поиска «🧹 Скинути» остаётся на экране (has_reset передан).
+
+    Регрессия: второй вызов build_cart_picker_kb в receive_item_search шёл без
+    has_reset → кнопка сброса пропадала после поиска.
+    """
+    _patch_inventory(monkeypatch, _page([_item("A", "Кава", 10)]))
+    state = FakeState(
+        cart={"A": {"qty": 1, "name": "Кава", "price": "100"}},
+        _screen_chat_id=1,
+        _screen_message_id=10,
+    )
+    await state.set_state(CreateTtnState.entering_item_search)
+    bot = FakeBot()
+    msg = FakeMessage(text="кава")
+    await h.receive_item_search(msg, bot, state, _ctx(_CLIENT), None)
+    kb = bot.edits[-1]["reply_markup"]
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "🧹 Скинути" in labels
 
 
 def test_cart_picker_reset_button_guarded():
