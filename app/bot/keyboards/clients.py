@@ -78,18 +78,20 @@ def build_clients_list_kb(page: ClientPage, token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_client_card_kb(card: ClientCard, token: str) -> InlineKeyboardMarkup:
+def build_client_card_kb(
+    card: ClientCard, token: str, *, can_edit: bool = False
+) -> InlineKeyboardMarkup:
+    # Единое «удалённое» состояние — `blocked` (скрытие + запрет доступа),
+    # обратимо «Розблокувати» → active. Отдельной кнопки «Архів» больше нет;
+    # `archived` — legacy: новых архиваций из карточки не создаём, но
+    # существующие архивные клиенты остаются восстанавливаемыми.
     actions: list[tuple[str, str]] = []
     if card.status is UserStatus.pending:
-        actions = [
-            ("approve", "✅ Підтвердити"),
-            ("block", "⛔ Заблокувати"),
-            ("archive", "🗄 Архів"),
-        ]
+        actions = [("approve", "✅ Підтвердити"), ("block", "🚫 Заблокувати")]
     elif card.status is UserStatus.active:
-        actions = [("block", "⛔ Заблокувати"), ("archive", "🗄 Архів")]
+        actions = [("block", "🚫 Заблокувати")]
     elif card.status is UserStatus.blocked:
-        actions = [("unblock", "✅ Розблокувати"), ("archive", "🗄 Архів")]
+        actions = [("unblock", "✅ Розблокувати")]
     elif card.status is UserStatus.archived:
         actions = [("restore", "♻️ Відновити")]
 
@@ -97,9 +99,12 @@ def build_client_card_kb(card: ClientCard, token: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=label, callback_data=f"cl:act:{action}:{card.id}")]
         for action, label in actions
     ]
-    rows.append(
-        [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"cl:edit:{token}:{card.id}")]
-    )
+    # Правка профиля клиента — только владелец (per-flag убран). Кнопку прячем,
+    # чтобы менеджер не видел её и не упирался в отказ на submit.
+    if can_edit:
+        rows.append(
+            [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"cl:edit:{token}:{card.id}")]
+        )
     rows.append(
         [
             InlineKeyboardButton(
