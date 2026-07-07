@@ -67,6 +67,29 @@ async def test_search_cities_returns_and_caches(db_session: AsyncSession):
     assert calls["n"] == 1  # второй вызов — из кэша
 
 
+async def test_search_cities_cache_hit_skips_profile_lookup(db_session: AsyncSession):
+    """Cache-first: попадание в кэш не резолвит ключ ФОП (нет запроса в БД).
+
+    Прогреваем кэш клиентом с профилем, затем ищем тем же запросом клиентом БЕЗ
+    профиля: холодный путь упал бы `SenderProfileNotConfigured`, но на cache hit
+    ключ не резолвится, и данные отдаются из кэша.
+    """
+    warm = await _client_with_profile(db_session, telegram_id=610)
+    cache = _cache()
+    np_client = _np_client({("Address", "getCities"): [{"Ref": "c1", "Description": "Київ"}]})
+    await address.search_cities(
+        db_session, client=warm, query="Київ", np_client=np_client, cache=cache
+    )
+
+    no_profile = await UserRepository(db_session).create(
+        telegram_id=611, role=UserRole.client, status=UserStatus.active
+    )
+    result = await address.search_cities(
+        db_session, client=no_profile, query="Київ", np_client=np_client, cache=cache
+    )
+    assert [c.ref for c in result] == ["c1"]  # из кэша, без SenderProfileNotConfigured
+
+
 async def test_search_warehouses_returns(db_session: AsyncSession):
     client = await _client_with_profile(db_session, telegram_id=601)
     np_client = _np_client(

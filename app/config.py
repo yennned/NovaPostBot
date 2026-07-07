@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     np_api_url: str = Field(default="https://api.novaposhta.ua/v2.0/json/", alias="NP_API_URL")
     np_timeout_seconds: float = Field(default=15.0, alias="NP_TIMEOUT_SECONDS")
     np_max_retries: int = Field(default=3, alias="NP_MAX_RETRIES")
+    # Интерактивный поиск справочников (город/відділення при создании ТТН): жёстче
+    # таймаут и меньше ретраев, чем у фоновых вызовов — иначе флаки-НП вешает
+    # пользователя до ~45с (15с × 3). Здесь важнее быстрый отклик: не нашли —
+    # пользователь просто повторит ввод.
+    np_lookup_timeout_seconds: float = Field(default=6.0, alias="NP_LOOKUP_TIMEOUT_SECONDS")
+    np_lookup_max_retries: int = Field(default=2, alias="NP_LOOKUP_MAX_RETRIES")
     # Базовый множитель экспоненциального бэкоффа ретраев (сек). 0 — без пауз
     # (используется в тестах, чтобы ретраи не спали по-настоящему).
     np_retry_backoff: float = Field(default=0.5, alias="NP_RETRY_BACKOFF")

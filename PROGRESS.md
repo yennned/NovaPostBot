@@ -57,6 +57,45 @@
   ветки, `.env`×2 + `secrets/` на сервере, GHCR login, первый `up` + smoke-тест,
   активировать SSH-секреты CI (`SSH_HOST`/`SSH_USER`/`SSH_PRIVATE_KEY`/`DEPLOY_PATH`),
   бэкап `FERNET_KEY`. Follow-up: авто-деплой staging отдельным workflow.
+
+## 2026-07-07 · feat/alex-ttn-city-search-perf · ускорение поиска міста/відділення
+- **Зачем:** пользователь жаловался, что поиск города при создании ТТН тормозит и
+  «бот плохо прогружает». Диагностика: живой round-trip к API НП на каждый ввод +
+  отсутствие обратной связи + возможный 45с-хвост на ретраях.
+- **Сделано:**
+  - **`9524e57` perf(np):** отдельные интерактивные лимиты для справочников —
+    `NP_LOOKUP_TIMEOUT_SECONDS=6` / `NP_LOOKUP_MAX_RETRIES=2` (вместо глобальных
+    15с×3, дававших до ~45с зависания на флаки-НП). `client.call` принимает
+    `attempts`/`timeout_seconds` (проброс до httpx per-request через
+    USE_CLIENT_DEFAULT). `search_cities/search_warehouses` резолвят ключ ФОП
+    ЛЕНИВО (внутри loader) — попадание в кэш больше не тянет запрос в БД + Fernet.
+  - **`0eeb092` feat(ttn):** индикатор `send_chat_action(typing)` перед запросом
+    в НП в text-хендлерах поиска міста/відділення — снимает ощущение зависания.
+  - Префиксный кэш сознательно НЕ делаю (серверный fuzzy-поиск НП точнее
+    локальной фильтрации). Тесты: cache-first (profile-less клиент из тёплого
+    кэша) + проверка индикатора; полный `pytest` (novapostbot_test) зелёный,
+    `ruff` ок.
+- **Дальше:** push + PR (отдельно от `feat/alex-qa-review-fixes`). Опц. —
+  распространить интерактивные лимиты на getPrice-шаг, если тоже тормозит.
+- **Открытые вопросы:** нет.
+
+## 2026-07-07 · feat/alex-deploy-prep · тихие часы воркера (Neon scale-to-zero)
+- **Зачем:** на проде берём Neon со scale-to-zero (засыпает при простое), чтобы
+  платить только за рабочие часы. Но воркер поллил трекинг каждые 3 мин и низкий
+  остаток/дежурство — и круглосуточно будил БД, обнуляя экономию. План деплоя —
+  `~/.claude/plans/lively-painting-summit.md`.
+- **Сделано:** гейт джоб воркера по `WORK_SCHEDULE`. `app/utils/work_schedule.py`:
+  новая чистая функция `is_open_or_recently_closed(at, schedule, grace)`.
+  `app/worker.py`: обёртки `poll_tracking_gated`/`low_stock_gated`/
+  `clear_expired_duty_gated` — вне рабочих часов возвращают `None` **до** открытия
+  сессии (БД не трогают → ночью Neon спит). Дневные джобы гейтятся на `is_open`;
+  снятие дежурства — на `is_open_or_recently_closed` с grace = 2×`duty_check_seconds`,
+  чтобы гарантированно отработать пост-закрытие и снять смену. Пустое расписание =
+  гейт выключен (безопасный дефолт: «поллим всегда», не «молчим вечно»). Тесты:
+  расширен `test_work_schedule.py`, новый `test_worker_gating.py` (19 passed, ruff чист).
+- **Дальше (вне репо):** развёртывание prod+staging по плану; при заказе Neon
+  включить scale-to-zero на prod-ветке. Отдельный открытый пункт — монтирование
+  `secrets/` в прод-compose (нужно для Google Sheets на VPS), решить с владельцем.
 - **Открытые вопросы:** нет.
 
 ## 2026-07-05 · feat/alex-stock-link-text · /code-review + /simplify Части D

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 from app.utils.work_schedule import (
     current_window_end,
     is_open,
+    is_open_or_recently_closed,
     next_window_start,
     window_for_day,
 )
@@ -61,3 +62,25 @@ def test_next_window_start_skips_to_next_working_day():
 
 def test_next_window_start_returns_now_when_open():
     assert next_window_start(_at(22, 10), SCHEDULE) == _at(22, 10)
+
+
+GRACE = timedelta(minutes=10)
+
+
+def test_recently_closed_true_while_open():
+    assert is_open_or_recently_closed(_at(22, 10), SCHEDULE, GRACE) is True
+
+
+def test_recently_closed_true_within_grace_after_close():
+    assert is_open_or_recently_closed(_at(22, 20), SCHEDULE, GRACE) is True  # ровно закрытие
+    assert is_open_or_recently_closed(_at(22, 20, 9), SCHEDULE, GRACE) is True
+
+
+def test_recently_closed_false_past_grace():
+    assert is_open_or_recently_closed(_at(22, 20, 10), SCHEDULE, GRACE) is False
+    assert is_open_or_recently_closed(_at(22, 23), SCHEDULE, GRACE) is False
+
+
+def test_recently_closed_false_before_open_and_on_day_off():
+    assert is_open_or_recently_closed(_at(22, 7), SCHEDULE, GRACE) is False
+    assert is_open_or_recently_closed(_at(28, 12), SCHEDULE, GRACE) is False

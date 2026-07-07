@@ -12,6 +12,7 @@ FSM-data (лимит 64 байта). FSM-состояние — `MemoryStorage` 
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from decimal import Decimal, InvalidOperation
 
@@ -86,6 +87,17 @@ def _effective_client(context: EffectiveContext):
 def _profile_uuid(data: dict) -> uuid.UUID | None:
     raw = data.get("sender_profile_id")
     return uuid.UUID(raw) if raw else None
+
+
+async def _typing(bot: Bot, chat_id: int) -> None:
+    """Индикатор «печатает…» на время запроса в справочники НП.
+
+    Справочники НП на холодном кэше отвечают ощутимо (round-trip к api.novaposhta),
+    а текстовый шаг поиска иначе не даёт никакого отклика — бот выглядит зависшим.
+    Best-effort: сбой экшена не должен ронять поиск.
+    """
+    with contextlib.suppress(TelegramAPIError):
+        await bot.send_chat_action(chat_id=chat_id, action="typing")
 
 
 def _valid_edrpou(raw: str) -> bool:
@@ -989,6 +1001,7 @@ async def receive_city_query(
         await message.answer("Авторизуйтесь через /start.")
         return
     query = (message.text or "").strip()
+    await _typing(bot, message.chat.id)
     try:
         cities = await address.search_cities(
             db_session,
@@ -1143,6 +1156,7 @@ async def receive_warehouse_query(
         await message.answer(_STALE)
         return
     query = (message.text or "").strip()
+    await _typing(bot, message.chat.id)
     try:
         whs = await address.search_warehouses(
             db_session,
