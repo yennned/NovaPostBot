@@ -15,6 +15,25 @@
 
 ---
 
+## 2026-07-07 · feat/alex-deploy-prep · тихие часы воркера (Neon scale-to-zero)
+- **Зачем:** на проде берём Neon со scale-to-zero (засыпает при простое), чтобы
+  платить только за рабочие часы. Но воркер поллил трекинг каждые 3 мин и низкий
+  остаток/дежурство — и круглосуточно будил БД, обнуляя экономию. План деплоя —
+  `~/.claude/plans/lively-painting-summit.md`.
+- **Сделано:** гейт джоб воркера по `WORK_SCHEDULE`. `app/utils/work_schedule.py`:
+  новая чистая функция `is_open_or_recently_closed(at, schedule, grace)`.
+  `app/worker.py`: обёртки `poll_tracking_gated`/`low_stock_gated`/
+  `clear_expired_duty_gated` — вне рабочих часов возвращают `None` **до** открытия
+  сессии (БД не трогают → ночью Neon спит). Дневные джобы гейтятся на `is_open`;
+  снятие дежурства — на `is_open_or_recently_closed` с grace = 2×`duty_check_seconds`,
+  чтобы гарантированно отработать пост-закрытие и снять смену. Пустое расписание =
+  гейт выключен (безопасный дефолт: «поллим всегда», не «молчим вечно»). Тесты:
+  расширен `test_work_schedule.py`, новый `test_worker_gating.py` (19 passed, ruff чист).
+- **Дальше (вне репо):** развёртывание prod+staging по плану; при заказе Neon
+  включить scale-to-zero на prod-ветке. Отдельный открытый пункт — монтирование
+  `secrets/` в прод-compose (нужно для Google Sheets на VPS), решить с владельцем.
+- **Открытые вопросы:** нет.
+
 ## 2026-07-05 · feat/alex-stock-link-text · /code-review + /simplify Части D
 - **Зачем:** ревью и чистка кода панелей после реализации Части D.
 - **Сделано:**
