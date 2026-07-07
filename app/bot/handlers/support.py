@@ -194,6 +194,9 @@ async def client_chat_message(
     await db_session.commit()
     if manager_tid is not None:
         await BotNotifier(bot).send_message(manager_tid, relay_text)
+        # Подтверждаем клиенту каждое сообщение: без ack чат выглядит «одноразовым»
+        # (после отправки ничего не происходит) — это и рождало жалобу «застряли».
+        await message.answer(texts.client_message_ack_text())
     else:
         await message.answer(texts.queued_ack_text())
 
@@ -277,9 +280,7 @@ async def client_start(
         )
     await state.set_state(SupportState.client_chatting)
     await state.update_data(support_thread_id=str(result.thread.id))
-    prompt = (
-        "Напишіть повідомлення — воно піде менеджеру." if result.routed else texts.queued_ack_text()
-    )
+    prompt = texts.chat_started_prompt_text() if result.routed else texts.queued_ack_text()
     await callback.message.answer(prompt, reply_markup=kb.build_client_chat_kb())
     await callback.answer()
 

@@ -44,6 +44,7 @@ from app.bot.texts.clients import (
     search_prompt_text,
 )
 from app.bot.types import EffectiveContext
+from app.db.models.enums import UserRole
 from app.db.models.user import User
 from app.db.repositories import UserRepository
 from app.services import clients, manager_returns, notifications
@@ -59,9 +60,19 @@ _ACTIONS = {
     "approve": clients.approve_client,
     "block": clients.block_client,
     "unblock": clients.unblock_client,
-    "archive": clients.archive_client,
+    # `archive` из карточки убран (объединили с блокировкой); `restore` оставлен
+    # для восстановления legacy-архивных клиентов.
     "restore": clients.restore_client,
 }
+
+
+def _can_edit_clients(ctx: EffectiveContext) -> bool:
+    """Правка профиля клиента — только владелец (учитывает impersonation dev'а).
+
+    Ориентируемся на эффективную роль: `/as manager` у dev'а тоже прячет кнопку,
+    чтобы можно было проверить менеджерский UX.
+    """
+    return ctx.effective_role is UserRole.owner
 
 
 async def _list_payload(
@@ -179,7 +190,9 @@ async def cb_card(
         await callback.answer(client_error_text(exc), show_alert=True)
         return
     await _edit_or_ignore(
-        callback.message, client_card_text(card), build_client_card_kb(card, token)
+        callback.message,
+        client_card_text(card),
+        build_client_card_kb(card, token, can_edit=_can_edit_clients(effective_context)),
     )
     await callback.answer()
 
@@ -332,7 +345,9 @@ async def cb_action(
 
     token = status_token(card.status)
     await _edit_or_ignore(
-        callback.message, client_card_text(card), build_client_card_kb(card, token)
+        callback.message,
+        client_card_text(card),
+        build_client_card_kb(card, token, can_edit=_can_edit_clients(effective_context)),
     )
     await callback.answer(action_done_text(card))
 
@@ -378,9 +393,12 @@ async def receive_search(
 
 
 @router.callback_query(F.data.startswith("cl:edit:"))
-async def cb_edit(callback: CallbackQuery) -> None:
+async def cb_edit(callback: CallbackQuery, effective_context: EffectiveContext) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if not _can_edit_clients(effective_context):
+        await callback.answer("Недостатньо прав для цієї дії.", show_alert=True)
         return
     try:
         _, _, token, client_raw = callback.data.split(":")
@@ -393,9 +411,14 @@ async def cb_edit(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("cl:editf:"))
-async def cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_edit_field(
+    callback: CallbackQuery, effective_context: EffectiveContext, state: FSMContext
+) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if not _can_edit_clients(effective_context):
+        await callback.answer("Недостатньо прав для цієї дії.", show_alert=True)
         return
     try:
         _, _, field, token, client_raw = callback.data.split(":")
@@ -450,6 +473,9 @@ async def receive_edit(
         await message.answer(client_error_text(exc))
         return
     await message.answer(profile_updated_text())
+    can_edit = _can_edit_clients(effective_context)
     await message.answer(
-        client_card_text(card), reply_markup=build_client_card_kb(card, token), parse_mode="HTML"
+        client_card_text(card),
+        reply_markup=build_client_card_kb(card, token, can_edit=can_edit),
+        parse_mode="HTML",
     )

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -10,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards import build_contact_keyboard, build_role_menu
 from app.bot.notify import BotNotifier
-from app.bot.screen import remember_screen
 from app.bot.services import StartService
 from app.bot.states import StartStates
 from app.bot.texts import (
@@ -145,29 +147,13 @@ async def home_callback(
         await callback.answer("Кнопка застаріла, відкрийте /start ще раз.", show_alert=True)
         return
     await state.clear()
-    if effective_context.effective_role is None:
-        await callback.message.edit_text(dev_help_text())
-        await callback.answer()
-        return
-
-    banner = dev_mode_banner(
-        effective_context.effective_role,
-        impersonated=effective_context.effective_user is not None
-        and effective_context.actor_user is not None
-        and effective_context.effective_user.telegram_id
-        != effective_context.actor_user.telegram_id,
-    )
-    parts: list[str] = []
-    if effective_context.is_dev:
-        parts.append(banner)
-    if effective_context.effective_user is not None:
-        parts.append(
-            welcome_text(effective_context.effective_user, effective_context.effective_role)
-        )
-    else:
-        parts.append(f"Відкриваю меню {effective_context.effective_role.value}.")
-    # Меню роли — на постоянной reply-панели снизу (set на /start, «прилипает»).
-    # Тут только чистим inline-экран до home-текста; панель остаётся внизу.
-    await callback.message.edit_text("\n".join(parts), reply_markup=None)
-    await remember_screen(state, callback.message)
+    # Reply-панель меню роли живёт на нижней клавиатуре, а её нельзя переустановить
+    # через edit_text инлайн-сообщения. Раньше «Головна» лишь чистила инлайн-экран и
+    # надеялась на «прилипшую» панель — но в чате поддержки/ТТН она заменена другой
+    # reply-клавиатурой, и меню не появлялось. Снимаем инлайн-кнопки старого экрана и
+    # отправляем меню роли новым сообщением (как `_render_home`/`_exit_chat_to_home`).
+    with contextlib.suppress(TelegramBadRequest):
+        # сообщение без разметки/устарело — не критично
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await _render_home(callback.message, effective_context)
     await callback.answer()

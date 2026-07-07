@@ -40,19 +40,25 @@ def _nav_row(offset: int, total: int, limit: int) -> list[InlineKeyboardButton]:
 
 
 def build_cart_picker_kb(
-    page: InventoryPage, *, cart_count: int, active_category: str | None = None
+    page: InventoryPage,
+    *,
+    cart_count: int,
+    active_category: str | None = None,
+    has_reset: bool = False,
 ) -> InlineKeyboardMarkup:
     """Список товаров для набора корзины (по индексу страницы; sku — в FSM-data).
 
     Браузинг как в «Товари»: сначала чипы категорий (`cab:ttn:pcat:*`), потом
     товары. Артикул в подписи не показываем — выбор идёт по индексу.
+
+    «🧹 Скинути» показываем только когда есть что сбрасывать (`has_reset`:
+    непустая корзина или активный фильтр) — иначе повторный рендер идентичен и
+    Telegram отклоняет edit («message is not modified»), кнопка выглядит битой.
     """
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:ttn:search"),
-            InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:ttn:searchclear"),
-        ]
-    ]
+    top_row = [InlineKeyboardButton(text="🔎 Пошук", callback_data="cab:ttn:search")]
+    if has_reset:
+        top_row.append(InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:ttn:searchclear"))
+    rows: list[list[InlineKeyboardButton]] = [top_row]
     rows.extend(category_chips(page.categories, prefix="cab:ttn:pcat", active=active_category))
     for idx, item in enumerate(page.items):
         prefix = "🚫 " if item.available <= 0 else ""

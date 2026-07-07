@@ -28,10 +28,10 @@ from app.services.exceptions import (
 )
 
 # Per-flag права (ключи в `users.permissions`). Канонический источник —
-# `app/bot/permissions.py`; здесь — алиасы для обратной совместимости вызовов
-# `clients.CAN_MANAGE_CLIENTS` / `clients.CAN_EDIT_CLIENTS`.
-CAN_MANAGE_CLIENTS = permissions.CAN_MANAGE_CLIENTS  # подтверждение/блок/архив
-CAN_EDIT_CLIENTS = permissions.CAN_EDIT_CLIENTS  # правка ПІБ/телефона
+# `app/bot/permissions.py`; здесь — алиас для обратной совместимости вызовов
+# `clients.CAN_MANAGE_CLIENTS`. Правка профиля клиента per-flag'ом больше не
+# гейтится — это действие только владельца (`permissions.require_owner`).
+CAN_MANAGE_CLIENTS = permissions.CAN_MANAGE_CLIENTS  # подтверждение/блокировка
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,7 +262,7 @@ async def update_client_profile(
 ) -> ClientCard:
     users = UserRepository(session)
     user = await _get_client(users, client_id)
-    permissions.require_can_manage(actor, user, CAN_EDIT_CLIENTS, settings)
+    permissions.require_owner(actor, settings)
 
     before = {"full_name": user.full_name, "phone": user.phone}
     changed = False

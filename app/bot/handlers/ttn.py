@@ -236,7 +236,10 @@ async def _show_picker(
     data = await state.get_data()
     cart_count = len(data.get("cart", {}))
     text = texts.cart_picker_text(page, cart_count=cart_count)
-    kb = build_cart_picker_kb(page, cart_count=cart_count, active_category=category)
+    has_reset = cart_count > 0 or bool(query) or bool(category)
+    kb = build_cart_picker_kb(
+        page, cart_count=cart_count, active_category=category, has_reset=has_reset
+    )
     if edit:
         await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -466,10 +469,12 @@ async def cb_search_clear(
     if client is None:
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
-    await state.update_data(ttn_query=None, ttn_category=None)
+    # Сбрасываем и фильтры, и корзину (выбранные товары) — раньше чистились только
+    # фильтры, из-за чего кнопка «Скинути» не очищала набор и казалась нерабочей.
+    await state.update_data(ttn_query=None, ttn_category=None, cart={}, pending=None)
     await state.set_state(CreateTtnState.picking_items)
     await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
-    await callback.answer("Фільтри скинуто.")
+    await callback.answer("Кошик і фільтри очищено.")
 
 
 @router.callback_query(F.data.startswith("cab:ttn:pcat:"))

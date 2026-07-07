@@ -43,6 +43,10 @@ services:
   bot:
     <<: *app
     command: ["python", "-m", "app.main"]
+    # secrets/ не входит в образ (.dockerignore) — Google SA JSON пробрасываем
+    # read-only. На проде тот же путь, что в локальном override (см. .env GOOGLE_SA_JSON).
+    volumes:
+      - ./secrets:/app/secrets:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -53,6 +57,8 @@ services:
   worker:
     <<: *app
     command: ["python", "-m", "app.worker"]
+    volumes:
+      - ./secrets:/app/secrets:ro
     depends_on:
       redis:
         condition: service_healthy

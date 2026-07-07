@@ -55,7 +55,21 @@ def duty_card_text(contact: DutyContact) -> str:
 
 
 def client_resume_text() -> str:
-    return "У вас вже є відкрите звернення. Напишіть повідомлення — воно піде менеджеру."
+    return (
+        "У вас вже є відкрите звернення. Пишіть повідомлення — менеджер їх бачить. "
+        "Можна кілька; завершити — кнопкою «⬅️ Завершити чат»."
+    )
+
+
+def chat_started_prompt_text() -> str:
+    return (
+        "Напишіть повідомлення — воно піде менеджеру. "
+        "Можна кілька; завершити — кнопкою «⬅️ Завершити чат»."
+    )
+
+
+def client_message_ack_text() -> str:
+    return "✅ Надіслано менеджеру. Можете написати ще."
 
 
 def chat_closed_text() -> str:
@@ -96,7 +110,10 @@ def inbox_text(total: int, *, scope: str, query: str | None = None) -> str:
 
 
 def reply_prompt_text() -> str:
-    return "Введіть відповідь клієнту одним повідомленням."
+    return (
+        "Напишіть відповідь клієнту. Можна кілька повідомлень — чат триває, "
+        "доки не натиснете «⬅️ Завершити відповідь»."
+    )
 
 
 def reply_sent_text() -> str:

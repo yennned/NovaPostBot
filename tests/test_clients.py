@@ -30,6 +30,14 @@ async def _manager(session: AsyncSession, telegram_id: int = 10, permissions: di
     )
 
 
+async def _owner(session: AsyncSession, telegram_id: int = 11):
+    return await UserRepository(session).create(
+        telegram_id=telegram_id,
+        role=UserRole.owner,
+        status=UserStatus.active,
+    )
+
+
 async def _client(session: AsyncSession, telegram_id: int = 100, status=UserStatus.pending):
     return await UserRepository(session).create(
         telegram_id=telegram_id,
@@ -114,7 +122,7 @@ async def test_blocked_manager_cannot_manage(db_session: AsyncSession):
 
 
 async def test_update_profile_phone_collision(db_session: AsyncSession):
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     a = await _client(db_session, telegram_id=400)
     b = await _client(db_session, telegram_id=401)
     with pytest.raises(PhoneAlreadyTaken):
@@ -166,18 +174,25 @@ async def test_get_client_card(db_session: AsyncSession):
     assert card.default_sender_name is None
 
 
-async def test_update_profile_requires_edit_flag(db_session: AsyncSession):
-    actor = await _manager(db_session, permissions={clients.CAN_EDIT_CLIENTS: False})
+async def test_update_profile_requires_owner(db_session: AsyncSession):
+    """Правка профиля клиента — только владелец; менеджеру запрещено."""
+    manager = await _manager(db_session)
     client = await _client(db_session)
     with pytest.raises(PermissionDenied):
         await clients.update_client_profile(
-            db_session, actor=actor, client_id=client.id, full_name="New"
+            db_session, actor=manager, client_id=client.id, full_name="New"
         )
+
+    owner = await _owner(db_session)
+    card = await clients.update_client_profile(
+        db_session, actor=owner, client_id=client.id, full_name="New"
+    )
+    assert card.full_name == "New"
 
 
 async def test_update_profile_sheets_error_is_swallowed(db_session: AsyncSession, monkeypatch):
     """Сбой Sheets (не БД) best-effort: переименование клиента сохраняется."""
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     client = await _client(db_session)
 
     async def boom(*args, **kwargs):
@@ -195,7 +210,7 @@ async def test_update_profile_sheets_error_is_swallowed(db_session: AsyncSession
 async def test_update_profile_db_error_in_sync_propagates(db_session: AsyncSession, monkeypatch):
     """Ошибку БД из синка НЕ глотаем — иначе сессия в rollback-required, а
     последующий запрос/commit тихо потеряет уже сфлашенное переименование."""
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     client = await _client(db_session)
 
     async def boom(*args, **kwargs):
@@ -210,7 +225,7 @@ async def test_update_profile_db_error_in_sync_propagates(db_session: AsyncSessi
 
 
 async def test_update_profile_writes_audit(db_session: AsyncSession):
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     client = await _client(db_session)
     await clients.update_client_profile(
         db_session, actor=actor, client_id=client.id, full_name="Оновлене Імʼя"

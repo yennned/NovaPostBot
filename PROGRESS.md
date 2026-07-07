@@ -15,6 +15,50 @@
 
 ---
 
+## 2026-07-07 · feat/alex-qa-review-fixes · 5 доработок из ревью тестового бота
+- **Зачем:** ревью тестового бота выявило 5 пунктов (UX-баги + продуктовые
+  правки). Решения по спорным пунктам согласованы с владельцем. План —
+  `~/.claude/plans/mossy-wibbling-gray.md`.
+- **Сделано:**
+  - **#1 (`49497ce`):** объединил «Заблокувати» и «Архів» на карточке клиента в
+    одну кнопку — `blocked` как единое обратимое «удалённое» состояние; action
+    `archive` из карточки убран, `archived` — legacy (restore сохранён).
+  - **#2 (`49497ce`):** правка ПІБ/телефона клиента — только владелец. Убрал
+    per-flag `can_edit_clients` (константа + тумблер «Персонал»), ввёл
+    `permissions.require_owner`; кнопку «Редагувати» прячем у не-владельца +
+    owner-гейт в `cb_edit`/`cb_edit_field`.
+  - **#3 (`461d451`):** «⌂ Головна» теперь реально открывает меню роли (шлём
+    `build_role_menu` новым сообщением через `_render_home`) — раньше в чате
+    поддержки нижняя панель была подменена и меню не появлялось.
+  - **#4 (`3c0a66e`):** обращения — логического лимита не было; ощущение «одного
+    сообщения» давал UX. Добавил клиенту ack на каждое сообщение + переписал
+    подсказки (можно несколько сообщений до «Завершити»).
+  - **#5 (`251ac0e`):** «🧹 Скинути» в пикере товаров ТТН теперь чистит корзину
+    (`cart`/`pending`), а не только фильтры; кнопку показываем только когда есть
+    что сбрасывать (убирает no-op «message is not modified»).
+  - Тесты: обновил `test_clients`/`test_permissions`/`test_clients_handlers`
+    (owner-only edit, `require_owner`), добавил reset-тесты в `test_ttn_cart`.
+    Полный `pytest` (novapostbot_test) зелёный, `ruff check`+`format` ок.
+    Тестовый бот пересобран и поднят (@test_np_np_bot), старт без ошибок.
+- **Дальше:** ручная проверка 5 сценариев в Telegram; затем push + PR в `main`.
+- **Открытые вопросы:** опц. миграция legacy `archived → blocked` и surfacing
+  сбоя доставки релея (сейчас `BotNotifier` глушит) — отложены.
+
+## 2026-07-07 · feat/alex-deploy-secrets-mount · подготовка к деплою на VPS
+- **Зачем:** гайд по развёртыванию на сервере «под ключ» (prod + staging на
+  Hetzner CPX21 + Neon). Полный план — `~/.claude/plans/lively-painting-summit.md`.
+- **Сделано:** закрыт единственный код-gap деплоя: прод-`docker-compose.yml` не
+  монтировал `secrets/` (образ его не содержит — `.dockerignore`), из-за чего при
+  `INVENTORY_SOURCE=sheets` бот/воркер не нашли бы Google SA JSON. Добавлен
+  read-only bind-mount `./secrets:/app/secrets:ro` в сервисы `bot` и `worker`
+  (тот же путь, что в локальном override; `docker compose config` — merge без
+  дубля mount, ок).
+- **Дальше (ручные ops, вне репо):** купить/захардить VPS, Neon prod+staging
+  ветки, `.env`×2 + `secrets/` на сервере, GHCR login, первый `up` + smoke-тест,
+  активировать SSH-секреты CI (`SSH_HOST`/`SSH_USER`/`SSH_PRIVATE_KEY`/`DEPLOY_PATH`),
+  бэкап `FERNET_KEY`. Follow-up: авто-деплой staging отдельным workflow.
+- **Открытые вопросы:** нет.
+
 ## 2026-07-05 · feat/alex-stock-link-text · /code-review + /simplify Части D
 - **Зачем:** ревью и чистка кода панелей после реализации Части D.
 - **Сделано:**
