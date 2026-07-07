@@ -15,6 +15,21 @@
 
 ---
 
+## 2026-07-07 · feat/alex-deploy-secrets-mount · подготовка к деплою на VPS
+- **Зачем:** гайд по развёртыванию на сервере «под ключ» (prod + staging на
+  Hetzner CPX21 + Neon). Полный план — `~/.claude/plans/lively-painting-summit.md`.
+- **Сделано:** закрыт единственный код-gap деплоя: прод-`docker-compose.yml` не
+  монтировал `secrets/` (образ его не содержит — `.dockerignore`), из-за чего при
+  `INVENTORY_SOURCE=sheets` бот/воркер не нашли бы Google SA JSON. Добавлен
+  read-only bind-mount `./secrets:/app/secrets:ro` в сервисы `bot` и `worker`
+  (тот же путь, что в локальном override; `docker compose config` — merge без
+  дубля mount, ок).
+- **Дальше (ручные ops, вне репо):** купить/захардить VPS, Neon prod+staging
+  ветки, `.env`×2 + `secrets/` на сервере, GHCR login, первый `up` + smoke-тест,
+  активировать SSH-секреты CI (`SSH_HOST`/`SSH_USER`/`SSH_PRIVATE_KEY`/`DEPLOY_PATH`),
+  бэкап `FERNET_KEY`. Follow-up: авто-деплой staging отдельным workflow.
+- **Открытые вопросы:** нет.
+
 ## 2026-07-05 · feat/alex-stock-link-text · /code-review + /simplify Части D
 - **Зачем:** ревью и чистка кода панелей после реализации Части D.
 - **Сделано:**
