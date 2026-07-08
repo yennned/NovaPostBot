@@ -15,6 +15,23 @@
 
 ---
 
+## 2026-07-08 · feat/alex-deploy-prod · развёртывание prod + staging на Hetzner
+- **Сделано:** боевое развёртывание «под ключ». Hetzner CPX22 (Ubuntu 24.04,
+  IP 46.224.126.101) захардён: пользователь `deploy` (вход ключ-онли), root/
+  пароль-вход отключён, fail2ban + ufw (наружу только SSH) + unattended-upgrades,
+  Docker + json-file ротация логов. Два стека на одном VPS: **prod**
+  (@novopokrovka_np_bot) и **staging** (@np_test_dev_bot) — разные BOT_TOKEN/
+  FERNET_KEY/Neon-ветка. БД — Neon Launch (scale-to-zero); строки подключения
+  сконвертированы `sslmode&channel_binding` → `?ssl=require` под asyncpg,
+  миграции прогнаны на обеих ветках (pooler для приложения, direct для Alembic).
+  Google SA JSON — инлайном в `.env` (правок кода/compose не потребовалось).
+  Активирован авто-деплой из `main` (CI-секреты SSH_HOST/USER/PRIVATE_KEY/
+  DEPLOY_PATH). Мониторинг: cron каждые 5 мин + Telegram-алерт владельцу при
+  падении контейнера. Операционный гайд — `~/.claude/plans/lively-painting-summit.md`.
+- **Дальше:** off-site бэкап prod FERNET_KEY до первого реального клиента; опц.
+  отдельный workflow для staging авто-деплоя; опц. ночной `pg_dump` off-site.
+- **Открытые вопросы:** нет.
+
 ## 2026-07-07 · test/combined-qa-perf · фиксы по /code-review (QA + perf вместе)
 - **Зачем:** прогнал `/code-review` по QA+perf, собрал общий образ; внёс
   не-блокирующие замечания. Ветка `test/combined-qa-perf` — интеграционная
