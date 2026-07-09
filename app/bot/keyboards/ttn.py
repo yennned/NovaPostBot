@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.keyboards.common import category_chips, home_button
@@ -295,16 +297,33 @@ def build_payment_edit_kb(current: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_cancel_kb() -> InlineKeyboardMarkup:
-    """Клавиатура под prompt текстового ввода: вихід у меню + «Скасувати»."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def build_cod_amount_kb(cart_total: Decimal) -> InlineKeyboardMarkup:
+    """Выбор суммы наложенного платежа без передачи денег в callback_data."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if cart_total > 0:
+        rows.append(
             [
-                home_button(),
-                InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel"),
+                InlineKeyboardButton(
+                    text=f"🧺 Сума з кошика: {cart_total:f} ₴",
+                    callback_data="cab:ttn:cod:cart",
+                )
             ]
+        )
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="✏️ Ввести власну суму", callback_data="cab:ttn:cod:custom")],
+            [InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_cancel_kb(*, back: str | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура текстового шага: предыдущий этап, меню и отмена."""
+    row = [home_button(), InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]
+    if back is not None:
+        row.insert(0, InlineKeyboardButton(text="◀ Назад", callback_data=f"cab:ttn:back:{back}"))
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def build_city_results_kb(cities: list[dict]) -> InlineKeyboardMarkup:
@@ -320,6 +339,9 @@ def build_city_results_kb(cities: list[dict]) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    rows.append(
+        [InlineKeyboardButton(text="◀ Назад", callback_data="cab:ttn:back:recipient_phone")]
+    )
     rows.append(
         [home_button(), InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]
     )
@@ -356,6 +378,7 @@ def build_warehouse_results_kb(warehouses: list[dict], *, offset: int) -> Inline
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔎 Знайти за №", callback_data="cab:ttn:whfind")])
+    rows.append([InlineKeyboardButton(text="◀ Змінити місто", callback_data="cab:ttn:back:city")])
     rows.append(
         [home_button(), InlineKeyboardButton(text="✖ Скасувати", callback_data="cab:ttn:cancel")]
     )
