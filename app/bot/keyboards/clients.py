@@ -25,9 +25,6 @@ PAGE_SIZE = 5
 _TABS: list[tuple[str, str]] = [
     ("pending", STATUS_LABELS[UserStatus.pending]),
     ("active", STATUS_LABELS[UserStatus.active]),
-    ("blocked", STATUS_LABELS[UserStatus.blocked]),
-    ("archived", STATUS_LABELS[UserStatus.archived]),
-    ("all", "Всі"),
 ]
 
 
