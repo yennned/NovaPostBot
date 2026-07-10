@@ -238,11 +238,48 @@ def style_header(book: Any, ws: Any, ncols: int) -> None:
 
 def setup_intake_validation(book: Any, ws: Any) -> None:
     sid = ws.id
+    date_col = INTAKE_HEADERS.index("Дата")  # 0
     state_col = INTAKE_HEADERS.index("Стан")  # 7
     done_col = INTAKE_HEADERS.index("Оброблено")  # 8
     book.batch_update(
         {
             "requests": [
+                # Дата: формат ДД.ММ.РРРР (Apps Script авто-ставит сегодняшнюю дату
+                # при первой правке строки; ручной ввод через точку принимается).
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sid,
+                            "startRowIndex": 1,
+                            "endRowIndex": 1000,
+                            "startColumnIndex": date_col,
+                            "endColumnIndex": date_col + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": "DATE", "pattern": "dd.MM.yyyy"}
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+                # Дата: календарь-пикер по двойному клику (нестрого — допускает ручной ввод).
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": sid,
+                            "startRowIndex": 1,
+                            "endRowIndex": 1000,
+                            "startColumnIndex": date_col,
+                            "endColumnIndex": date_col + 1,
+                        },
+                        "rule": {
+                            "condition": {"type": "DATE_IS_VALID"},
+                            "showCustomUi": True,
+                            "strict": False,
+                        },
+                    }
+                },
                 {
                     "setDataValidation": {
                         "range": {
