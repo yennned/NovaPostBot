@@ -206,6 +206,14 @@ def payment_edit_text() -> str:
     return "💳 Спосіб оплати:"
 
 
+def cod_amount_choice_text() -> str:
+    return "💵 Оберіть суму накладеного платежу:"
+
+
+def cod_amount_prompt() -> str:
+    return "Введіть суму накладеного платежу в гривнях, наприклад 1200:"
+
+
 def success_text(ttn_number: str | None) -> str:
     num = f"<b>{html.escape(ttn_number)}</b>" if ttn_number else "—"
     return (
@@ -246,7 +254,8 @@ def card_text(data: dict, price: dict) -> str:
         ]
     )
     if data.get("cod_amount"):
-        lines.append(f"   Накладений платіж: {data['cod_amount']} ₴")
+        source = "сума з кошика" if data.get("cod_amount_source") == "cart" else "власна сума"
+        lines.append(f"   Накладений платіж: {data['cod_amount']} ₴ ({source})")
     lines.append(f"🧾 Платник доставки: {payer}")
     lines.append("─────────────")
     if price.get("unavailable"):

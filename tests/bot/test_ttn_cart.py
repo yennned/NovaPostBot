@@ -43,7 +43,7 @@ class FakeState:
 
 
 class FakeBot:
-    """Минимальный бот: chat action + edit_message_text (для edit_stored_screen)."""
+    """Минимальный бот для индикатора поиска и проверки старых экранов."""
 
     def __init__(self) -> None:
         self.actions: list[dict] = []
@@ -225,6 +225,10 @@ def _callbacks(markup) -> list[str]:
     return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
 
 
+def _button_labels(markup) -> list[str]:
+    return [button.text for row in markup.inline_keyboard for button in row]
+
+
 async def test_entry_multi_profile_shows_sender_picker(db_session: AsyncSession, monkeypatch):
     client = await _active_client(db_session, 910)
     monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
@@ -393,9 +397,10 @@ async def test_item_search_keeps_reset_button(monkeypatch):
     bot = FakeBot()
     msg = FakeMessage(text="кава")
     await h.receive_item_search(msg, bot, state, _ctx(_CLIENT), None)
-    kb = bot.edits[-1]["reply_markup"]
+    kb = msg.answers[-1]["reply_markup"]
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert "🧹 Скинути" in labels
+    assert bot.edits == []  # результат поиска всегда отправлен последним сообщением
 
 
 def test_cart_picker_reset_button_guarded():
@@ -526,14 +531,16 @@ async def test_show_parcel_defaults_weight_so_dali_available():
 # ----------------------------------------------------------- COD-гард (анти cod_amount=None)
 
 
-async def test_set_payment_cod_zero_price_blocked():
-    # Корзина без цены → COD ставить нельзя (иначе cod_amount=None упадёт на submit).
+async def test_set_payment_cod_without_cart_price_offers_custom_amount():
+    # Без цен в корзине можно указать свою сумму, но нельзя ошибочно выбрать сумму корзины.
     state = FakeState(cart={"A": {"qty": 1, "name": "A", "price": None}}, payment_method="prepay")
     cb = FakeCallback("cab:ttn:setpm:cod")
     await h.cb_set_payment(cb, None, None, None, state)
-    assert cb.acks[-1]["show_alert"] is True
     assert state._data.get("payment_method") == "prepay"
     assert "cod_amount" not in state._data
+    labels = _button_labels(cb.message.edits[-1]["reply_markup"])
+    assert "✏️ Ввести власну суму" in labels
+    assert not any("Сума з кошика" in label for label in labels)
 
 
 # ----------------------------------------------------------- фильтр-категория в пикере
@@ -650,12 +657,39 @@ async def test_city_query_shows_results(monkeypatch):
     _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
-    msg = FakeMessage(text="Київ")
+    msg = FakeMessage(text="Ки")
     bot = FakeBot()
     await h.receive_city_query(msg, bot, state, _ctx(_CLIENT), None, object(), object())
     assert state._data["cities"][0]["ref"] == "c1"
     assert msg.answers[-1]["reply_markup"] is not None
     assert bot.actions and bot.actions[-1]["action"] == "typing"  # индикатор загрузки
+
+
+async def test_city_query_exact_match_opens_warehouses(monkeypatch):
+    """Точное название города не требует дополнительного выбора кнопкой."""
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
+    _patch_warehouses(monkeypatch, [Warehouse(ref="w1", number="5", description="Хрещатик")])
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+    msg = FakeMessage(text="Київ")
+
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
+
+    assert state._data["recipient_city_ref"] == "c1"
+    assert state._data["warehouses"][0]["ref"] == "w1"
+    assert state.state == CreateTtnState.entering_warehouse_query
+    assert msg.answers[-1]["reply_markup"] is not None
+
+
+async def test_city_query_empty_stays_on_city_step():
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+    msg = FakeMessage(text="   ")
+
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
+
+    assert state.state == CreateTtnState.entering_city_query
+    assert "Введіть назву міста" in msg.answers[-1]["text"]
 
 
 async def test_city_query_not_found(monkeypatch):
@@ -666,6 +700,24 @@ async def test_city_query_not_found(monkeypatch):
     await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
     assert "cities" not in state._data
     assert "Нічого не знайшли" in msg.answers[-1]["text"]
+
+
+async def test_back_from_city_returns_to_recipient_phone():
+    state = FakeState(
+        recipient_city_ref="c1",
+        recipient_city_name="Київ",
+        recipient_warehouse_ref="w1",
+        recipient_warehouse_name="№5: Хрещатик",
+        warehouses=[{"ref": "w1", "number": "5", "description": "Хрещатик"}],
+    )
+    cb = FakeCallback("cab:ttn:back:recipient_phone")
+
+    await h.cb_back(cb, _ctx(_CLIENT), None, state)
+
+    assert state.state == CreateTtnState.entering_recipient_phone
+    assert state._data["recipient_city_ref"] is None
+    assert state._data["recipient_warehouse_ref"] is None
+    assert "Введіть телефон" in cb.message.edits[-1]["text"]
 
 
 async def test_city_pick_loads_warehouses(monkeypatch):
@@ -685,6 +737,19 @@ async def test_city_pick_no_warehouses_returns_to_city(monkeypatch):
     await h.cb_city(cb, _ctx(_CLIENT), None, object(), object(), state)
     assert state.state == CreateTtnState.entering_city_query
     assert "не знайдено" in cb.message.edits[-1]["text"]
+
+
+async def test_back_from_warehouse_search_returns_to_warehouse_list():
+    state = FakeState(
+        recipient_city_name="Київ",
+        warehouses=[{"ref": "w1", "number": "5", "description": "Хрещатик"}],
+    )
+    cb = FakeCallback("cab:ttn:back:warehouse")
+
+    await h.cb_back(cb, _ctx(_CLIENT), None, state)
+
+    assert state.state == CreateTtnState.entering_warehouse_query
+    assert "Відділення у місті Київ" in cb.message.edits[-1]["text"]
 
 
 def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None):
@@ -899,30 +964,73 @@ async def test_set_payer(monkeypatch):
 
 async def test_set_payment_prepay_clears_cod(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
-    state = _card_state(payment_method="cod", cod_amount="300")
+    state = _card_state(payment_method="cod", cod_amount="300", cod_amount_source="cart")
     cb = FakeCallback("cab:ttn:setpm:prepay")
     await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["payment_method"] == "prepay"
     assert state._data["cod_amount"] is None
+    assert state._data["cod_amount_source"] is None
+
+
+async def test_set_payment_cod_opens_amount_choice():
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:setpm:cod")
+
+    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+
+    labels = _button_labels(cb.message.edits[-1]["reply_markup"])
+    assert "🧺 Сума з кошика: 300 ₴" in labels
+    assert "✏️ Ввести власну суму" in labels
+    assert state._data.get("payment_method", "prepay") == "prepay"
 
 
 async def test_set_payment_cod_uses_cart_total(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state()
-    cb = FakeCallback("cab:ttn:setpm:cod")
-    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    cb = FakeCallback("cab:ttn:cod:cart")
+    await h.cb_set_cod_from_cart(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["payment_method"] == "cod"
     assert state._data["cod_amount"] == "300"
+    assert state._data["cod_amount_source"] == "cart"
     assert state.state == CreateTtnState.summary
 
 
 async def test_set_payment_cod_not_linked_to_insured(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state(insured_amount="450")
-    cb = FakeCallback("cab:ttn:setpm:cod")
-    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    cb = FakeCallback("cab:ttn:cod:cart")
+    await h.cb_set_cod_from_cart(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["cod_amount"] == "300"
     assert state._data["payment_method"] == "cod"
+
+
+async def test_set_payment_cod_custom_amount(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:cod:custom")
+
+    await h.cb_set_cod_custom(cb, state)
+
+    assert state.state == CreateTtnState.editing_field
+    assert state._data["edit_field"] == "cod_amount"
+    msg = FakeMessage(text="450,50")
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
+    assert state._data["payment_method"] == "cod"
+    assert state._data["cod_amount"] == "450.50"
+    assert state._data["cod_amount_source"] == "custom"
+    assert state.state == CreateTtnState.summary
+
+
+async def test_set_payment_cod_custom_amount_must_be_positive(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="cod_amount")
+    await state.set_state(CreateTtnState.editing_field)
+    msg = FakeMessage(text="0")
+
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
+
+    assert state.state == CreateTtnState.editing_field
+    assert "більшою за 0" in msg.answers[-1]["text"]
 
 
 async def test_back_to_card(monkeypatch):

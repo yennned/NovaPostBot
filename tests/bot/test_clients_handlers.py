@@ -19,9 +19,11 @@ from app.bot.handlers.clients_manage import (
     open_clients,
     receive_edit,
 )
+from app.bot.keyboards.clients import build_clients_list_kb
 from app.bot.states import ClientManageState
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.repositories import UserRepository
+from app.services.clients import ClientPage
 from app.services.manager_returns import (
     ManagerReturnCard,
     ManagerReturnListItem,
@@ -78,6 +80,15 @@ class FakeBot:
 
     async def send_message(self, telegram_id: int, text: str, parse_mode=None) -> None:
         self.sent.append((telegram_id, text))
+
+
+def test_client_list_shows_only_pending_and_active_tabs():
+    page = ClientPage(items=[], total=0, status_counts={}, limit=5, offset=0)
+    keyboard = build_clients_list_kb(page, "pending")
+
+    tabs = keyboard.inline_keyboard[0]
+    assert [button.text for button in tabs] == ["• Очікують", "Активні"]
+    assert [button.callback_data for button in tabs] == ["cl:list:pending:0", "cl:list:active:0"]
 
 
 async def _manager(session: AsyncSession, telegram_id: int = 9):

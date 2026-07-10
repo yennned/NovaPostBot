@@ -36,6 +36,7 @@ from app.bot.keyboards.ttn import (
     build_cart_picker_kb,
     build_cart_review_kb,
     build_city_results_kb,
+    build_cod_amount_kb,
     build_parcel_kb,
     build_payer_edit_kb,
     build_payment_edit_kb,
@@ -46,7 +47,7 @@ from app.bot.keyboards.ttn import (
     build_warehouse_results_kb,
 )
 from app.bot.notify import BotNotifier
-from app.bot.screen import edit_stored_screen, remember_screen
+from app.bot.screen import answer_latest_screen, remember_screen
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as texts
 from app.bot.types import EffectiveContext
@@ -87,6 +88,11 @@ def _effective_client(context: EffectiveContext):
 def _profile_uuid(data: dict) -> uuid.UUID | None:
     raw = data.get("sender_profile_id")
     return uuid.UUID(raw) if raw else None
+
+
+def _normalized_city_name(value: str) -> str:
+    """Нормализовать название для безопасного точного совпадения с ответом НП."""
+    return " ".join(value.casefold().replace("’", "'").split())
 
 
 async def _typing(bot: Bot, chat_id: int) -> None:
@@ -342,13 +348,16 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
         updates["payer_type"] = "Recipient"
     if data.get("payment_method") == "cod":
         total = _cart_total(cart)
-        if total > 0:
-            updates["cod_amount"] = f"{total:f}"
-        else:
-            # Корзина без цены → COD не на чём держать: откатываем на передоплату,
-            # чтобы битое состояние (cod + None) не дошло до submit.
-            updates["payment_method"] = "prepay"
-            updates["cod_amount"] = None
+        if data.get("cod_amount") is None:
+            if total > 0:
+                updates["cod_amount"] = f"{total:f}"
+                updates["cod_amount_source"] = "cart"
+            else:
+                # Корзина без цены → COD не на чём держать: откатываем на передоплату,
+                # чтобы битое состояние (cod + None) не дошло до submit.
+                updates["payment_method"] = "prepay"
+                updates["cod_amount"] = None
+                updates["cod_amount_source"] = None
     if updates:
         await state.update_data(**updates)
         data = await state.get_data()
@@ -463,7 +472,9 @@ async def cb_search_prompt(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(_STALE, show_alert=True)
         return
     await state.set_state(CreateTtnState.entering_item_search)
-    await callback.message.answer("Введіть SKU, назву або категорію товару.")
+    await callback.message.answer(
+        "Введіть SKU, назву або категорію товару.", reply_markup=build_cancel_kb(back="items")
+    )
     await callback.answer()
 
 
@@ -553,16 +564,16 @@ async def receive_item_search(
     # Как в `_show_picker`: «🧹 Скинути» показываем, когда есть что сбрасывать
     # (после поиска `query` активен → кнопка нужна, чтобы очистить фильтр/корзину).
     has_reset = cart_count > 0 or bool(query) or bool(category)
-    if not await edit_stored_screen(
+    await answer_latest_screen(
         bot,
+        message,
         state,
-        text=texts.cart_picker_text(page, cart_count=cart_count),
+        texts.cart_picker_text(page, cart_count=cart_count),
         reply_markup=build_cart_picker_kb(
             page, cart_count=cart_count, active_category=category, has_reset=has_reset
         ),
         parse_mode="HTML",
-    ):
-        await _show_picker(message, db_session, client, state, offset=0, edit=False)
+    )
 
 
 @router.callback_query(F.data.startswith("cab:ttn:pick:"))
@@ -673,7 +684,9 @@ async def cb_qty_num(callback: CallbackQuery, state: FSMContext) -> None:
         price=None,
     )
     await state.set_state(CreateTtnState.entering_qty)
-    await callback.message.answer(texts.qty_prompt_text(item))
+    await callback.message.answer(
+        texts.qty_prompt_text(item), reply_markup=build_cancel_kb(back="qty")
+    )
     await callback.answer()
 
 
@@ -704,14 +717,14 @@ async def receive_qty(message: Message, bot: Bot, state: FSMContext) -> None:
         available=pending["available"],
         price=Decimal(pending["price"]) if pending["price"] is not None else None,
     )
-    if not await edit_stored_screen(
+    await answer_latest_screen(
         bot,
+        message,
         state,
-        text=texts.stepper_text(item, pending["qty"]),
+        texts.stepper_text(item, pending["qty"]),
         reply_markup=build_stepper_kb(qty=pending["qty"], available=pending["available"]),
         parse_mode="HTML",
-    ):
-        await _show_stepper(message, state, edit=False)
+    )
 
 
 @router.callback_query(F.data == "cab:ttn:qok")
@@ -887,7 +900,9 @@ async def cb_weight_prompt(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(_STALE, show_alert=True)
         return
     await state.set_state(CreateTtnState.entering_weight)
-    await callback.message.answer(texts.weight_prompt_text())
+    await callback.message.answer(
+        texts.weight_prompt_text(), reply_markup=build_cancel_kb(back="parcel")
+    )
     await callback.answer()
 
 
@@ -900,10 +915,11 @@ async def receive_weight(message: Message, bot: Bot, state: FSMContext) -> None:
     await state.update_data(weight=weight)
     await state.set_state(CreateTtnState.picking_parcel)
     data = await state.get_data()
-    if not await edit_stored_screen(
+    await answer_latest_screen(
         bot,
+        message,
         state,
-        text=texts.parcel_text(
+        texts.parcel_text(
             weight=data.get("weight"),
             size_token=data.get("size_token", DEFAULT_SIZE_TOKEN),
         ),
@@ -912,8 +928,7 @@ async def receive_weight(message: Message, bot: Bot, state: FSMContext) -> None:
             weight_set=bool(data.get("weight")),
         ),
         parse_mode="HTML",
-    ):
-        await _show_parcel(message, state, edit=False)
+    )
 
 
 # ----------------------------------------------------------------- тип отримувача
@@ -945,7 +960,9 @@ async def cb_recipient_kind(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(recipient_kind=kind)
     await state.set_state(CreateTtnState.entering_recipient_name)
-    await callback.message.answer(texts.recipient_name_prompt(kind), reply_markup=build_cancel_kb())
+    await callback.message.answer(
+        texts.recipient_name_prompt(kind), reply_markup=build_cancel_kb(back="recipient_kind")
+    )
     await callback.answer()
 
 
@@ -962,10 +979,14 @@ async def receive_recipient_name(message: Message, state: FSMContext) -> None:
     kind = (await state.get_data()).get("recipient_kind")
     if kind == "organization":
         await state.set_state(CreateTtnState.entering_recipient_edrpou)
-        await message.answer(texts.edrpou_prompt(), reply_markup=build_cancel_kb())
+        await message.answer(
+            texts.edrpou_prompt(), reply_markup=build_cancel_kb(back="recipient_name")
+        )
     else:
         await state.set_state(CreateTtnState.entering_recipient_phone)
-        await message.answer(texts.phone_prompt(), reply_markup=build_cancel_kb())
+        await message.answer(
+            texts.phone_prompt(), reply_markup=build_cancel_kb(back="recipient_details")
+        )
 
 
 @router.message(CreateTtnState.entering_recipient_edrpou, F.text, ~F.text.startswith("/"))
@@ -976,7 +997,9 @@ async def receive_recipient_edrpou(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(recipient_edrpou=raw)
     await state.set_state(CreateTtnState.entering_recipient_phone)
-    await message.answer(texts.phone_prompt(), reply_markup=build_cancel_kb())
+    await message.answer(
+        texts.phone_prompt(), reply_markup=build_cancel_kb(back="recipient_details")
+    )
 
 
 @router.message(CreateTtnState.entering_recipient_phone, F.text, ~F.text.startswith("/"))
@@ -987,7 +1010,9 @@ async def receive_recipient_phone(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(recipient_phone=phone)
     await state.set_state(CreateTtnState.entering_city_query)
-    await message.answer(texts.city_prompt(), reply_markup=build_cancel_kb(), parse_mode="HTML")
+    await message.answer(
+        texts.city_prompt(), reply_markup=build_cancel_kb(back="recipient_phone"), parse_mode="HTML"
+    )
 
 
 # ------------------------------------------------------------------ місто (пошук НП)
@@ -1008,6 +1033,9 @@ async def receive_city_query(
         await message.answer("Авторизуйтесь через /start.")
         return
     query = (message.text or "").strip()
+    if not query:
+        await message.answer("Введіть назву міста, наприклад Київ.")
+        return
     await _typing(bot, message.chat.id)
     try:
         cities = await address.search_cities(
@@ -1029,18 +1057,151 @@ async def receive_city_query(
         return
     serial = [{"ref": c.ref, "name": c.name, "area": c.area} for c in cities]
     await state.update_data(cities=serial)
-    if not await edit_stored_screen(
+
+    # Если введённое название точно совпало с единственным городом от НП, сразу
+    # переходим к отделениям. Неоднозначные результаты по-прежнему показываем
+    # кнопками, чтобы пользователь сам выбрал нужный населённый пункт.
+    normalized_query = _normalized_city_name(query)
+    exact = [city for city in serial if _normalized_city_name(city["name"]) == normalized_query]
+    if len(exact) == 1:
+        city = exact[0]
+        await state.update_data(recipient_city_ref=city["ref"], recipient_city_name=city["name"])
+        try:
+            whs = await address.search_warehouses(
+                db_session,
+                client=client,
+                city_ref=city["ref"],
+                np_client=np_client,
+                cache=np_cache,
+                sender_profile_id=_profile_uuid(await state.get_data()),
+            )
+        except ClientServiceError as exc:
+            await message.answer(str(exc))
+            return
+        except NovaPoshtaError:
+            await message.answer(texts.search_unavailable_text())
+            return
+        if not whs:
+            await message.answer(
+                texts.warehouse_none_text(city["name"]),
+                reply_markup=build_cancel_kb(back="recipient_phone"),
+            )
+            return
+        warehouses = [
+            {
+                "ref": warehouse.ref,
+                "number": warehouse.number,
+                "description": warehouse.description,
+            }
+            for warehouse in whs
+        ]
+        await state.update_data(warehouses=warehouses, wh_offset=0)
+        await state.set_state(CreateTtnState.entering_warehouse_query)
+        await _show_warehouses(message, state, offset=0, edit=False)
+        return
+
+    await answer_latest_screen(
         bot,
+        message,
         state,
-        text=texts.city_results_text(query),
+        texts.city_results_text(query),
         reply_markup=build_city_results_kb(serial),
         parse_mode="HTML",
-    ):
-        await message.answer(
-            texts.city_results_text(query),
-            reply_markup=build_city_results_kb(serial),
+    )
+
+
+@router.callback_query(F.data.startswith("cab:ttn:back:"))
+async def cb_back(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    """Вернуть пользователя на предыдущий логический шаг мастера ТТН."""
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        step = callback.data.split(":")[3]
+    except IndexError:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+
+    if step == "items":
+        if client is None:
+            await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+            return
+        await state.set_state(CreateTtnState.picking_items)
+        await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
+    elif step == "qty":
+        if (await state.get_data()).get("pending") is None:
+            await callback.answer(_STALE, show_alert=True)
+            return
+        await state.set_state(CreateTtnState.picking_items)
+        await _show_stepper(callback.message, state, edit=True)
+    elif step == "parcel":
+        await state.set_state(CreateTtnState.picking_parcel)
+        await _show_parcel(callback.message, state, edit=True)
+    elif step == "recipient_kind":
+        await state.set_state(CreateTtnState.picking_recipient_kind)
+        await callback.message.edit_text(
+            texts.recipient_kind_text(), reply_markup=build_recipient_kind_kb(), parse_mode="HTML"
+        )
+    elif step == "recipient_name":
+        kind = (await state.get_data()).get("recipient_kind", "person")
+        await state.set_state(CreateTtnState.entering_recipient_name)
+        await callback.message.edit_text(
+            texts.recipient_name_prompt(kind), reply_markup=build_cancel_kb(back="recipient_kind")
+        )
+    elif step == "recipient_details":
+        kind = (await state.get_data()).get("recipient_kind")
+        if kind == "organization":
+            await state.set_state(CreateTtnState.entering_recipient_edrpou)
+            await callback.message.edit_text(
+                texts.edrpou_prompt(), reply_markup=build_cancel_kb(back="recipient_name")
+            )
+        else:
+            await state.set_state(CreateTtnState.entering_recipient_name)
+            await callback.message.edit_text(
+                texts.recipient_name_prompt("person"),
+                reply_markup=build_cancel_kb(back="recipient_kind"),
+            )
+    elif step == "recipient_phone":
+        await state.update_data(
+            recipient_city_ref=None,
+            recipient_city_name=None,
+            recipient_warehouse_ref=None,
+            recipient_warehouse_name=None,
+            warehouses=None,
+        )
+        await state.set_state(CreateTtnState.entering_recipient_phone)
+        await callback.message.edit_text(
+            texts.phone_prompt(), reply_markup=build_cancel_kb(back="recipient_details")
+        )
+    elif step == "city":
+        await state.update_data(
+            recipient_warehouse_ref=None,
+            recipient_warehouse_name=None,
+            warehouses=None,
+        )
+        await state.set_state(CreateTtnState.entering_city_query)
+        await callback.message.edit_text(
+            texts.city_prompt(),
+            reply_markup=build_cancel_kb(back="recipient_phone"),
             parse_mode="HTML",
         )
+    elif step == "warehouse":
+        warehouses = (await state.get_data()).get("warehouses", [])
+        if not warehouses:
+            await callback.answer(_STALE, show_alert=True)
+            return
+        await state.set_state(CreateTtnState.entering_warehouse_query)
+        await _show_warehouses(callback.message, state, offset=0, edit=True)
+    else:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cab:ttn:city:"))
@@ -1090,7 +1251,8 @@ async def cb_city(
         # Нет відділень — даём вернуться к выбору города (state остаётся «город»).
         await state.set_state(CreateTtnState.entering_city_query)
         await callback.message.edit_text(
-            texts.warehouse_none_text(city["name"]), reply_markup=build_cancel_kb()
+            texts.warehouse_none_text(city["name"]),
+            reply_markup=build_cancel_kb(back="recipient_phone"),
         )
         await callback.answer()
         return
@@ -1139,7 +1301,9 @@ async def cb_wh_find(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(_STALE, show_alert=True)
         return
     await state.set_state(CreateTtnState.entering_warehouse_query)
-    await callback.message.answer(texts.warehouse_find_prompt(), reply_markup=build_cancel_kb())
+    await callback.message.answer(
+        texts.warehouse_find_prompt(), reply_markup=build_cancel_kb(back="warehouse")
+    )
     await callback.answer()
 
 
@@ -1186,14 +1350,14 @@ async def receive_warehouse_query(
     serial = [{"ref": w.ref, "number": w.number, "description": w.description} for w in whs]
     await state.update_data(warehouses=serial, wh_offset=0)
     city_name = data.get("recipient_city_name", "")
-    if not await edit_stored_screen(
+    await answer_latest_screen(
         bot,
+        message,
         state,
-        text=texts.warehouse_results_text(city_name, total=len(serial)),
+        texts.warehouse_results_text(city_name, total=len(serial)),
         reply_markup=build_warehouse_results_kb(serial, offset=0),
         parse_mode="HTML",
-    ):
-        await _show_warehouses(message, state, offset=0, edit=False)
+    )
 
 
 @router.callback_query(F.data.startswith("cab:ttn:wh:"))
@@ -1319,6 +1483,7 @@ def _edit_prompt(field: str, data: dict) -> str:
         "weight": texts.weight_prompt_text(),
         "insured": texts.insured_prompt(),
         "descr": texts.description_prompt(),
+        "cod_amount": texts.cod_amount_prompt(),
     }[field]
 
 
@@ -1411,6 +1576,14 @@ async def receive_edit(
             await message.answer(texts.description_invalid())
             return
         updates["description"] = raw[:100]
+    elif field == "cod_amount":
+        amount = _parse_money(raw, positive=True)
+        if amount is None:
+            await message.answer(texts.cod_invalid())
+            return
+        updates["payment_method"] = "cod"
+        updates["cod_amount"] = amount
+        updates["cod_amount_source"] = "custom"
     else:
         await state.set_state(CreateTtnState.summary)
         await message.answer(_STALE)
@@ -1425,21 +1598,14 @@ async def receive_edit(
     data = await _ensure_card_defaults(state)
     price = await _card_price(db_session, client, data, np_client, force=True)
     await state.update_data(price_cache=price)
-    if not await edit_stored_screen(
+    await answer_latest_screen(
         bot,
+        message,
         state,
-        text=texts.card_text(data, price),
+        texts.card_text(data, price),
         reply_markup=build_card_kb(is_org=data.get("recipient_kind") == "organization"),
         parse_mode="HTML",
-    ):
-        await _show_card(
-            message,
-            state,
-            session=db_session,
-            client=client,
-            np_client=np_client,
-            edit=False,
-        )
+    )
 
 
 @router.callback_query(F.data.startswith("cab:ttn:setsz:"))
@@ -1508,7 +1674,7 @@ async def cb_set_payment(
     mode = callback.data.split(":")[3]
     if mode == "prepay":
         # Сброс COD: payment_method=prepay не должен тащить старую сумму.
-        await state.update_data(payment_method="prepay", cod_amount=None)
+        await state.update_data(payment_method="prepay", cod_amount=None, cod_amount_source=None)
         if await _back_to_card(
             callback,
             state,
@@ -1519,26 +1685,49 @@ async def cb_set_payment(
             await callback.answer()
     elif mode == "cod":
         total = _cart_total((await state.get_data()).get("cart", {}))
-        if total <= 0:
-            # Анти-баг: без суммы COD ставить нельзя (на submit упадёт «COD без
-            # суммы»). Цены нет → товар без ціни в складі.
-            await callback.answer(
-                "Не вдалося визначити суму післяплати — у товарів немає ціни. "
-                "Зверніться до менеджера.",
-                show_alert=True,
-            )
-            return
-        await state.update_data(payment_method="cod", cod_amount=f"{total:f}")
-        if await _back_to_card(
-            callback,
-            state,
-            session=db_session,
-            np_client=np_client,
-            effective_context=effective_context,
-        ):
-            await callback.answer("Накладений платіж привʼязано до суми кошика.")
+        await callback.message.edit_text(
+            texts.cod_amount_choice_text(), reply_markup=build_cod_amount_kb(total)
+        )
+        await callback.answer()
     else:
         await callback.answer(_STALE, show_alert=True)
+
+
+@router.callback_query(F.data == "cab:ttn:cod:cart")
+async def cb_set_cod_from_cart(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    total = _cart_total((await state.get_data()).get("cart", {}))
+    if total <= 0:
+        await callback.answer("У кошику немає товарів із ціною.", show_alert=True)
+        return
+    await state.update_data(payment_method="cod", cod_amount=f"{total:f}", cod_amount_source="cart")
+    if await _back_to_card(
+        callback,
+        state,
+        session=db_session,
+        np_client=np_client,
+        effective_context=effective_context,
+    ):
+        await callback.answer("Накладений платіж: сума з кошика.")
+
+
+@router.callback_query(F.data == "cab:ttn:cod:custom")
+async def cb_set_cod_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.update_data(edit_field="cod_amount")
+    await state.set_state(CreateTtnState.editing_field)
+    await callback.message.answer(texts.cod_amount_prompt(), reply_markup=build_back_to_card_kb())
+    await callback.answer()
 
 
 # ----------------------------------------------------------------- відправлення ТТН
