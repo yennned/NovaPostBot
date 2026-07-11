@@ -269,7 +269,6 @@ def upgrade() -> None:
     op.execute(
         """
         do $$
-        declare orphan_count bigint;
         begin
             if (select count(*) from client_accounts) <
                (select count(*) from users where role = 'client'::user_role) then
@@ -288,7 +287,7 @@ def upgrade() -> None:
                     ((select count(*) from low_stock_alerts where account_id is null)),
                     ((select count(*) from support_threads where account_id is null))
                 ) as orphan_counts(orphan_count)
-                where orphan_count > 0
+                where orphan_counts.orphan_count > 0
             ) then
                 raise exception 'account scoped rows remain orphaned';
             end if;
