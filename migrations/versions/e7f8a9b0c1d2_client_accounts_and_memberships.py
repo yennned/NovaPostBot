@@ -279,17 +279,19 @@ def upgrade() -> None:
                (select count(*) from users where role = 'client'::user_role) then
                 raise exception 'client membership backfill lost users';
             end if;
-            foreach orphan_count in array[
-                (select count(*) from sender_profiles where account_id is null),
-                (select count(*) from shipments where account_id is null),
-                (select count(*) from stock_movements where account_id is null),
-                (select count(*) from low_stock_alerts where account_id is null),
-                (select count(*) from support_threads where account_id is null)
-            ] loop
-                if orphan_count > 0 then
-                    raise exception 'account scoped rows remain orphaned';
-                end if;
-            end loop;
+            if exists (
+                select 1
+                from (values
+                    ((select count(*) from sender_profiles where account_id is null)),
+                    ((select count(*) from shipments where account_id is null)),
+                    ((select count(*) from stock_movements where account_id is null)),
+                    ((select count(*) from low_stock_alerts where account_id is null)),
+                    ((select count(*) from support_threads where account_id is null))
+                ) as orphan_counts(orphan_count)
+                where orphan_count > 0
+            ) then
+                raise exception 'account scoped rows remain orphaned';
+            end if;
             if exists (
                 select 1 from shipments where created_by_user_id is null
             ) then
