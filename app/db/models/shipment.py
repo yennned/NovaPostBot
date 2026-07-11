@@ -20,6 +20,7 @@ from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import ShipmentStatus
 
 if TYPE_CHECKING:
+    from app.db.models.client_account import ClientAccount
     from app.db.models.sender_profile import SenderProfile
     from app.db.models.stock_movement import StockMovement
     from app.db.models.user import User
@@ -30,6 +31,12 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     client_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
     sender_profile_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("sender_profiles.id", ondelete="SET NULL"), index=True, nullable=True
@@ -76,7 +83,9 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     fee_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     fee_free: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
-    client: Mapped[User] = relationship()
+    client: Mapped[User] = relationship(foreign_keys=[client_id])
+    account: Mapped[ClientAccount | None] = relationship()
+    created_by_user: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
     sender_profile: Mapped[SenderProfile | None] = relationship()
     items: Mapped[list[ShipmentItem]] = relationship(
         back_populates="shipment",

@@ -50,6 +50,7 @@ class ManagerShipmentListItem:
     created_at: datetime
     sla_deadline: datetime | None
     sla_state: str
+    author_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +97,7 @@ def _to_list_item(shipment: Shipment) -> ManagerShipmentListItem:
         id=shipment.id,
         ttn_number=shipment.ttn_number,
         client_name=shipment.client.full_name if shipment.client else None,
+        author_name=shipment.created_by_user.full_name if shipment.created_by_user else None,
         recipient_name=shipment.recipient_name,
         status=shipment.status,
         created_at=shipment.created_at,
@@ -218,6 +220,7 @@ async def cancel_shipment(
     await repo.update_status(shipment, ShipmentStatus.cancelled)
     await StockMovementRepository(session).record_for_items(
         client_id=shipment.client_id,
+        account_id=shipment.account_id,
         shipment_id=shipment.id,
         actor_user_id=actor.id,
         items=shipment.items,
@@ -235,6 +238,7 @@ async def cancel_shipment(
     await best_effort_sync(
         session,
         client=shipment.client,
+        account=shipment.account,
         log_key="manager_cancel_sheet_sync_failed",
         shipment_id=str(shipment.id),
     )

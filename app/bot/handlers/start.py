@@ -26,7 +26,7 @@ from app.bot.texts import (
     welcome_text,
 )
 from app.bot.types import EffectiveContext
-from app.db.models.enums import UserStatus
+from app.db.models.enums import MembershipRole, UserStatus
 from app.services import notifications
 
 router = Router(name="start")
@@ -51,9 +51,12 @@ async def _render_home(message: Message, context: EffectiveContext) -> None:
     else:
         parts.append(f"Відкриваю меню {context.effective_role.value}.")
 
+    owner = (
+        context.membership is not None and context.membership.role is MembershipRole.account_owner
+    )
     await message.answer(
         "\n".join(parts),
-        reply_markup=build_role_menu(context.effective_role),
+        reply_markup=build_role_menu(context.effective_role, account_owner=owner),
     )
 
 
@@ -84,7 +87,13 @@ async def start_command(
         return
 
     role = effective_context.effective_role or user.role
-    await message.answer(welcome_text(user, role), reply_markup=build_role_menu(role))
+    owner = (
+        effective_context.membership is not None
+        and effective_context.membership.role is MembershipRole.account_owner
+    )
+    await message.answer(
+        welcome_text(user, role), reply_markup=build_role_menu(role, account_owner=owner)
+    )
 
 
 @router.message(StartStates.waiting_for_contact, F.contact)
@@ -127,9 +136,17 @@ async def receive_contact(
         return
 
     if result.user.status is UserStatus.active:
+        from app.db.repositories import ClientAccountRepository
+
+        membership = (
+            await ClientAccountRepository(db_session).get_membership(user_id=result.user.id)
+            if db_session is not None
+            else None
+        )
+        owner = membership is not None and membership.role is MembershipRole.account_owner
         await message.answer(
             welcome_text(result.user, result.user.role),
-            reply_markup=build_role_menu(result.user.role),
+            reply_markup=build_role_menu(result.user.role, account_owner=owner),
         )
         return
 

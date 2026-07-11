@@ -18,7 +18,8 @@ from app.bot.services import (
     StartService,
     build_effective_context,
 )
-from app.db.repositories import AuditRepository, UserRepository
+from app.bot.types import ClientAccountContext
+from app.db.repositories import AuditRepository, ClientAccountRepository, UserRepository
 
 if TYPE_CHECKING:
     from app.novaposhta.cache import NPReferenceCache
@@ -79,6 +80,7 @@ class EffectiveContextMiddleware(BaseMiddleware):
         user: User | None = data.get("event_from_user")
         services: BotServices = data["services"]
         dev_service: DevService = data["dev_service"]
+        session = data["db_session"]
 
         actor_user = None
         impersonated_user = None
@@ -95,10 +97,25 @@ class EffectiveContextMiddleware(BaseMiddleware):
                         dev_session.impersonated_user_id
                     )
 
-        data["effective_context"] = build_effective_context(
+        context = build_effective_context(
             actor_user=actor_user,
             impersonated_user=impersonated_user,
             is_dev=is_dev,
             dev_session=dev_session,
         )
+        if context.effective_user is not None:
+            account_scope = await ClientAccountRepository(session).get_context_for_user(
+                context.effective_user.id
+            )
+            if account_scope is not None:
+                account, membership = account_scope
+                context.account = account
+                context.membership = membership
+                context.account_context = ClientAccountContext(
+                    user=context.effective_user,
+                    account=account,
+                    membership=membership,
+                    actor_user=actor_user,
+                )
+        data["effective_context"] = context
         return await handler(event, data)

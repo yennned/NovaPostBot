@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.client_account import ClientAccount
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import (
@@ -24,11 +25,13 @@ from app.services.exceptions import (
 NOTIFY_APPROVED = "notify_registration_approved"
 NOTIFY_SHIPMENT_STATUS = "notify_shipment_status"
 NOTIFY_LOW_STOCK = "notify_low_stock"
+NOTIFY_ALL_ACCOUNT_SHIPMENTS = "notify_all_account_shipments"
 
 DEFAULT_NOTIFICATION_SETTINGS = {
     NOTIFY_APPROVED: True,
     NOTIFY_SHIPMENT_STATUS: True,
     NOTIFY_LOW_STOCK: True,
+    NOTIFY_ALL_ACCOUNT_SHIPMENTS: False,
 }
 
 
@@ -67,6 +70,7 @@ def _settings_view(
         NOTIFY_APPROVED: "Підтвердження реєстрації",
         NOTIFY_SHIPMENT_STATUS: "Статуси відправлень",
         NOTIFY_LOW_STOCK: "Залишки та low-stock",
+        NOTIFY_ALL_ACCOUNT_SHIPMENTS: "Усі ТТН мого акаунта",
     }
     notifications = [
         NotificationSettingView(
@@ -99,9 +103,16 @@ async def _notification_payload(session: AsyncSession, user: User) -> dict[str, 
     return payload
 
 
-async def get_client_settings(session: AsyncSession, *, client: User) -> ClientSettingsView:
+async def get_client_settings(
+    session: AsyncSession,
+    *,
+    client: User,
+    account_id=None,
+) -> ClientSettingsView:
     _require_active_client(client)
-    profiles = await SenderProfileRepository(session).list_for_client(client.id)
+    profiles = await SenderProfileRepository(session).list_for_client(
+        client.id, account_id=account_id
+    )
     default = next((profile for profile in profiles if profile.is_default), None)
     notification_payload = await _notification_payload(session, client)
     return _settings_view(
@@ -114,7 +125,7 @@ async def get_client_settings(session: AsyncSession, *, client: User) -> ClientS
 
 
 async def toggle_notification(
-    session: AsyncSession, *, client: User, key: str
+    session: AsyncSession, *, client: User, key: str, account_id=None
 ) -> ClientSettingsView:
     _require_active_client(client)
     if key not in DEFAULT_NOTIFICATION_SETTINGS:
@@ -132,7 +143,7 @@ async def toggle_notification(
         affected_entity=f"user:{client.id}",
         after={key: enabled},
     )
-    return await get_client_settings(session, client=client)
+    return await get_client_settings(session, client=client, account_id=account_id)
 
 
 async def update_self_profile(
@@ -141,6 +152,8 @@ async def update_self_profile(
     client: User,
     full_name: str | None = None,
     phone: str | None = None,
+    account_id=None,
+    account: ClientAccount | None = None,
 ) -> ClientSettingsView:
     _require_active_client(client)
     repo = UserRepository(session)
@@ -169,8 +182,9 @@ async def update_self_profile(
             await best_effort_sync(
                 session,
                 client=client,
+                account=account,
                 log_key="client_self_profile_sheet_sync_failed",
                 previous_sheet_key=previous_sheet_key,
                 user_id=str(client.id),
             )
-    return await get_client_settings(session, client=client)
+    return await get_client_settings(session, client=client, account_id=account_id)

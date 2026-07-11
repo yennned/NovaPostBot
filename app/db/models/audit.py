@@ -23,6 +23,9 @@ class AuditLog(UUIDPrimaryKeyMixin, Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("client_accounts.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     # Тип действия, напр. "user_activated", "permission_changed", "dev_impersonate".
     action: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     # На какую сущность повлияло, напр. "user:<uuid>" / "sender_profile:<uuid>".

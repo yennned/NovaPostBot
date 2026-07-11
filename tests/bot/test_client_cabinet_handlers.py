@@ -128,7 +128,15 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
     msg = FakeMessage()
 
     async def fake_list_inventory(
-        session, *, client, query=None, category=None, limit=8, offset=0, reader=None
+        session,
+        *,
+        client,
+        query=None,
+        category=None,
+        limit=8,
+        offset=0,
+        reader=None,
+        **kwargs,
     ):
         return InventoryPage(
             items=[
@@ -165,7 +173,7 @@ async def test_open_shipments_renders_list(db_session: AsyncSession, monkeypatch
     msg = FakeMessage()
 
     async def fake_list_shipments(
-        session, *, client, bucket="created", query=None, limit=8, offset=0
+        session, *, client, bucket="created", query=None, limit=8, offset=0, **kwargs
     ):
         return ShipmentPage(
             items=[
@@ -200,7 +208,7 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
     shipment_id = uuid4()
     cb = FakeCallback(data=f"cab:shipment:created:0:{shipment_id}")
 
-    async def fake_get_shipment_card(session, *, client, shipment_id):
+    async def fake_get_shipment_card(session, *, client, shipment_id, **kwargs):
         return ShipmentCard(
             id=shipment_id,
             ttn_number="TTN-777",
@@ -249,7 +257,7 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
     shipment_id = uuid4()
     cb = FakeCallback(data=f"cab:cancel:created:0:{shipment_id}")
 
-    async def fake_cancel_shipment(session, *, client, shipment_id, np_client):
+    async def fake_cancel_shipment(session, *, client, shipment_id, np_client, **kwargs):
         # Хендлер не использует возврат — после отмены ререндерит список группы.
         return None
 
@@ -272,7 +280,7 @@ async def test_open_settings_renders_view(db_session: AsyncSession, monkeypatch)
     client = await _active_client(db_session, telegram_id=705)
     msg = FakeMessage()
 
-    async def fake_get_client_settings(session, *, client):
+    async def fake_get_client_settings(session, *, client, **kwargs):
         return _settings_view()
 
     monkeypatch.setattr(
@@ -294,7 +302,7 @@ async def test_cb_settings_toggle_updates_view(db_session: AsyncSession, monkeyp
     client = await _active_client(db_session, telegram_id=706)
     cb = FakeCallback(data="cab:set:toggle:shp")
 
-    async def fake_toggle_notification(session, *, client, key):
+    async def fake_toggle_notification(session, *, client, key, **kwargs):
         assert key == "notify_shipment_status"
         return _settings_view(shipment_status=False)
 
@@ -318,7 +326,7 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
     client = await _active_client(db_session, telegram_id=703)
     cb = FakeCallback(data="cab:stats:week")
 
-    async def fake_get_client_stats(session, *, client, period="today"):
+    async def fake_get_client_stats(session, *, client, period="today", **kwargs):
         now = datetime.now(UTC)
         return ClientStatsSnapshot(
             period=period,

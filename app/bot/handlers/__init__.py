@@ -1,5 +1,6 @@
 """Роутеры bot-layer."""
 
+from app.bot.handlers.account_team import router as account_team_router
 from app.bot.handlers.analytics import router as analytics_router
 from app.bot.handlers.client_cabinet import router as client_cabinet_router
 from app.bot.handlers.clients_manage import router as clients_router
@@ -14,6 +15,7 @@ from app.bot.handlers.support import router as support_router
 from app.bot.handlers.ttn import router as ttn_router
 
 __all__ = [
+    "account_team_router",
     "analytics_router",
     "client_cabinet_router",
     "clients_router",

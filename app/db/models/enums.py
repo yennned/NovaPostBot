@@ -27,6 +27,29 @@ class UserStatus(StrEnum):
     archived = "archived"  # мягко удалён
 
 
+class ClientAccountStatus(StrEnum):
+    """Стан бізнес-акаунта клієнта."""
+
+    active = "active"
+    blocked = "blocked"
+    archived = "archived"
+
+
+class MembershipRole(StrEnum):
+    """Роль користувача всередині клієнтського акаунта."""
+
+    account_owner = "account_owner"
+    employee = "employee"
+
+
+class MembershipStatus(StrEnum):
+    """Стан членства користувача в клієнтському акаунті."""
+
+    invited = "invited"
+    active = "active"
+    blocked = "blocked"
+
+
 class OrgType(StrEnum):
     """Организационно-правовая форма ФОП-отправителя."""
 

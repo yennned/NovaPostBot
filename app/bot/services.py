@@ -119,6 +119,36 @@ class StartService:
         # (telegram_id пуст) — проставляем telegram_id, роль/статус сохраняются.
         by_phone = await self.user_store.get_by_phone(phone)
         if by_phone is not None:
+            # Запрошений працівник активується лише після збігу номера з
+            # invitation. Заблокований працівник не може повторно прив'язати
+            # Telegram через /start.
+            repo = getattr(self.user_store, "repo", None)
+            activated = False
+            if repo is not None:
+                from app.services.account_team import activate_employee_contact
+
+                activated = await activate_employee_contact(
+                    repo.session,
+                    user=by_phone,
+                    telegram_id=telegram_id,
+                    full_name=full_name,
+                )
+            if activated:
+                await self.user_store.save(by_phone)
+                return StartResult(user=by_phone, created=False)
+            if repo is not None:
+                from app.db.models.enums import MembershipRole, MembershipStatus
+                from app.db.repositories import ClientAccountRepository
+
+                membership = await ClientAccountRepository(repo.session).get_membership(
+                    user_id=by_phone.id
+                )
+                if (
+                    membership is not None
+                    and membership.role is MembershipRole.employee
+                    and membership.status is MembershipStatus.blocked
+                ):
+                    return StartResult(user=by_phone, created=False)
             by_phone.telegram_id = telegram_id
             if full_name:
                 by_phone.full_name = full_name

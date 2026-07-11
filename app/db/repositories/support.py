@@ -16,6 +16,7 @@ from app.db.models.enums import SupportThreadStatus
 from app.db.models.support import SupportMessage, SupportThread
 from app.db.models.user import User
 from app.db.repositories.base import BaseRepository
+from app.db.repositories.scope import resolve_account_scope
 
 # Тред «в работе» — открыт диалог или ждёт в очереди (не закрыт).
 ACTIVE_STATUSES = {SupportThreadStatus.open, SupportThreadStatus.waiting}
@@ -25,13 +26,18 @@ class SupportRepository(BaseRepository):
     async def create_thread(
         self,
         *,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
         assigned_manager_id: uuid.UUID | None = None,
         shipment_id: uuid.UUID | None = None,
         status: SupportThreadStatus = SupportThreadStatus.open,
     ) -> SupportThread:
+        client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
         thread = SupportThread(
             client_id=client_id,
+            account_id=account_id,
             assigned_manager_id=assigned_manager_id,
             shipment_id=shipment_id,
             status=status,
@@ -45,8 +51,14 @@ class SupportRepository(BaseRepository):
         thread_id: uuid.UUID,
         sender_role: str,
         text: str,
+        sender_user_id: uuid.UUID | None = None,
     ) -> SupportMessage:
-        message = SupportMessage(thread_id=thread_id, sender_role=sender_role, text=text)
+        message = SupportMessage(
+            thread_id=thread_id,
+            sender_role=sender_role,
+            sender_user_id=sender_user_id,
+            text=text,
+        )
         await self._add(message)
         return message
 
@@ -56,6 +68,18 @@ class SupportRepository(BaseRepository):
             select(SupportThread)
             .where(
                 SupportThread.client_id == client_id,
+                SupportThread.status.in_(tuple(ACTIVE_STATUSES)),
+            )
+            .order_by(SupportThread.created_at.desc())
+            .limit(1)
+        )
+        return await self.session.scalar(stmt)
+
+    async def get_active_thread_for_account(self, account_id: uuid.UUID) -> SupportThread | None:
+        stmt = (
+            select(SupportThread)
+            .where(
+                SupportThread.account_id == account_id,
                 SupportThread.status.in_(tuple(ACTIVE_STATUSES)),
             )
             .order_by(SupportThread.created_at.desc())

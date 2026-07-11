@@ -79,6 +79,9 @@ class ShipmentCard:
     fee_free: bool
     items: list[ShipmentItemView]
     can_cancel: bool
+    created_by_user_id: uuid.UUID | None = None
+    created_by_name: str | None = None
+    account_id: uuid.UUID | None = None
 
 
 def _require_active_client(client: User) -> None:
@@ -135,6 +138,9 @@ def _to_card(shipment: Shipment) -> ShipmentCard:
         fee_free=shipment.fee_free,
         items=[_to_item_view(item) for item in shipment.items],
         can_cancel=shipment.status in CANCELABLE_STATUSES,
+        created_by_user_id=shipment.created_by_user_id,
+        created_by_name=shipment.created_by_user.full_name if shipment.created_by_user else None,
+        account_id=shipment.account_id,
     )
 
 
@@ -142,19 +148,29 @@ async def list_shipments(
     session: AsyncSession,
     *,
     client: User,
+    account_id: uuid.UUID | None = None,
     bucket: str = "created",
     query: str | None = None,
     limit: int = 8,
     offset: int = 0,
 ) -> ShipmentPage:
     _require_active_client(client)
-    rows, total = await ShipmentRepository(session).get_by_client_and_status(
-        client.id,
-        statuses=statuses_for_bucket(bucket),
-        query=query,
-        limit=limit,
-        offset=offset,
-    )
+    if account_id is None:
+        rows, total = await ShipmentRepository(session).get_by_client_and_status(
+            client.id,
+            statuses=statuses_for_bucket(bucket),
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+    else:
+        rows, total = await ShipmentRepository(session).get_by_account_and_status(
+            account_id,
+            statuses=statuses_for_bucket(bucket),
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
     return ShipmentPage(
         items=[_to_list_item(row) for row in rows],
         total=total,
@@ -164,22 +180,39 @@ async def list_shipments(
 
 
 async def get_shipment_card(
-    session: AsyncSession, *, client: User, shipment_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
 ) -> ShipmentCard:
     _require_active_client(client)
-    shipment = await ShipmentRepository(session).get_by_id(shipment_id)
-    if shipment is None or shipment.client_id != client.id:
+    shipment = (
+        await ShipmentRepository(session).get_by_id(shipment_id)
+        if account_id is None
+        else await ShipmentRepository(session).get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
         raise ShipmentNotFound(str(shipment_id))
     return _to_card(shipment)
 
 
 async def cancel_shipment(
-    session: AsyncSession, *, client: User, shipment_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> ShipmentCard:
     _require_active_client(client)
     repo = ShipmentRepository(session)
-    shipment = await repo.get_by_id(shipment_id)
-    if shipment is None or shipment.client_id != client.id:
+    shipment = (
+        await repo.get_by_id(shipment_id)
+        if account_id is None
+        else await repo.get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
         raise ShipmentNotFound(str(shipment_id))
     if shipment.status not in CANCELABLE_STATUSES:
         raise ShipmentActionForbidden("cancel", shipment.status)
@@ -187,7 +220,8 @@ async def cancel_shipment(
     await repo.update_status(shipment, ShipmentStatus.cancelled)
     await AuditRepository(session).log(
         "shipment_cancelled_by_client",
-        user_id=client.id,
+        user_id=actor_user_id or client.id,
+        account_id=account_id or shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
         after={"status": shipment.status},

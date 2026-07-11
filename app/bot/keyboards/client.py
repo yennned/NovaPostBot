@@ -187,7 +187,9 @@ def build_stats_kb(selected: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_settings_kb(view: ClientSettingsView) -> InlineKeyboardMarkup:
+def build_settings_kb(
+    view: ClientSettingsView, *, account_owner: bool = True
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in view.notifications:
         marker = "🟢" if item.enabled else "⚪"
@@ -211,19 +213,20 @@ def build_settings_kb(view: ClientSettingsView) -> InlineKeyboardMarkup:
                     callback_data="cab:set:edit:phone",
                 ),
             ],
-            [
-                InlineKeyboardButton(
-                    text="🏢 Мої ФОП",
-                    callback_data="cab:set:profiles",
-                )
-            ],
             [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
         ]
     )
+    if account_owner:
+        rows.insert(
+            -1,
+            [InlineKeyboardButton(text="🏢 Мої ФОП", callback_data="cab:set:profiles")],
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_sender_profiles_kb(profiles: list[SenderProfileView]) -> InlineKeyboardMarkup:
+def build_sender_profiles_kb(
+    profiles: list[SenderProfileView], *, can_manage: bool = True
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -233,7 +236,8 @@ def build_sender_profiles_kb(profiles: list[SenderProfileView]) -> InlineKeyboar
         ]
         for profile in profiles
     ]
-    rows.append([InlineKeyboardButton(text="➕ Додати ФОП", callback_data="cab:set:padd")])
+    if can_manage:
+        rows.append([InlineKeyboardButton(text="➕ Додати ФОП", callback_data="cab:set:padd")])
     rows.append([InlineKeyboardButton(text="◀ До налаштувань", callback_data="cab:set:back")])
     rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -254,7 +258,9 @@ def build_sender_pick_kb(profiles: list[SenderProfileView]) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_sender_profile_kb(profile: SenderProfileView) -> InlineKeyboardMarkup:
+def build_sender_profile_kb(
+    profile: SenderProfileView, *, can_manage: bool = True
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -283,7 +289,9 @@ def build_sender_profile_kb(profile: SenderProfileView) -> InlineKeyboardMarkup:
             ),
         ],
     ]
-    if not profile.is_default:
+    if not can_manage:
+        rows = []
+    if can_manage and not profile.is_default:
         rows.append(
             [
                 InlineKeyboardButton(

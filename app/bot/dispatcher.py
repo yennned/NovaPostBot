@@ -8,6 +8,7 @@ from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot.handlers import (
+    account_team_router,
     analytics_router,
     client_cabinet_router,
     clients_router,
@@ -62,6 +63,7 @@ def build_dispatcher(
     dp.include_router(staff_router)
     dp.include_router(reports_router)
     dp.include_router(analytics_router)
+    dp.include_router(account_team_router)
     dp.include_router(client_cabinet_router)
     dp.include_router(ttn_router)
     dp.include_router(errors_router)  # backstop: ключ ФОП (FERNET_KEY) + «message is not modified»

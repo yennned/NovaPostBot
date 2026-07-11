@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.db.models.client_account import ClientAccount, ClientAccountMembership
 from app.db.models.enums import UserRole
 from app.db.models.user import User
 
@@ -21,3 +22,16 @@ class EffectiveContext:
     effective_role: UserRole | None
     is_dev: bool
     dev_session: DevSession | None = None
+    account: ClientAccount | None = None
+    membership: ClientAccountMembership | None = None
+    account_context: ClientAccountContext | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ClientAccountContext:
+    """Поточний бізнес-контекст: користувач, акаунт і членство."""
+
+    user: User
+    account: ClientAccount
+    membership: ClientAccountMembership
+    actor_user: User | None = None

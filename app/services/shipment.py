@@ -18,6 +18,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.db.models.client_account import ClientAccount
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
@@ -77,16 +78,24 @@ def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> No
 
 
 async def _resolve_sender(
-    session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None, settings: Settings
+    session: AsyncSession,
+    client: User,
+    sender_profile_id: uuid.UUID | None,
+    settings: Settings,
+    account_id: uuid.UUID | None = None,
 ) -> SenderProfile:
     """Найти ФОП клиента (явный или дефолтный) и убедиться, что он готов к відправленню."""
     repo = SenderProfileRepository(session)
     if sender_profile_id is not None:
         profile = await repo.get_by_id(sender_profile_id)
-        if profile is None or profile.client_id != client.id:
+        if profile is None or (
+            profile.account_id != account_id
+            if account_id is not None
+            else profile.client_id != client.id
+        ):
             raise SenderProfileNotConfigured("ФОП не знайдено")
     else:
-        profile = await repo.get_default_for_client(client.id)
+        profile = await repo.get_default_for_client(client.id, account_id=account_id)
         if profile is None:
             raise SenderProfileNotConfigured("ФОП ще не налаштований, зверніться до менеджера")
     ensure_sender_dispatchable(profile, settings)
@@ -98,6 +107,7 @@ async def resolve_sender_id(
     *,
     client: User,
     profile_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
     settings: Settings | None = None,
 ) -> uuid.UUID:
     """ID ФОП клиента (явного или дефолтного), готового к відправленню — гейт UI.
@@ -105,7 +115,9 @@ async def resolve_sender_id(
     Бросает то же доменное исключение, что и `create_shipment` (NotConfigured /
     NotValidated / Incomplete / DispatchNotConfigured), чтобы вход в FSM, выбор ФОП
     и сабмит вели себя одинаково. Без побочных эффектов и обращений к НП."""
-    profile = await _resolve_sender(session, client, profile_id, settings or get_settings())
+    profile = await _resolve_sender(
+        session, client, profile_id, settings or get_settings(), account_id=account_id
+    )
     return profile.id
 
 
@@ -114,9 +126,13 @@ async def _resolve_items(
     client: User,
     items: list[tuple[str, int]],
     reader: StockSource | None,
+    account_id: uuid.UUID | None = None,
+    account: ClientAccount | None = None,
 ) -> list[ShipmentItemDraft]:
     """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой."""
-    snapshot = await inventory.get_inventory_snapshot(session, client=client, reader=reader)
+    snapshot = await inventory.get_inventory_snapshot(
+        session, client=client, account_id=account_id, account=account, reader=reader
+    )
     by_sku = {item.sku: item for item in snapshot}
     # Агрегируем дубли строк корзины по sku — иначе две строки по 6 при остатке 10
     # обе прошли бы проверку (6≤10) и зарезервировали 12 (oversell).
@@ -165,6 +181,9 @@ async def create_shipment(
     notifier: Notifier | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
+    account_id: uuid.UUID | None = None,
+    account: ClientAccount | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> shipments.ShipmentCard:
     """Создать ТТН (NP-first) и записать `Shipment` + резерв.
 
@@ -173,8 +192,12 @@ async def create_shipment(
     """
     shipments._require_active_client(client)
     settings = settings or get_settings()
-    profile = await _resolve_sender(session, client, sender_profile_id, settings)
-    drafts = await _resolve_items(session, client, items, reader)
+    profile = await _resolve_sender(
+        session, client, sender_profile_id, settings, account_id=account_id
+    )
+    drafts = await _resolve_items(
+        session, client, items, reader, account_id=account_id, account=account
+    )
 
     is_cod = payment_method == "cod"
     if is_cod and (cod_amount is None or cod_amount <= 0):
@@ -226,6 +249,8 @@ async def create_shipment(
     repo = ShipmentRepository(session)
     shipment = await repo.create(
         client_id=client.id,
+        account_id=account_id,
+        created_by_user_id=actor_user_id or client.id,
         sender_profile_id=profile.id,
         recipient_name=recipient_name,
         recipient_phone=recipient_phone,
@@ -248,6 +273,7 @@ async def create_shipment(
     shipment.fee_amount = compute_shipment_fee(sum(item.quantity for item in drafts))
     await StockMovementRepository(session).record_for_items(
         client_id=client.id,
+        account_id=account_id,
         shipment_id=shipment.id,
         items=drafts,
         movement_type=StockMovementType.ttn_reserve,
@@ -256,7 +282,8 @@ async def create_shipment(
     )
     await AuditRepository(session).log(
         "shipment_created",
-        user_id=client.id,
+        user_id=actor_user_id or client.id,
+        account_id=account_id or shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         after={
             "ttn_number": result.int_doc_number,
@@ -277,6 +304,7 @@ async def create_shipment(
     await best_effort_sync(
         session,
         client=client,
+        account=account,
         log_key="shipment_sheet_sync_failed",
         reader=reader,
         shipment_id=str(shipment.id),
@@ -301,6 +329,8 @@ async def cancel_shipment(
     client: User,
     shipment_id: uuid.UUID,
     np_client: NovaPoshtaClient,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> shipments.ShipmentCard:
     """Отменить ТТН **NP-first**: сначала `InternetDocument.delete` в НП, и только
     при успехе снимаем статус в БД (резерв выводится из статуса → освободится).
@@ -311,8 +341,12 @@ async def cancel_shipment(
     (статус не трогаем, отмену можно повторить).
     """
     shipments._require_active_client(client)
-    shipment = await ShipmentRepository(session).get_by_id(shipment_id)
-    if shipment is None or shipment.client_id != client.id:
+    shipment = (
+        await ShipmentRepository(session).get_by_id(shipment_id)
+        if account_id is None
+        else await ShipmentRepository(session).get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
         raise ShipmentNotFound(str(shipment_id))
     # Удаляем в НП только для отменяемых статусов с реальным np_ref; статус-гейт
     # (ShipmentActionForbidden для dispatched и далее) отдаём делегату ниже.
@@ -324,9 +358,16 @@ async def cancel_shipment(
             logger.info("ttn_already_deleted_in_np", shipment_id=str(shipment.id))
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
-    card = await shipments.cancel_shipment(session, client=client, shipment_id=shipment_id)
+    card = await shipments.cancel_shipment(
+        session,
+        client=client,
+        shipment_id=shipment_id,
+        account_id=account_id,
+        actor_user_id=actor_user_id or client.id,
+    )
     await StockMovementRepository(session).record_for_items(
         client_id=client.id,
+        account_id=account_id,
         shipment_id=shipment.id,
         items=shipment.items,
         movement_type=StockMovementType.ttn_cancel,
@@ -336,6 +377,7 @@ async def cancel_shipment(
     await best_effort_sync(
         session,
         client=client,
+        account=shipment.account,
         log_key="shipment_cancel_sheet_sync_failed",
         shipment_id=str(shipment.id),
     )

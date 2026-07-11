@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.db.models.enums import StockMovementType
 from app.db.models.stock_movement import StockMovement
 from app.db.repositories.base import BaseRepository
+from app.db.repositories.scope import resolve_account_scope
 
 
 class _SkuQuantityItem(Protocol):
@@ -24,7 +25,8 @@ class StockMovementRepository(BaseRepository):
     async def create(
         self,
         *,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
         sku: str,
         movement_type: StockMovementType,
         quantity_delta: int,
@@ -34,8 +36,12 @@ class StockMovementRepository(BaseRepository):
         actor_user_id: uuid.UUID | None = None,
         comment: str | None = None,
     ) -> StockMovement:
+        client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
         movement = StockMovement(
             client_id=client_id,
+            account_id=account_id,
             shipment_id=shipment_id,
             actor_user_id=actor_user_id,
             sku=sku,
@@ -51,7 +57,8 @@ class StockMovementRepository(BaseRepository):
     async def record_for_items(
         self,
         *,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
         shipment_id: uuid.UUID,
         items: Iterable[_SkuQuantityItem],
         movement_type: StockMovementType,
@@ -69,6 +76,7 @@ class StockMovementRepository(BaseRepository):
             delta = sign * item.quantity
             await self.create(
                 client_id=client_id,
+                account_id=account_id,
                 shipment_id=shipment_id,
                 actor_user_id=actor_user_id,
                 sku=item.sku,

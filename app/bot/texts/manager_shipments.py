@@ -25,7 +25,8 @@ def queue_text(page: ManagerShipmentPage) -> str:
             deadline = _fmt(item.sla_deadline) if item.sla_deadline else "—"
             lines.append(
                 f"• <b>{item.ttn_number or 'без ТТН'}</b> — {item.client_name or '—'} / "
-                f"{item.recipient_name}\n  SLA: {item.sla_state} · дедлайн {deadline}"
+                f"{item.recipient_name}\n  Автор: {item.author_name or '—'} · "
+                f"SLA: {item.sla_state} · дедлайн {deadline}"
             )
     return "\n".join(lines)
 

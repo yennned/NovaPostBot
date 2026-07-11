@@ -177,7 +177,7 @@ async def _apply_dispatch_stock(
 
     await run_on_sheets_executor(
         (mutator or build_stock_source()).apply_deltas,
-        stock_sheet_key(shipment.client),
+        stock_sheet_key(shipment.account or shipment.client),
         [
             StockDelta(
                 sku=item.sku,
@@ -191,6 +191,7 @@ async def _apply_dispatch_stock(
     )
     await StockMovementRepository(session).record_for_items(
         client_id=shipment.client_id,
+        account_id=shipment.account_id,
         shipment_id=shipment.id,
         items=shipment.items,
         movement_type=StockMovementType.ttn_dispatch,
@@ -200,6 +201,7 @@ async def _apply_dispatch_stock(
     await best_effort_sync(
         session,
         client=shipment.client,
+        account=shipment.account,
         log_key="tracking_sheet_sync_failed",
         shipment_id=str(shipment.id),
     )

@@ -15,9 +15,9 @@ app/
   jobs.py                фоновые задачи
   db/                    PostgreSQL — ВСЯ БД (SQLAlchemy async + Alembic)
     base.py              engine/session
-    models/              user, sender_profile (ФОП), shipment, support,
+    models/              user, client_account/memberships, sender_profile (ФОП), shipment, support,
                          notifications, audit, enums
-    repositories/        user, sender_profile, shipment, support, stats,
+    repositories/        user, client_account, sender_profile, shipment, support, stats,
                          notifications, audit
   sheets/                seam источника склада (`StockSource`)
     client.py            Sheets API: чтение/запись, лист на клиента, кэш
@@ -60,30 +60,36 @@ tests/                   unit-тесты (чистая логика, без жи
 
 ### PostgreSQL — вся БД (managed Neon)
 
+- **`client_accounts` / `client_account_memberships`** — бізнес-акаунти та
+  зв'язок із фактичними користувачами. Один `user_id` може мати лише одне
+  membership; `account_owner` керує налаштуваннями бізнесу, `employee` має
+  операційний доступ без керування командою/ФОП/ключами.
+
 - **`users`** — клиенты/менеджеры/владелец: роль (`client`/`manager`/`owner`),
   статус (`pending`/`active`/`blocked`/`archived`), телефон, ПІБ, `permissions`
   (JSONB, per-flag для менеджера), дежурство (`on_duty`, `duty_date`),
   таймстемпы.
-- **`sender_profiles`** (ФОП) — много на клиента: `client_id`, `name`,
+- **`sender_profiles`** (ФОП) — много на акаунт: `account_id` (legacy `client_id`), `name`,
   `np_api_key` (**Fernet-шифр**), `sender_full_name`, `sender_phone`, `org_type`
   (ФОП/ТОВ), `edrpou`, `np_sender_ref`/`np_contact_ref`, `np_sender_warehouse`,
   `is_default`, таймстемпы.
-- **`shipments`** + **`shipment_items`** — ТТН: номер/`np_ref`, клиент, ФОП,
+- **`shipments`** + **`shipment_items`** — ТТН: номер/`np_ref`, акаунт, ФОП,
   получатель (тип фіз/юр, ПІБ/телефон, місто/відділення), позиции
   (артикул×кол-во), вес/розмір, оплата/COD/страховка, `status`, таймстемпы
   (`created_at`, `dispatched_at`, `status_updated_at`), резерв. **SLA:**
   `sla_deadline`, `sla_met`/`sla_missed`. **Комиссия:** `fee_amount`,
-  `fee_free` (true при промахе SLA → fee = 0). Расчёт SLA/fee —
+  `fee_free` (true при промахе SLA → fee = 0), `created_by_user_id` (фактичний
+  автор). Расчёт SLA/fee —
   [08-notifications-tracking-returns.md](08-notifications-tracking-returns.md).
 - **`stock_movements`** — журнал движений (append-only): тип
   (`ttn_reserve`/`ttn_dispatch`/`ttn_cancel`/`ttn_return`/`manual`),
   было→стало, кто, когда, ссылка на ТТН.
-- **`support_threads`** / **`support_messages`** — поддержка: client_id,
+- **`support_threads`** / **`support_messages`** — підтримка: `account_id`,
   assigned_manager_id, статус (`open`/`waiting`/`closed`), привязка к ТТН,
-  sender_role, текст, таймстемпы.
+  sender_role, `sender_user_id`, текст, таймстемпы.
 - **`notification_settings`** — тумблеры уведомлений по типам на пользователя.
 - **`audit_logs`** — append-only аудит всех чувствительных действий (вкл.
-  `dev_*`).
+  `dev_*`), одновременно с `account_id` та `user_id` виконавця.
 
 ### Google Sheets — только учёт склада
 

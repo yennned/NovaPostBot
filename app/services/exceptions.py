@@ -112,6 +112,18 @@ class PermissionDenied(ClientServiceError):
     """У актёра нет прав на действие (иерархия `can_manage` или per-flag)."""
 
 
+class AccountMembershipConflict(ClientServiceError):
+    """Користувач уже належить іншому акаунту або платформній команді."""
+
+
+class AccountMemberNotFound(ClientServiceError):
+    """Учасник не знайдений у поточному акаунті."""
+
+
+class LastAccountOwnerError(ClientServiceError):
+    """Неможливо залишити акаунт без активного власника."""
+
+
 class StaffNotFound(ClientServiceError):
     """Сотрудник (менеджер) с таким id не найден."""
 

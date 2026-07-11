@@ -17,13 +17,15 @@ def build_contact_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def build_role_menu(role: UserRole) -> ReplyKeyboardMarkup:
+def build_role_menu(role: UserRole, *, account_owner: bool = False) -> ReplyKeyboardMarkup:
     if role is UserRole.client:
         rows = [
             ["📦 Товари", "🚚 Створити ТТН"],
             ["📬 Відправлення", "📊 Статистика"],
             ["💬 Звернення до менеджера", "⚙️ Налаштування"],
         ]
+        if account_owner:
+            rows.append(["👥 Команда"])
     elif role is UserRole.manager:
         rows = [
             ["🟢 Я на зв'язку", "📬 Відправлення"],

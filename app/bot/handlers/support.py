@@ -176,9 +176,27 @@ async def client_chat_message(
     state: FSMContext,
     bot: Bot,
 ) -> None:
+    client = _client_user(effective_context)
+    if client is None or client.status is not UserStatus.active:
+        await state.clear()
+        await _exit_chat_to_home(
+            message,
+            effective_context,
+            texts.thread_unavailable_text(),
+            default_role=UserRole.client,
+        )
+        return
+
     thread_id = await _thread_id_from_state(state)
     thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
-    if thread is None or thread.status is SupportThreadStatus.closed:
+    if (
+        thread is None
+        or thread.status is SupportThreadStatus.closed
+        or (
+            effective_context.account is not None
+            and thread.account_id != effective_context.account.id
+        )
+    ):
         await state.clear()
         await _exit_chat_to_home(
             message,
@@ -190,7 +208,15 @@ async def client_chat_message(
 
     manager_tid = thread.assigned_manager.telegram_id if thread.assigned_manager else None
     relay_text = notifications.support_message_for_manager_text(thread.client, message.text)
-    await support.post_message(db_session, thread=thread, sender_role="client", text=message.text)
+    await support.post_message(
+        db_session,
+        thread=thread,
+        sender_role="client",
+        sender_user_id=(
+            effective_context.effective_user.id if effective_context.effective_user else None
+        ),
+        text=message.text,
+    )
     await db_session.commit()
     if manager_tid is not None:
         await BotNotifier(bot).send_message(manager_tid, relay_text)
@@ -212,7 +238,13 @@ async def client_open(
     if client is None:
         raise SkipHandler()
     await state.clear()
-    existing = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    existing = (
+        await SupportRepository(db_session).get_active_thread_for_client(client.id)
+        if effective_context.account is None
+        else await SupportRepository(db_session).get_active_thread_for_account(
+            effective_context.account.id
+        )
+    )
     if existing is not None:
         await state.set_state(SupportState.client_chatting)
         await state.update_data(support_thread_id=str(existing.id))
@@ -236,7 +268,13 @@ async def client_open_home(
         await callback.answer(_STALE, show_alert=True)
         return
     await state.clear()
-    existing = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    existing = (
+        await SupportRepository(db_session).get_active_thread_for_client(client.id)
+        if effective_context.account is None
+        else await SupportRepository(db_session).get_active_thread_for_account(
+            effective_context.account.id
+        )
+    )
     if existing is not None:
         await callback.message.edit_text(
             texts.client_resume_text(),
@@ -268,7 +306,11 @@ async def client_start(
         await callback.answer(_STALE, show_alert=True)
         return
     try:
-        result = await support.open_or_get_thread(db_session, client=client)
+        result = await support.open_or_get_thread(
+            db_session,
+            client=client,
+            account_id=effective_context.account.id if effective_context.account else None,
+        )
     except ClientServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -373,6 +415,9 @@ async def staff_reply_message(
         db_session,
         thread=thread,
         sender_role=_staff_sender_role(effective_context),
+        sender_user_id=(
+            effective_context.effective_user.id if effective_context.effective_user else None
+        ),
         text=message.text,
     )
     await db_session.commit()

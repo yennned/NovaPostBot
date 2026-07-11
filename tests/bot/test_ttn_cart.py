@@ -106,7 +106,15 @@ def _page(
 
 def _patch_inventory(monkeypatch, page: InventoryPage) -> None:
     async def fake_list_inventory(
-        session, *, client, query=None, category=None, limit=8, offset=0, reader=None
+        session,
+        *,
+        client,
+        query=None,
+        category=None,
+        limit=8,
+        offset=0,
+        reader=None,
+        **kwargs,
     ):
         return page
 
