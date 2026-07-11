@@ -163,29 +163,61 @@ def upgrade() -> None:
         ondelete="SET NULL",
     )
 
+    # ``client_id`` was historically the owner of the resource, but old data
+    # can contain rows created before a user was promoted to an internal role.
+    # Build the compatibility account from both current clients and every user
+    # referenced by a legacy client_id. Restricting this to role=client leaves
+    # those rows orphaned and makes the NOT NULL conversion below abort the
+    # whole deployment transaction.
     op.execute(
         """
+        with legacy_owners as (
+            select id from users where role = 'client'::user_role
+            union
+            select client_id from sender_profiles
+            union
+            select client_id from shipments
+            union
+            select client_id from stock_movements
+            union
+            select client_id from low_stock_alerts
+            union
+            select client_id from support_threads
+        )
         insert into client_accounts (id, name, status, stock_sheet_key, stock_view_book_id)
-        select id, coalesce(nullif(full_name, ''), phone, 'Клієнт ' || id::text),
-               case when status = 'blocked'::user_status then 'blocked'::client_account_status
-                    when status = 'archived'::user_status then 'archived'::client_account_status
+        select u.id, coalesce(nullif(u.full_name, ''), u.phone, 'Клієнт ' || u.id::text),
+               case when u.status = 'blocked'::user_status then 'blocked'::client_account_status
+                    when u.status = 'archived'::user_status then 'archived'::client_account_status
                     else 'active'::client_account_status end,
-               stock_sheet_key, stock_view_book_id
-        from users
-        where role = 'client'::user_role
+               u.stock_sheet_key, u.stock_view_book_id
+        from users u
+        join legacy_owners o on o.id = u.id
         on conflict (id) do nothing
         """
     )
     op.execute(
         """
+        with legacy_owners as (
+            select id from users where role = 'client'::user_role
+            union
+            select client_id from sender_profiles
+            union
+            select client_id from shipments
+            union
+            select client_id from stock_movements
+            union
+            select client_id from low_stock_alerts
+            union
+            select client_id from support_threads
+        )
         insert into client_account_memberships
             (id, account_id, user_id, role, status, joined_at)
-        select id, id, id, 'account_owner'::membership_role,
-               case when status = 'blocked'::user_status then 'blocked'::membership_status
+        select u.id, u.id, u.id, 'account_owner'::membership_role,
+               case when u.status = 'blocked'::user_status then 'blocked'::membership_status
                     else 'active'::membership_status end,
-               created_at
-        from users
-        where role = 'client'::user_role
+               u.created_at
+        from users u
+        join legacy_owners o on o.id = u.id
         on conflict (user_id) do nothing
         """
     )
@@ -237,7 +269,6 @@ def upgrade() -> None:
     op.execute(
         """
         do $$
-        declare orphan_count bigint;
         begin
             if (select count(*) from client_accounts) <
                (select count(*) from users where role = 'client'::user_role) then
@@ -247,17 +278,19 @@ def upgrade() -> None:
                (select count(*) from users where role = 'client'::user_role) then
                 raise exception 'client membership backfill lost users';
             end if;
-            foreach orphan_count in array[
-                (select count(*) from sender_profiles where account_id is null),
-                (select count(*) from shipments where account_id is null),
-                (select count(*) from stock_movements where account_id is null),
-                (select count(*) from low_stock_alerts where account_id is null),
-                (select count(*) from support_threads where account_id is null)
-            ] loop
-                if orphan_count > 0 then
-                    raise exception 'account scoped rows remain orphaned';
-                end if;
-            end loop;
+            if exists (
+                select 1
+                from (values
+                    ((select count(*) from sender_profiles where account_id is null)),
+                    ((select count(*) from shipments where account_id is null)),
+                    ((select count(*) from stock_movements where account_id is null)),
+                    ((select count(*) from low_stock_alerts where account_id is null)),
+                    ((select count(*) from support_threads where account_id is null))
+                ) as orphan_counts(orphan_count)
+                where orphan_counts.orphan_count > 0
+            ) then
+                raise exception 'account scoped rows remain orphaned';
+            end if;
             if exists (
                 select 1 from shipments where created_by_user_id is null
             ) then
