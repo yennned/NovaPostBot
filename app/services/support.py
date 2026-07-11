@@ -52,6 +52,7 @@ async def get_duty_contact(
     *,
     settings: Settings | None = None,
     now: datetime | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> DutyContact:
     cfg = settings or get_settings()
     moment = now_local(cfg, now)
@@ -70,6 +71,7 @@ async def open_or_get_thread(
     shipment_id: uuid.UUID | None = None,
     settings: Settings | None = None,
     now: datetime | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> ThreadOpenResult:
     """Вернуть активный тред клиента или создать новый с маршрутизацией."""
     if client.role is not UserRole.client:
@@ -81,7 +83,11 @@ async def open_or_get_thread(
     repo = SupportRepository(session)
     contact = await get_duty_contact(session, settings=cfg, now=now)
 
-    existing = await repo.get_active_thread_for_client(client.id)
+    existing = (
+        await repo.get_active_thread_for_client(client.id)
+        if account_id is None
+        else await repo.get_active_thread_for_account(account_id)
+    )
     if existing is not None:
         return ThreadOpenResult(
             thread=existing,
@@ -94,6 +100,7 @@ async def open_or_get_thread(
     if contact.office_open and contact.manager is not None:
         thread = await repo.create_thread(
             client_id=client.id,
+            account_id=account_id,
             assigned_manager_id=contact.manager.id,
             shipment_id=shipment_id,
             status=SupportThreadStatus.open,
@@ -104,6 +111,7 @@ async def open_or_get_thread(
 
     thread = await repo.create_thread(
         client_id=client.id,
+        account_id=account_id,
         shipment_id=shipment_id,
         status=SupportThreadStatus.waiting,
     )
@@ -122,10 +130,14 @@ async def post_message(
     thread: SupportThread,
     sender_role: str,
     text: str,
+    sender_user_id: uuid.UUID | None = None,
 ) -> SupportMessage:
     """Добавить реплику в тред и поднять его в инбоксе (`updated_at`)."""
     message = await SupportRepository(session).add_message(
-        thread_id=thread.id, sender_role=sender_role, text=text
+        thread_id=thread.id,
+        sender_role=sender_role,
+        sender_user_id=sender_user_id,
+        text=text,
     )
     thread.updated_at = datetime.now(UTC)  # bump для сортировки инбокса по активности
     await session.flush()

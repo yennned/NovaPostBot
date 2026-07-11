@@ -16,9 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import ClientAccountStatus, MembershipStatus, UserRole, UserStatus
 from app.db.models.user import User
-from app.db.repositories import AuditRepository, SenderProfileRepository, UserRepository
+from app.db.repositories import (
+    AuditRepository,
+    ClientAccountRepository,
+    SenderProfileRepository,
+    UserRepository,
+)
 from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     AlreadyInStatus,
@@ -116,6 +121,19 @@ async def _transition(
 
     before = {"status": user.status}
     await users.update_status(user, to)
+    membership = await ClientAccountRepository(session).get_membership(user_id=user.id)
+    if membership is not None:
+        account_status = {
+            UserStatus.blocked: ClientAccountStatus.blocked,
+            UserStatus.archived: ClientAccountStatus.archived,
+        }.get(to, ClientAccountStatus.active)
+        membership.account.status = account_status
+        membership_status = (
+            MembershipStatus.blocked
+            if to in {UserStatus.blocked, UserStatus.archived}
+            else MembershipStatus.active
+        )
+        await ClientAccountRepository(session).set_membership_status(membership, membership_status)
     await AuditRepository(session).log(
         action,
         user_id=actor.id,

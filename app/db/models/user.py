@@ -14,6 +14,7 @@ from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import UserRole, UserStatus
 
 if TYPE_CHECKING:
+    from app.db.models.client_account import ClientAccountMembership
     from app.db.models.notification_setting import NotificationSetting
     from app.db.models.sender_profile import SenderProfile
     from app.db.models.stock_movement import StockMovement
@@ -49,6 +50,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Per-flag права менеджера (например, {"can_edit_clients": true}).
     permissions: Mapped[dict] = mapped_column(
         JSONB, default=dict, server_default=text("'{}'::jsonb"), nullable=False
+    )
+
+    account_memberships: Mapped[list[ClientAccountMembership]] = relationship(
+        back_populates="user",
+        foreign_keys="ClientAccountMembership.user_id",
+        cascade="all, delete-orphan",
     )
 
     # Дежурство менеджера.

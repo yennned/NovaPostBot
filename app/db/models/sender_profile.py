@@ -18,6 +18,7 @@ from app.db.models.enums import OrgType
 from app.db.types import EncryptedString
 
 if TYPE_CHECKING:
+    from app.db.models.client_account import ClientAccount
     from app.db.models.user import User
 
 
@@ -34,6 +35,9 @@ class SenderProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     client_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=True
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -60,6 +64,7 @@ class SenderProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     client: Mapped[User] = relationship(back_populates="sender_profiles")
+    account: Mapped[ClientAccount | None] = relationship()
 
     def __repr__(self) -> str:  # pragma: no cover - отладочное представление
         return f"<SenderProfile id={self.id!s} client={self.client_id!s} name={self.name!r}>"

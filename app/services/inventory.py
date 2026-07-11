@@ -9,6 +9,7 @@ from decimal import Decimal
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.client_account import ClientAccount
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services import shipments
@@ -37,7 +38,7 @@ class InventoryPage:
     categories: list[str]
 
 
-def stock_sheet_key(client: User) -> str:
+def stock_sheet_key(client: User | ClientAccount) -> str:
     """Ключ листа склада.
 
     Предпочитаем персистентное поле `users.stock_sheet_key`, чтобы смена ПІБ не
@@ -45,10 +46,12 @@ def stock_sheet_key(client: User) -> str:
     старое поведение для обратной совместимости и данных до миграции.
     """
 
+    if isinstance(client, ClientAccount):
+        return client.stock_sheet_key or client.name or str(client.id)
     return client.stock_sheet_key or client.full_name or str(client.telegram_id)
 
 
-def stock_view_book_url(client: User) -> str | None:
+def stock_view_book_url(client: User | ClientAccount) -> str | None:
     """Ссылка на персональную read-only Google-таблицу склада клиента.
 
     `None`, пока книга-зеркало не заведена провижином (`users.stock_view_book_id`).
@@ -80,10 +83,12 @@ async def get_inventory_snapshot(
     session: AsyncSession,
     *,
     client: User,
+    account_id=None,
+    account: ClientAccount | None = None,
     reader: StockSource | None = None,
 ) -> list[InventoryItem]:
     shipments._require_active_client(client)
-    key = stock_sheet_key(client)
+    key = stock_sheet_key(account or client)
     try:
         rows = await asyncio.to_thread((reader or build_stock_source()).read_stock, key)
     except StockSheetNotFound:
@@ -92,7 +97,11 @@ async def get_inventory_snapshot(
         # Manager-сводка (`stock_totals`) проглатывает это отдельно → None.
         logger.warning("inventory.sheet_missing", client_id=str(client.id), key=key)
         rows = []
-    reserved = await ShipmentRepository(session).reserved_by_sku(client.id)
+    reserved = (
+        await ShipmentRepository(session).reserved_by_sku(client.id)
+        if account_id is None
+        else await ShipmentRepository(session).reserved_by_account(account_id)
+    )
     items = _build_items(rows, reserved)
     items.sort(
         key=lambda item: (
@@ -108,13 +117,17 @@ async def list_inventory(
     session: AsyncSession,
     *,
     client: User,
+    account_id=None,
+    account: ClientAccount | None = None,
     query: str | None = None,
     category: str | None = None,
     limit: int = 8,
     offset: int = 0,
     reader: StockSource | None = None,
 ) -> InventoryPage:
-    items = await get_inventory_snapshot(session, client=client, reader=reader)
+    items = await get_inventory_snapshot(
+        session, client=client, account_id=account_id, account=account, reader=reader
+    )
     categories = sorted({item.category for item in items if item.category})
     if query:
         needle = query.strip().lower()

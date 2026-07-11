@@ -101,6 +101,7 @@ def shipment_card_text(card: ShipmentCard) -> str:
         f"Оплата: {card.payment_method or '—'} / {card.payer_type or '—'}",
         f"COD: {_money(card.cod_amount)} · Оціночна: {_money(card.insured_amount)}",
         f"Створено: {_fmt_dt(card.created_at)}",
+        f"Автор ТТН: {card.created_by_name or '—'}",
         f"Оновлено: {_fmt_dt(card.status_changed_at)}",
         f"Відправлено: {_fmt_dt(card.dispatched_at) if card.dispatched_at else '—'}",
         f"SLA дедлайн: {_fmt_dt(card.sla_deadline) if card.sla_deadline else '—'}",

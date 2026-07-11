@@ -10,8 +10,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.config import Settings, get_settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import (
+    ClientAccountStatus,
+    MembershipRole,
+    MembershipStatus,
+    UserRole,
+    UserStatus,
+)
 from app.db.models.user import User
 from app.services.exceptions import PermissionDenied
 
@@ -151,3 +158,40 @@ def require_owner(actor: User, settings: Settings | None = None) -> None:
         raise PermissionDenied("обліковий запис неактивний")
     if actor.role is not UserRole.owner:
         raise PermissionDenied("потрібна роль власника")
+
+
+def require_account_member(context: EffectiveContext | ClientAccountContext) -> None:
+    """Перевірити активність користувача, акаунта та membership."""
+    if isinstance(context, EffectiveContext) and context.is_dev:
+        return
+    account_context = context.account_context if isinstance(context, EffectiveContext) else context
+    if account_context is None:
+        raise PermissionDenied("не вибрано клієнтський акаунт")
+    if account_context.user.status is not UserStatus.active:
+        raise PermissionDenied("обліковий запис неактивний")
+    if account_context.account.status is not ClientAccountStatus.active:
+        raise PermissionDenied("клієнтський акаунт заблоковано")
+    if account_context.membership.status is not MembershipStatus.active:
+        raise PermissionDenied("членство в акаунті неактивне")
+
+
+def require_account_owner(context: EffectiveContext | ClientAccountContext) -> None:
+    """Доступ до команди, ФОП, реквізитів і ключів НП."""
+    require_account_member(context)
+    account_context = context.account_context if isinstance(context, EffectiveContext) else context
+    if (
+        account_context is None
+        or account_context.membership.role is not MembershipRole.account_owner
+    ):
+        raise PermissionDenied("потрібна роль головного клієнта")
+
+
+def require_account_resource(
+    context: EffectiveContext | ClientAccountContext,
+    resource_account_id,
+) -> None:
+    """Заборонити доступ до ресурсу іншого акаунта навіть через callback/UUID."""
+    require_account_member(context)
+    account_context = context.account_context if isinstance(context, EffectiveContext) else context
+    if account_context is None or account_context.account.id != resource_account_id:
+        raise PermissionDenied("ресурс належить іншому акаунту")

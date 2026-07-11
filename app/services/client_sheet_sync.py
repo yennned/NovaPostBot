@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.db.models.client_account import ClientAccount
 from app.db.models.user import User
 from app.services.inventory import get_inventory_snapshot
 from app.sheets import GoogleSheetsStockSource, StockSource
@@ -74,21 +75,37 @@ async def sync_client_sheets(
     session: AsyncSession,
     *,
     client: User,
+    account: ClientAccount | None = None,
     previous_sheet_key: str | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> None:
     cfg = settings or get_settings()
-    target_key = desired_stock_sheet_key(full_name=client.full_name, telegram_id=client.telegram_id)
-    source_key = client.stock_sheet_key or target_key
+    if account is None:
+        target_key = desired_stock_sheet_key(
+            full_name=client.full_name, telegram_id=client.telegram_id
+        )
+        source_key = client.stock_sheet_key or target_key
+        view_book_id = client.stock_view_book_id
+    else:
+        target_key = account.name or str(account.id)
+        source_key = account.stock_sheet_key or target_key
+        view_book_id = account.stock_view_book_id
 
     if not _sheets_enabled(cfg):
-        if client.stock_sheet_key != target_key:
-            client.stock_sheet_key = target_key
+        scope = account or client
+        if scope.stock_sheet_key != target_key:
+            scope.stock_sheet_key = target_key
             await session.flush()
         return
 
-    snapshot = await get_inventory_snapshot(session, client=client, reader=reader)
+    snapshot = await get_inventory_snapshot(
+        session,
+        client=client,
+        account_id=account.id if account else None,
+        account=account,
+        reader=reader,
+    )
     rows = [
         ViewRow(
             sku=item.sku,
@@ -109,16 +126,22 @@ async def sync_client_sheets(
             source_key,
             previous_sheet_key or (source_key if source_key != target_key else None),
             target_key,
-            client.stock_view_book_id,
+            view_book_id,
             rows,
         ),
     )
     # Продвигаем ключ только при подтверждённом переименовании вкладок: иначе PG
     # указывал бы на лист с новым именем, которого в «Складі» нет → пустой остаток.
     if rename_ok:
-        client.stock_sheet_key = target_key
-    if book_id and client.stock_view_book_id != book_id:
-        client.stock_view_book_id = book_id
+        if account is None:
+            client.stock_sheet_key = target_key
+        else:
+            account.stock_sheet_key = target_key
+    if book_id and view_book_id != book_id:
+        if account is None:
+            client.stock_view_book_id = book_id
+        else:
+            account.stock_view_book_id = book_id
     await session.flush()
 
 
@@ -126,6 +149,7 @@ async def best_effort_sync(
     session: AsyncSession,
     *,
     client: User,
+    account: ClientAccount | None = None,
     log_key: str,
     previous_sheet_key: str | None = None,
     reader: StockSource | None = None,
@@ -143,6 +167,7 @@ async def best_effort_sync(
         await sync_client_sheets(
             session,
             client=client,
+            account=account,
             previous_sheet_key=previous_sheet_key,
             reader=reader,
             settings=settings,

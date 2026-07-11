@@ -22,10 +22,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings, get_settings
-from app.db.models.enums import OrgType, UserRole, UserStatus
+from app.db.models.enums import MembershipRole, OrgType, UserRole, UserStatus
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
-from app.db.repositories import AuditRepository, SenderProfileRepository, UserRepository
+from app.db.repositories import (
+    AuditRepository,
+    ClientAccountRepository,
+    SenderProfileRepository,
+    UserRepository,
+)
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaAuthError, NovaPoshtaValidationError
@@ -51,12 +56,14 @@ class SenderProfileView:
     has_api_key: bool  # ключ НП есть/нет — само значение наружу не отдаём
     is_np_validated: bool  # ключ проверен в НП, Ref отправителя подтянут
     created_at: datetime
+    account_id: uuid.UUID | None = None
 
 
 def _view(profile: SenderProfile) -> SenderProfileView:
     return SenderProfileView(
         id=profile.id,
         client_id=profile.client_id,
+        account_id=profile.account_id,
         name=profile.name,
         org_type=profile.org_type,
         edrpou=profile.edrpou,
@@ -95,10 +102,20 @@ async def _resolve_sender_refs(
 
 
 def _require_can_manage_profiles(
-    actor: User, client_id: uuid.UUID, settings: Settings | None
+    actor: User,
+    client_id: uuid.UUID,
+    settings: Settings | None,
+    *,
+    account_id: uuid.UUID | None = None,
 ) -> None:
     """ФОП клиента может вести сам клиент или персонал (manager+/dev)."""
     if permissions.is_dev(actor.telegram_id, settings):
+        return
+    if account_id is not None:
+        if actor.role is not UserRole.client:
+            raise PermissionDenied("немає прав працювати з ФОП акаунта")
+        if actor.status is not UserStatus.active:
+            raise PermissionDenied("налаштування ФОП доступні після підтвердження")
         return
     if actor.id == client_id:
         if actor.role is not UserRole.client:
@@ -112,6 +129,20 @@ def _require_can_manage_profiles(
         raise PermissionDenied("нет прав управлять ФОП этого клиента")
 
 
+async def _require_account_actor(
+    session: AsyncSession,
+    *,
+    actor: User,
+    account_id: uuid.UUID,
+    owner_only: bool = False,
+) -> None:
+    membership = await ClientAccountRepository(session).get_membership(user_id=actor.id)
+    if membership is None or membership.account_id != account_id:
+        raise PermissionDenied("ресурс належить іншому акаунту")
+    if owner_only and membership.role is not MembershipRole.account_owner:
+        raise PermissionDenied("керування ФОП доступне лише головному клієнту")
+
+
 async def _get_profile(repo: SenderProfileRepository, profile_id: uuid.UUID) -> SenderProfile:
     profile = await repo.get_by_id(profile_id)
     if profile is None:
@@ -120,19 +151,35 @@ async def _get_profile(repo: SenderProfileRepository, profile_id: uuid.UUID) -> 
 
 
 async def list_profiles(
-    session: AsyncSession, *, actor: User, client_id: uuid.UUID, settings: Settings | None = None
+    session: AsyncSession,
+    *,
+    actor: User,
+    client_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    settings: Settings | None = None,
 ) -> list[SenderProfileView]:
-    _require_can_manage_profiles(actor, client_id, settings)
+    _require_can_manage_profiles(actor, client_id, settings, account_id=account_id)
+    if account_id is not None:
+        await _require_account_actor(session, actor=actor, account_id=account_id)
     repo = SenderProfileRepository(session)
-    return [_view(p) for p in await repo.list_for_client(client_id)]
+    return [_view(p) for p in await repo.list_for_client(client_id, account_id=account_id)]
 
 
 async def get_profile(
-    session: AsyncSession, *, actor: User, profile_id: uuid.UUID, settings: Settings | None = None
+    session: AsyncSession,
+    *,
+    actor: User,
+    profile_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    settings: Settings | None = None,
 ) -> SenderProfileView:
     repo = SenderProfileRepository(session)
     profile = await _get_profile(repo, profile_id)
-    _require_can_manage_profiles(actor, profile.client_id, settings)
+    _require_can_manage_profiles(actor, profile.client_id, settings, account_id=account_id)
+    if account_id is not None and profile.account_id != account_id:
+        raise PermissionDenied("ФОП належить іншому акаунту")
+    if account_id is not None:
+        await _require_account_actor(session, actor=actor, account_id=account_id)
     return _view(profile)
 
 
@@ -141,6 +188,7 @@ async def create_profile(
     *,
     actor: User,
     client_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
     name: str,
     np_api_key: str,
     org_type: OrgType = OrgType.fop,
@@ -151,7 +199,9 @@ async def create_profile(
     np_client: NovaPoshtaClient | None = None,
     settings: Settings | None = None,
 ) -> SenderProfileView:
-    _require_can_manage_profiles(actor, client_id, settings)
+    _require_can_manage_profiles(actor, client_id, settings, account_id=account_id)
+    if account_id is not None:
+        await _require_account_actor(session, actor=actor, account_id=account_id, owner_only=True)
     # Телефон отправителя обязателен: он уходит в НП как `SendersPhone` при создании
     # ТТН. Требуем его уже на сохранении, чтобы не возникало состояние «ключ валиден,
     # но телефона нет» (тогда `create_shipment` отбил бы ТТН гейтом отправителя).
@@ -162,10 +212,11 @@ async def create_profile(
     refs = await _resolve_sender_refs(np_client, np_api_key, settings) if np_client else {}
     repo = SenderProfileRepository(session)
     # Первый профиль клиента делаем дефолтным автоматически.
-    existing = await repo.list_for_client(client_id)
+    existing = await repo.list_for_client(client_id, account_id=account_id)
     is_default = make_default or not existing
     profile = await repo.create(
         client_id=client_id,
+        account_id=account_id,
         name=name,
         np_api_key=np_api_key,
         org_type=org_type,
@@ -181,6 +232,7 @@ async def create_profile(
         affected_entity=f"sender_profile:{profile.id}",
         after={
             "client_id": str(client_id),
+            "account_id": str(account_id) if account_id else None,
             "name": name,
             "is_default": is_default,
             "np_validated": bool(refs),
@@ -196,6 +248,7 @@ async def update_profile(
     profile_id: uuid.UUID,
     np_client: NovaPoshtaClient | None = None,
     settings: Settings | None = None,
+    account_id: uuid.UUID | None = None,
     **fields: object,
 ) -> SenderProfileView:
     """Обновить поля профиля. Допустимые ключи — колонки `SenderProfile`
@@ -207,7 +260,11 @@ async def update_profile(
     """
     repo = SenderProfileRepository(session)
     profile = await _get_profile(repo, profile_id)
-    _require_can_manage_profiles(actor, profile.client_id, settings)
+    _require_can_manage_profiles(actor, profile.client_id, settings, account_id=account_id)
+    if account_id is not None:
+        if profile.account_id != account_id:
+            raise PermissionDenied("ФОП належить іншому акаунту")
+        await _require_account_actor(session, actor=actor, account_id=account_id, owner_only=True)
 
     allowed = {"name", "np_api_key", "org_type", "edrpou", "sender_full_name", "sender_phone"}
     changes = {k: v for k, v in fields.items() if k in allowed}
@@ -245,11 +302,20 @@ async def update_profile(
 
 
 async def set_default(
-    session: AsyncSession, *, actor: User, profile_id: uuid.UUID, settings: Settings | None = None
+    session: AsyncSession,
+    *,
+    actor: User,
+    profile_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    settings: Settings | None = None,
 ) -> SenderProfileView:
     repo = SenderProfileRepository(session)
     profile = await _get_profile(repo, profile_id)
-    _require_can_manage_profiles(actor, profile.client_id, settings)
+    _require_can_manage_profiles(actor, profile.client_id, settings, account_id=account_id)
+    if account_id is not None:
+        if profile.account_id != account_id:
+            raise PermissionDenied("ФОП належить іншому акаунту")
+        await _require_account_actor(session, actor=actor, account_id=account_id, owner_only=True)
     await repo.set_default(profile)
     await AuditRepository(session).log(
         "sender_profile_set_default",

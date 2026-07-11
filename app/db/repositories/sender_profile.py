@@ -9,23 +9,40 @@ from sqlalchemy import select, update
 from app.db.models.enums import OrgType
 from app.db.models.sender_profile import SenderProfile
 from app.db.repositories.base import BaseRepository
+from app.db.repositories.scope import resolve_account_scope
 
 
 class SenderProfileRepository(BaseRepository):
     async def get_by_id(self, profile_id: uuid.UUID) -> SenderProfile | None:
         return await self.session.get(SenderProfile, profile_id)
 
-    async def list_for_client(self, client_id: uuid.UUID) -> list[SenderProfile]:
+    async def list_for_client(
+        self, client_id: uuid.UUID, *, account_id: uuid.UUID | None = None
+    ) -> list[SenderProfile]:
+        _legacy_client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
         stmt = (
             select(SenderProfile)
-            .where(SenderProfile.client_id == client_id)
+            .where(
+                SenderProfile.account_id == account_id
+                if account_id is not None
+                else SenderProfile.client_id == client_id
+            )
             .order_by(SenderProfile.created_at)
         )
         return list(await self.session.scalars(stmt))
 
-    async def get_default_for_client(self, client_id: uuid.UUID) -> SenderProfile | None:
+    async def get_default_for_client(
+        self, client_id: uuid.UUID, *, account_id: uuid.UUID | None = None
+    ) -> SenderProfile | None:
+        _legacy_client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
         stmt = select(SenderProfile).where(
-            SenderProfile.client_id == client_id,
+            SenderProfile.account_id == account_id
+            if account_id is not None
+            else SenderProfile.client_id == client_id,
             SenderProfile.is_default.is_(True),
         )
         return await self.session.scalar(stmt)
@@ -33,7 +50,8 @@ class SenderProfileRepository(BaseRepository):
     async def create(
         self,
         *,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
         name: str,
         np_api_key: str,
         sender_full_name: str | None = None,
@@ -45,8 +63,12 @@ class SenderProfileRepository(BaseRepository):
         np_contact_ref: str | None = None,
         np_sender_warehouse: str | None = None,
     ) -> SenderProfile:
+        client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
         profile = SenderProfile(
             client_id=client_id,
+            account_id=account_id,
             name=name,
             np_api_key=np_api_key,
             sender_full_name=sender_full_name,

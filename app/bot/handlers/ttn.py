@@ -85,6 +85,10 @@ def _effective_client(context: EffectiveContext):
     return context.effective_user or context.actor_user
 
 
+def _account_id(context: EffectiveContext):
+    return context.account.id if context.account is not None else None
+
+
 def _profile_uuid(data: dict) -> uuid.UUID | None:
     raw = data.get("sender_profile_id")
     return uuid.UUID(raw) if raw else None
@@ -150,7 +154,12 @@ async def start_create_ttn(
     if client is None:
         await message.answer("Спочатку авторизуйтесь через /start.")
         return
-    profiles = await sender_profile.list_profiles(db_session, actor=client, client_id=client.id)
+    profiles = await sender_profile.list_profiles(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        account_id=_account_id(effective_context),
+    )
     if len(profiles) > 1:
         await state.clear()
         await state.set_state(CreateTtnState.picking_sender)
@@ -163,7 +172,15 @@ async def start_create_ttn(
             await message.answer(texts.pick_sender_text(), reply_markup=kb, parse_mode="HTML")
         return
     # 0/1 ФОП → прежний строгий гейт по дефолтному (единственному) профилю.
-    await _resolve_sender_and_begin(message, state, client, db_session, profile_id=None, edit=edit)
+    await _resolve_sender_and_begin(
+        message,
+        state,
+        client,
+        db_session,
+        profile_id=None,
+        edit=edit,
+        account_id=_account_id(effective_context),
+    )
 
 
 async def _resolve_sender_and_begin(
@@ -174,10 +191,13 @@ async def _resolve_sender_and_begin(
     *,
     profile_id: uuid.UUID | None,
     edit: bool,
+    account_id: uuid.UUID | None = None,
 ) -> None:
     """Гейт ФОП (предусловие create_shipment) → вход в кошик выбранным профилем."""
     try:
-        sender_profile_id = await resolve_sender_id(session, client=client, profile_id=profile_id)
+        sender_profile_id = await resolve_sender_id(
+            session, client=client, profile_id=profile_id, account_id=account_id
+        )
     except SenderProfileNotConfigured:
         await target.answer(texts.no_profile_text(), parse_mode="HTML")
         return
@@ -202,7 +222,15 @@ async def _resolve_sender_and_begin(
         nonce=uuid.uuid4().hex,
     )
     try:
-        await _show_picker(target, session, client, state, offset=0, edit=edit)
+        await _show_picker(
+            target,
+            session,
+            client,
+            state,
+            offset=0,
+            edit=edit,
+            account_id=account_id,
+        )
     except PermissionDenied as exc:
         await target.answer(str(exc))
 
@@ -227,7 +255,13 @@ async def cb_pick_sender(
         await callback.answer(_STALE, show_alert=True)
         return
     await _resolve_sender_and_begin(
-        callback.message, state, client, db_session, profile_id=profile_id, edit=True
+        callback.message,
+        state,
+        client,
+        db_session,
+        profile_id=profile_id,
+        edit=True,
+        account_id=_account_id(effective_context),
     )
     await callback.answer()
 
@@ -243,12 +277,21 @@ async def _show_picker(
     *,
     offset: int,
     edit: bool,
+    account_id: uuid.UUID | None = None,
+    account=None,
 ) -> None:
     data = await state.get_data()
     query = data.get("ttn_query")
     category = data.get("ttn_category")
     page = await list_inventory(
-        session, client=client, query=query, category=category, limit=TTN_PAGE_SIZE, offset=offset
+        session,
+        client=client,
+        query=query,
+        category=category,
+        limit=TTN_PAGE_SIZE,
+        offset=offset,
+        account_id=account_id,
+        account=account,
     )
     await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
     data = await state.get_data()
@@ -459,7 +502,16 @@ async def cb_page(
         return
     await state.set_state(CreateTtnState.picking_items)
     try:
-        await _show_picker(callback.message, db_session, client, state, offset=offset, edit=True)
+        await _show_picker(
+            callback.message,
+            db_session,
+            client,
+            state,
+            offset=offset,
+            edit=True,
+            account_id=_account_id(effective_context),
+            account=effective_context.account,
+        )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -496,7 +548,16 @@ async def cb_search_clear(
     # фильтры, из-за чего кнопка «Скинути» не очищала набор и казалась нерабочей.
     await state.update_data(ttn_query=None, ttn_category=None, cart={}, pending=None)
     await state.set_state(CreateTtnState.picking_items)
-    await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
+    await _show_picker(
+        callback.message,
+        db_session,
+        client,
+        state,
+        offset=0,
+        edit=True,
+        account_id=_account_id(effective_context),
+        account=effective_context.account,
+    )
     await callback.answer("Кошик і фільтри очищено.")
 
 
@@ -530,7 +591,16 @@ async def cb_pick_category(
             return
         await state.update_data(ttn_category=categories[idx])
     await state.set_state(CreateTtnState.picking_items)
-    await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
+    await _show_picker(
+        callback.message,
+        db_session,
+        client,
+        state,
+        offset=0,
+        edit=True,
+        account_id=_account_id(effective_context),
+        account=effective_context.account,
+    )
     await callback.answer()
 
 
@@ -556,6 +626,8 @@ async def receive_item_search(
         query=query,
         limit=TTN_PAGE_SIZE,
         offset=0,
+        account_id=_account_id(effective_context),
+        account=effective_context.account,
     )
     await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
     data = await state.get_data()
@@ -602,6 +674,8 @@ async def cb_pick(
         query=(await state.get_data()).get("ttn_query"),
         limit=TTN_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(effective_context),
+        account=effective_context.account,
     )
     if idx < 0 or idx >= len(page.items):
         await callback.answer(_STALE, show_alert=True)
@@ -765,6 +839,8 @@ async def cb_qty_ok(
             state,
             offset=data.get("cart_offset", 0),
             edit=True,
+            account_id=_account_id(effective_context),
+            account=effective_context.account,
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -833,7 +909,15 @@ async def cb_cart_edit(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     # Остаток для редактирования берём актуальный (а не сохранённый в корзине).
-    page = await list_inventory(db_session, client=client, query=sku, limit=TTN_PAGE_SIZE, offset=0)
+    page = await list_inventory(
+        db_session,
+        client=client,
+        query=sku,
+        limit=TTN_PAGE_SIZE,
+        offset=0,
+        account_id=_account_id(effective_context),
+        account=effective_context.account,
+    )
     match = next((it for it in page.items if it.sku == sku), None)
     available = match.available if match else entry["qty"]
     await state.update_data(
@@ -1133,7 +1217,16 @@ async def cb_back(
             await callback.answer("Авторизуйтесь через /start.", show_alert=True)
             return
         await state.set_state(CreateTtnState.picking_items)
-        await _show_picker(callback.message, db_session, client, state, offset=0, edit=True)
+        await _show_picker(
+            callback.message,
+            db_session,
+            client,
+            state,
+            offset=0,
+            edit=True,
+            account_id=_account_id(effective_context),
+            account=effective_context.account,
+        )
     elif step == "qty":
         if (await state.get_data()).get("pending") is None:
             await callback.answer(_STALE, show_alert=True)
@@ -1776,7 +1869,15 @@ async def _show_success(message: Message, ttn_number: str | None) -> None:
 
 
 async def _do_create(
-    session: AsyncSession, client, data: dict, np_client: NovaPoshtaClient, bot: Bot
+    session: AsyncSession,
+    client,
+    data: dict,
+    np_client: NovaPoshtaClient,
+    bot: Bot,
+    *,
+    account_id: uuid.UUID | None = None,
+    account=None,
+    actor_user_id: uuid.UUID | None = None,
 ):
     cart = data["cart"]
     cod = data.get("cod_amount")
@@ -1802,6 +1903,9 @@ async def _do_create(
         recipient_edrpou=data.get("recipient_edrpou"),
         sender_profile_id=_profile_uuid(data),
         notifier=BotNotifier(bot),
+        account_id=account_id,
+        account=account,
+        actor_user_id=actor_user_id or client.id,
     )
 
 
@@ -1833,7 +1937,16 @@ async def cb_submit(
     await callback.answer("Створюємо ТТН…")
     try:
         try:
-            card = await _do_create(db_session, client, data, np_client, bot)
+            card = await _do_create(
+                db_session,
+                client,
+                data,
+                np_client,
+                bot,
+                account_id=_account_id(effective_context),
+                account=effective_context.account,
+                actor_user_id=client.id,
+            )
         except ClientServiceError as exc:
             # NP-first: при ошибке в БД ничего нет — повтор безопасен, карточка остаётся.
             await callback.message.answer(_submit_error_text(exc, data.get("cart", {})))

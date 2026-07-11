@@ -19,6 +19,10 @@ class ClientCabinetState(StatesGroup):
     waiting_for_sender_profile_edit = State()
 
 
+class AccountTeamState(StatesGroup):
+    waiting_for_phone = State()
+
+
 class SenderProfileCreateState(StatesGroup):
     """Мастер «➕ Додати ФОП» (клиент вводит свой ключ НП). Данные — в FSM-data."""
 

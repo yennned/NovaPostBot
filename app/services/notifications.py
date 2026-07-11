@@ -8,16 +8,19 @@ from collections.abc import Iterable
 from decimal import Decimal
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings, get_settings
-from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
+from app.db.models.client_account import ClientAccountMembership
+from app.db.models.enums import MembershipStatus, ShipmentStatus, UserRole, UserStatus
 from app.db.models.shipment import Shipment
 from app.db.models.user import User
 from app.db.repositories import NotificationSettingRepository, UserRepository
 from app.services.client_settings import (
     DEFAULT_NOTIFICATION_SETTINGS,
+    NOTIFY_ALL_ACCOUNT_SHIPMENTS,
     NOTIFY_LOW_STOCK,
     NOTIFY_SHIPMENT_STATUS,
 )
@@ -294,8 +297,30 @@ async def notify_shipment_status_changed(
     client: User,
     shipment: Shipment,
 ) -> None:
-    if await _notification_enabled(session, user=client, key=NOTIFY_SHIPMENT_STATUS):
-        await notifier.send_message(client.telegram_id, shipment_status_text(shipment))
+    recipients: list[int] = []
+    if shipment.account_id is None:
+        if await _notification_enabled(session, user=client, key=NOTIFY_SHIPMENT_STATUS):
+            recipients.append(client.telegram_id)
+    else:
+        members = await session.scalars(
+            select(User)
+            .join(ClientAccountMembership, ClientAccountMembership.user_id == User.id)
+            .where(
+                ClientAccountMembership.account_id == shipment.account_id,
+                ClientAccountMembership.status == MembershipStatus.active,
+                User.status == UserStatus.active,
+            )
+        )
+        for member in members:
+            own = shipment.created_by_user_id == member.id
+            all_account = await _notification_enabled(
+                session, user=member, key=NOTIFY_ALL_ACCOUNT_SHIPMENTS
+            )
+            if (own or all_account) and await _notification_enabled(
+                session, user=member, key=NOTIFY_SHIPMENT_STATUS
+            ):
+                recipients.append(member.telegram_id)
+    await _send_many(notifier, recipients, shipment_status_text(shipment))
 
 
 async def notify_low_stock(

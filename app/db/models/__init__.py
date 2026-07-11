@@ -3,7 +3,11 @@
 """
 
 from app.db.models.audit import AuditLog
+from app.db.models.client_account import ClientAccount, ClientAccountMembership
 from app.db.models.enums import (
+    ClientAccountStatus,
+    MembershipRole,
+    MembershipStatus,
     OrgType,
     ShipmentStatus,
     StockMovementType,
@@ -21,7 +25,12 @@ from app.db.models.user import User
 
 __all__ = [
     "AuditLog",
+    "ClientAccount",
+    "ClientAccountMembership",
+    "ClientAccountStatus",
     "LowStockAlert",
+    "MembershipRole",
+    "MembershipStatus",
     "NotificationSetting",
     "OrgType",
     "SenderProfile",

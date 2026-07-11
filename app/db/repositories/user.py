@@ -6,7 +6,8 @@ import uuid
 
 from sqlalchemy import func, or_, select
 
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.client_account import ClientAccountMembership
+from app.db.models.enums import MembershipRole, UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories.base import BaseRepository
 
@@ -34,6 +35,8 @@ class UserRepository(BaseRepository):
         role: UserRole = UserRole.client,
         status: UserStatus = UserStatus.pending,
         permissions: dict | None = None,
+        create_account: bool = True,
+        account_name: str | None = None,
     ) -> User:
         user = User(
             telegram_id=telegram_id,
@@ -46,6 +49,12 @@ class UserRepository(BaseRepository):
             permissions=permissions or {},
         )
         await self._add(user)
+        if create_account and role is UserRole.client:
+            from app.db.repositories.client_account import ClientAccountRepository
+
+            await ClientAccountRepository(self.session).create_for_owner(
+                user, name=account_name, stock_sheet_key=user.stock_sheet_key
+            )
         return user
 
     async def update_status(self, user: User, status: UserStatus) -> User:
@@ -90,25 +99,46 @@ class UserRepository(BaseRepository):
         (регистронезависимо) по `full_name`/`phone`.
         """
         conditions = [User.role == role]
+        include = select(User)
+        count_from = select(func.count()).select_from(User)
+        if role is UserRole.client:
+            include = include.outerjoin(
+                ClientAccountMembership, ClientAccountMembership.user_id == User.id
+            )
+            count_from = count_from.outerjoin(
+                ClientAccountMembership, ClientAccountMembership.user_id == User.id
+            )
+            conditions.append(
+                or_(
+                    ClientAccountMembership.id.is_(None),
+                    ClientAccountMembership.role == MembershipRole.account_owner,
+                )
+            )
         if status is not None:
             conditions.append(User.status == status)
         if query:
             pattern = f"%{query.strip()}%"
             conditions.append(or_(User.full_name.ilike(pattern), User.phone.ilike(pattern)))
 
-        total = await self.session.scalar(select(func.count()).select_from(User).where(*conditions))
+        total = await self.session.scalar(count_from.where(*conditions))
         rows = await self.session.scalars(
-            select(User)
-            .where(*conditions)
-            .order_by(User.created_at.desc())
-            .limit(limit)
-            .offset(offset)
+            include.where(*conditions).order_by(User.created_at.desc()).limit(limit).offset(offset)
         )
         return list(rows), int(total or 0)
 
     async def count_by_status(self, *, role: UserRole = UserRole.client) -> dict[UserStatus, int]:
         """Счётчики по статусам для роли (вкладки/бейджи). Нулевые статусы — 0."""
-        stmt = select(User.status, func.count()).where(User.role == role).group_by(User.status)
+        stmt = select(User.status, func.count()).where(User.role == role)
+        if role is UserRole.client:
+            stmt = stmt.outerjoin(
+                ClientAccountMembership, ClientAccountMembership.user_id == User.id
+            ).where(
+                or_(
+                    ClientAccountMembership.id.is_(None),
+                    ClientAccountMembership.role == MembershipRole.account_owner,
+                )
+            )
+        stmt = stmt.group_by(User.status)
         rows = await self.session.execute(stmt)
         counts: dict[UserStatus, int] = dict.fromkeys(UserStatus, 0)
         for status, count in rows:

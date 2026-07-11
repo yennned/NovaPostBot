@@ -140,6 +140,27 @@ async def test_client_message_queues_when_no_manager(db_session: AsyncSession):
     assert msg.answers  # клиенту — подтверждение «збережено»
 
 
+async def test_blocked_client_cannot_continue_existing_chat(db_session: AsyncSession):
+    client = await _client(db_session)
+    client.status = UserStatus.blocked
+    thread = await SupportRepository(db_session).create_thread(
+        client_id=client.id, status=SupportThreadStatus.open
+    )
+    state = FakeState({"support_thread_id": str(thread.id)})
+    bot = FakeBot()
+
+    await client_chat_message(
+        FakeMessage("Спроба після блокування"),
+        _ctx(client, UserRole.client),
+        db_session,
+        state,
+        bot,
+    )
+
+    assert state.cleared is True
+    assert bot.sent == []
+
+
 async def test_staff_reply_relays_to_client_and_claims(db_session: AsyncSession):
     client = await _client(db_session)
     manager = await _manager(db_session)

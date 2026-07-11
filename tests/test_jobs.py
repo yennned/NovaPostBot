@@ -84,6 +84,7 @@ async def test_low_stock_job_uses_full_inventory_snapshot(monkeypatch):
         role=UserRole.client,
         status=UserStatus.active,
     )
+    account = SimpleNamespace(id="account-1")
     session = SimpleNamespace(committed=False)
 
     async def commit():
@@ -105,6 +106,14 @@ async def test_low_stock_job_uses_full_inventory_snapshot(monkeypatch):
         async def list_by_status(self, **kwargs):
             return [client], 1
 
+    class _AccountRepo:
+        def __init__(self, current_session):
+            assert current_session is session
+
+        async def get_context_for_user(self, user_id):
+            assert user_id == client.id
+            return account, None
+
     items = [
         InventoryItem(
             sku=f"SKU-{index}",
@@ -119,13 +128,20 @@ async def test_low_stock_job_uses_full_inventory_snapshot(monkeypatch):
     ]
     observed = {"snapshot": 0, "notify": 0}
 
-    async def fake_get_inventory_snapshot(current_session, *, client, reader=None):
+    async def fake_get_inventory_snapshot(
+        current_session, *, client, account_id=None, account=None, reader=None
+    ):
         assert current_session is session
+        assert client is not None
+        assert account_id == account.id == "account-1"
         observed["snapshot"] = len(items)
         return items
 
-    async def fake_collect_low_stock_alerts(current_session, *, client, threshold, items):
+    async def fake_collect_low_stock_alerts(
+        current_session, *, client, account_id=None, threshold, items
+    ):
         assert current_session is session
+        assert account_id == "account-1"
         return items
 
     async def fake_notify_low_stock(current_session, notifier, *, client, items):
@@ -134,6 +150,7 @@ async def test_low_stock_job_uses_full_inventory_snapshot(monkeypatch):
 
     monkeypatch.setattr(jobs, "get_sessionmaker", lambda: lambda: _SessionContext())
     monkeypatch.setattr(jobs, "UserRepository", _Repo)
+    monkeypatch.setattr(jobs, "ClientAccountRepository", _AccountRepo)
     monkeypatch.setattr(jobs, "get_inventory_snapshot", fake_get_inventory_snapshot)
     monkeypatch.setattr(jobs, "_collect_low_stock_alerts", fake_collect_low_stock_alerts)
     monkeypatch.setattr(jobs.notifications, "notify_low_stock", fake_notify_low_stock)

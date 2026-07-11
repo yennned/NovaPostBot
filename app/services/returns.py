@@ -95,7 +95,9 @@ async def receive_returned_shipment(
             )
         )
     await run_on_sheets_executor(
-        (mutator or build_stock_source()).apply_deltas, stock_sheet_key(shipment.client), deltas
+        (mutator or build_stock_source()).apply_deltas,
+        stock_sheet_key(shipment.account or shipment.client),
+        deltas,
     )
 
     movements = StockMovementRepository(session)
@@ -111,6 +113,7 @@ async def receive_returned_shipment(
             continue
         await movements.create(
             client_id=shipment.client_id,
+            account_id=shipment.account_id,
             shipment_id=shipment.id,
             actor_user_id=actor_user_id,
             sku=item.sku,
@@ -139,6 +142,7 @@ async def receive_returned_shipment(
     await best_effort_sync(
         session,
         client=shipment.client,
+        account=shipment.account,
         log_key="return_sheet_sync_failed",
         shipment_id=str(shipment.id),
     )
