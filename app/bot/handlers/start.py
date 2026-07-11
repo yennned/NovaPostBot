@@ -138,8 +138,10 @@ async def receive_contact(
     if result.user.status is UserStatus.active:
         from app.db.repositories import ClientAccountRepository
 
-        membership = await ClientAccountRepository(db_session).get_membership(
-            user_id=result.user.id
+        membership = (
+            await ClientAccountRepository(db_session).get_membership(user_id=result.user.id)
+            if db_session is not None
+            else None
         )
         owner = membership is not None and membership.role is MembershipRole.account_owner
         await message.answer(

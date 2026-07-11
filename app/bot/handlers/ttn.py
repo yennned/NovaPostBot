@@ -85,8 +85,13 @@ def _effective_client(context: EffectiveContext):
     return context.effective_user or context.actor_user
 
 
+def _account(context: EffectiveContext):
+    return getattr(context, "account", None)
+
+
 def _account_id(context: EffectiveContext):
-    return context.account.id if context.account is not None else None
+    account = _account(context)
+    return account.id if account is not None else None
 
 
 def _profile_uuid(data: dict) -> uuid.UUID | None:
@@ -510,7 +515,7 @@ async def cb_page(
             offset=offset,
             edit=True,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -556,7 +561,7 @@ async def cb_search_clear(
         offset=0,
         edit=True,
         account_id=_account_id(effective_context),
-        account=effective_context.account,
+        account=_account(effective_context),
     )
     await callback.answer("Кошик і фільтри очищено.")
 
@@ -599,7 +604,7 @@ async def cb_pick_category(
         offset=0,
         edit=True,
         account_id=_account_id(effective_context),
-        account=effective_context.account,
+        account=_account(effective_context),
     )
     await callback.answer()
 
@@ -627,7 +632,7 @@ async def receive_item_search(
         limit=TTN_PAGE_SIZE,
         offset=0,
         account_id=_account_id(effective_context),
-        account=effective_context.account,
+        account=_account(effective_context),
     )
     await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
     data = await state.get_data()
@@ -675,7 +680,7 @@ async def cb_pick(
         limit=TTN_PAGE_SIZE,
         offset=offset,
         account_id=_account_id(effective_context),
-        account=effective_context.account,
+        account=_account(effective_context),
     )
     if idx < 0 or idx >= len(page.items):
         await callback.answer(_STALE, show_alert=True)
@@ -840,7 +845,7 @@ async def cb_qty_ok(
             offset=data.get("cart_offset", 0),
             edit=True,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -916,7 +921,7 @@ async def cb_cart_edit(
         limit=TTN_PAGE_SIZE,
         offset=0,
         account_id=_account_id(effective_context),
-        account=effective_context.account,
+        account=_account(effective_context),
     )
     match = next((it for it in page.items if it.sku == sku), None)
     available = match.available if match else entry["qty"]
@@ -1225,7 +1230,7 @@ async def cb_back(
             offset=0,
             edit=True,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     elif step == "qty":
         if (await state.get_data()).get("pending") is None:
@@ -1944,7 +1949,7 @@ async def cb_submit(
                 np_client,
                 bot,
                 account_id=_account_id(effective_context),
-                account=effective_context.account,
+                account=_account(effective_context),
                 actor_user_id=client.id,
             )
         except ClientServiceError as exc:

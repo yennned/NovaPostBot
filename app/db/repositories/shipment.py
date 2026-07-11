@@ -116,7 +116,7 @@ class ShipmentRepository(BaseRepository):
         shipment = Shipment(
             client_id=client_id,
             account_id=account_id,
-            created_by_user_id=created_by_user_id,
+            created_by_user_id=created_by_user_id or client_id,
             sender_profile_id=sender_profile_id,
             ttn_number=ttn_number,
             np_ref=np_ref,

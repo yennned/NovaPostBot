@@ -98,12 +98,18 @@ def _effective_client(context: EffectiveContext):
     return context.effective_user or context.actor_user
 
 
+def _account(context: EffectiveContext):
+    return getattr(context, "account", None)
+
+
 def _account_id(context: EffectiveContext):
-    return context.account.id if context.account is not None else None
+    account = _account(context)
+    return account.id if account is not None else None
 
 
 def _account_owner(context: EffectiveContext) -> bool:
-    return context.membership is None or context.membership.role is MembershipRole.account_owner
+    membership = getattr(context, "membership", None)
+    return membership is None or membership.role is MembershipRole.account_owner
 
 
 async def _remember_if_possible(state: FSMContext, target: Message | TelegramObject) -> None:
@@ -151,11 +157,11 @@ async def _show_inventory(
         limit=PRODUCTS_PAGE_SIZE,
         offset=offset,
         account_id=_account_id(context),
-        account=context.account,
+        account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
     await target.answer(
-        products_text(page, sheet_url=stock_view_book_url(context.account or client)),
+        products_text(page, sheet_url=stock_view_book_url(_account(context) or client)),
         reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -171,7 +177,7 @@ async def _show_inventory(
         await best_effort_sync(
             session,
             client=client,
-            account=context.account,
+            account=_account(context),
             log_key="inventory_open_sheet_sync_failed",
         )
 
@@ -196,11 +202,11 @@ async def _edit_inventory(
         limit=PRODUCTS_PAGE_SIZE,
         offset=offset,
         account_id=_account_id(context),
-        account=context.account,
+        account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
     await message.edit_text(
-        products_text(page, sheet_url=stock_view_book_url(context.account or client)),
+        products_text(page, sheet_url=stock_view_book_url(_account(context) or client)),
         reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -328,13 +334,13 @@ async def _edit_inventory_screen(
         limit=PRODUCTS_PAGE_SIZE,
         offset=offset,
         account_id=_account_id(context),
-        account=context.account,
+        account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
     return await edit_stored_screen(
         bot,
         state,
-        text=products_text(page, sheet_url=stock_view_book_url(context.account or client)),
+        text=products_text(page, sheet_url=stock_view_book_url(_account(context) or client)),
         reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -902,7 +908,7 @@ async def open_stats(
             db_session,
             client=client,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await message.answer(str(exc))
@@ -934,7 +940,7 @@ async def open_stats_home(
             db_session,
             client=client,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -973,7 +979,7 @@ async def cb_stats(
             client=client,
             period=period,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1012,7 +1018,7 @@ async def cb_stats_day(
             client=client,
             day=day,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1063,7 +1069,7 @@ async def _apply_stats_range(
             date_from=date_from,
             date_to=date_to,
             account_id=_account_id(context),
-            account=context.account,
+            account=_account(context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1173,7 +1179,7 @@ async def cb_calendar_cancel(
             db_session,
             client=client,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1330,7 +1336,7 @@ async def receive_settings_profile(
             db_session,
             client=client,
             account_id=_account_id(effective_context),
-            account=effective_context.account,
+            account=_account(effective_context),
             **{field: value},
         )
     except PhoneAlreadyTaken:
