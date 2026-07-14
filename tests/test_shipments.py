@@ -7,7 +7,12 @@ from decimal import Decimal
 
 import pytest
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
-from app.db.repositories import ShipmentItemDraft, ShipmentRepository, UserRepository
+from app.db.repositories import (
+    ClientAccountRepository,
+    ShipmentItemDraft,
+    ShipmentRepository,
+    UserRepository,
+)
 from app.services import shipments
 from app.services.exceptions import ShipmentActionForbidden
 from app.sheets.inventory import StockRow
@@ -184,3 +189,29 @@ async def test_stats_snapshot_aggregates_by_status(db_session: AsyncSession, mon
     assert snapshot.net_sales_qty == 2
     assert snapshot.total_available == 13
     assert snapshot.top_skus[0].sku == "SKU-A"
+
+
+async def test_date_search_works_on_account_scope(db_session: AsyncSession):
+    # Регрессия: поиск отправлений был реализован ТРИЖДЫ, и account-ветка потеряла
+    # разбор даты. Акаунт есть у каждого клиента, значит хендлер всегда передаёт
+    # `account_id` → поиск по дате в «Мої відправлення» молча не находил ничего.
+    client = await _active_client(db_session, telegram_id=9100)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    assert membership is not None
+    await ShipmentRepository(db_session).create(
+        client_id=client.id,
+        account_id=membership.account_id,
+        recipient_name="Іван",
+        ttn_number="TTN-DATE",
+        items=[ShipmentItemDraft(sku="S1", name="Товар", quantity=1)],
+    )
+    today = datetime.now(UTC).strftime("%d.%m.%Y")
+
+    page = await shipments.list_shipments(
+        db_session, client=client, account_id=membership.account_id, query=today
+    )
+    assert page.total == 1
+
+    # Легаси-путь (клиент без акаунта) не должен пострадать.
+    legacy = await shipments.list_shipments(db_session, client=client, query=today)
+    assert legacy.total == 1
