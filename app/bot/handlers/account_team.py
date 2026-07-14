@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards import account_team as kb
 from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.states import AccountTeamState
+from app.bot.texts import account_team as texts
 from app.bot.types import EffectiveContext
 from app.db.models.enums import MembershipStatus
 from app.services import account_team
@@ -35,7 +36,7 @@ async def _render(
         await message.answer(str(exc))
         return
     await message.answer(
-        f"👥 <b>Команда</b> · {total}\nОберіть працівника або запросіть нового.",
+        texts.team_list_text(total),
         reply_markup=kb.build_team_kb(items, offset=offset, total=total, limit=8),
         parse_mode="HTML",
     )
@@ -89,8 +90,7 @@ async def view_member(
         await callback.answer(str(exc), show_alert=True)
         return
     await callback.message.edit_text(
-        f"👤 <b>{item.full_name or item.phone or item.user_id}</b>\n"
-        f"Телефон: {item.phone or '—'}\nСтан: {item.status.value}",
+        texts.member_card_text(item),
         reply_markup=kb.build_member_kb(item),
         parse_mode="HTML",
     )
@@ -147,7 +147,7 @@ async def _mutate(
         await callback.answer(str(exc), show_alert=True)
         return
     await callback.message.edit_text(
-        f"👤 <b>{item.full_name or item.phone or item.user_id}</b>\nСтан: {item.status.value}",
+        texts.member_card_text(item, with_phone=False),
         reply_markup=kb.build_member_kb(item),
         parse_mode="HTML",
     )

@@ -14,6 +14,7 @@ from uuid import uuid4
 from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
+from app.bot.types import EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import (
     ClientAccountRepository,
@@ -126,7 +127,15 @@ def _patch_inventory(monkeypatch, page: InventoryPage) -> None:
 
 
 def _ctx(client):
-    return SimpleNamespace(effective_user=client, actor_user=client)
+    # Настоящий EffectiveContext, а не SimpleNamespace: фейк не имел `account`/
+    # `account_context`, и хендлеры держались только на `getattr(..., None)`.
+    # Пользователь остаётся фейковым — здесь важна форма контекста, не User.
+    return EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+    )
 
 
 _CLIENT = SimpleNamespace(id="cid", telegram_id=900)

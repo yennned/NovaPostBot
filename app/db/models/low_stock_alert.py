@@ -23,8 +23,8 @@ class LowStockAlert(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     client_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    account_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=True
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=False
     )
     sku: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     is_low: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -24,6 +23,7 @@ from app.bot.handlers.client_cabinet import (
     receive_new_profile_sender_name,
 )
 from app.bot.states import SenderProfileCreateState
+from app.bot.types import EffectiveContext
 from app.config import Settings
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.repositories import SenderProfileRepository, UserRepository
@@ -38,6 +38,17 @@ from app.services.shipments import (
 )
 from app.services.stats import ClientStatsSnapshot, TopSkuStat
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _ctx(client) -> EffectiveContext:
+    """Настоящий EffectiveContext: у SimpleNamespace нет `account`/`account_context`,
+    и хендлеры держались только на `getattr(..., None)`. User остаётся фейковым."""
+    return EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+    )
 
 
 class FakeState:
@@ -160,7 +171,7 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
     await open_products(
         msg,
         FakeState(),
-        SimpleNamespace(actor_user=client, effective_user=client),
+        _ctx(client),
         db_session,
     )
 
@@ -195,7 +206,7 @@ async def test_open_shipments_renders_list(db_session: AsyncSession, monkeypatch
     await open_shipments(
         msg,
         FakeState(),
-        SimpleNamespace(actor_user=client, effective_user=client),
+        _ctx(client),
         db_session,
     )
 
@@ -243,7 +254,7 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_shipment_card", fake_get_shipment_card)
     await cb_shipment_card(
         cb,
-        SimpleNamespace(actor_user=client, effective_user=client),
+        _ctx(client),
         db_session,
         FakeState(),
     )
@@ -264,7 +275,7 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
     monkeypatch.setattr("app.bot.handlers.client_cabinet.cancel_shipment", fake_cancel_shipment)
     await cb_cancel_shipment(
         cb,
-        SimpleNamespace(actor_user=client, effective_user=client),
+        _ctx(client),
         db_session,
         object(),  # np_client (фейк — реальная отмена замокана)
         FakeState(),
@@ -290,7 +301,7 @@ async def test_open_settings_renders_view(db_session: AsyncSession, monkeypatch)
     await open_settings(
         msg,
         FakeState(),
-        SimpleNamespace(actor_user=client, effective_user=client),
+        _ctx(client),
         db_session,
     )
 
@@ -312,7 +323,7 @@ async def test_cb_settings_toggle_updates_view(db_session: AsyncSession, monkeyp
     )
     await cb_settings_toggle(
         cb,
-        SimpleNamespace(actor_user=client, effective_user=client),
+        _ctx(client),
         db_session,
         FakeState(),
     )
@@ -341,9 +352,7 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
         )
 
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_client_stats", fake_get_client_stats)
-    await cb_stats(
-        cb, SimpleNamespace(actor_user=client, effective_user=client), db_session, FakeState()
-    )
+    await cb_stats(cb, _ctx(client), db_session, FakeState())
 
     assert cb.message.edits
     assert "Статистика" in cb.message.edits[0]["text"]
@@ -373,7 +382,7 @@ _VALID_KEY_ROUTES = {
 
 async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=710)
-    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    ctx = _ctx(client)
     state = FakeState()
 
     await receive_new_profile_name(FakeMessage("ФОП Тест"), state)
@@ -398,7 +407,7 @@ async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession
 
 async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=711)
-    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    ctx = _ctx(client)
     state = FakeState()
     await receive_new_profile_name(FakeMessage("ФОП Х"), state)
     await receive_new_profile_key(FakeMessage("bad-key"), state)
@@ -423,7 +432,7 @@ async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
 async def test_add_fop_wizard_np_unavailable_keeps_phone_step(db_session: AsyncSession):
     """НП недоступна (5xx) при проверке ключа → черновик цел, шаг телефона держим."""
     client = await _active_client(db_session, telegram_id=712)
-    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    ctx = _ctx(client)
     state = FakeState()
     await receive_new_profile_name(FakeMessage("ФОП Down"), state)
     await receive_new_profile_key(FakeMessage("np-secret-key"), state)
@@ -445,7 +454,7 @@ async def test_calendar_range_flow_passes_date_from_to(db_session: AsyncSession,
     from datetime import date
 
     client = await _active_client(db_session, telegram_id=730)
-    ctx = SimpleNamespace(actor_user=client, effective_user=client)
+    ctx = _ctx(client)
     state = FakeState()
     captured: dict = {}
 

@@ -109,8 +109,7 @@ class EffectiveContextMiddleware(BaseMiddleware):
             )
             if account_scope is not None:
                 account, membership = account_scope
-                context.account = account
-                context.membership = membership
+                # Одно присваивание: `context.account`/`.membership` выводятся из него.
                 context.account_context = ClientAccountContext(
                     user=context.effective_user,
                     account=account,

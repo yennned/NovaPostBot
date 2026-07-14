@@ -8,11 +8,17 @@ from app.bot.types import ClientAccountContext
 from app.db.models.audit import AuditLog
 from app.db.models.enums import (
     ClientAccountStatus,
+    MembershipRole,
     SupportThreadStatus,
     UserRole,
     UserStatus,
 )
-from app.db.repositories import ClientAccountRepository, SupportRepository, UserRepository
+from app.db.repositories import (
+    ClientAccountRepository,
+    SenderProfileRepository,
+    SupportRepository,
+    UserRepository,
+)
 from app.services import account_team, staff
 from app.services.exceptions import (
     InvalidPermissionFlag,
@@ -237,3 +243,27 @@ async def test_add_manager_rejects_client_employee(db_session: AsyncSession):
     employee = await UserRepository(db_session).get_by_id(invited.user_id)
     assert employee.role is UserRole.client
     assert membership.account.status is ClientAccountStatus.active
+
+
+async def test_delete_manager_gives_demoted_client_an_account(db_session: AsyncSession):
+    # Регрессия: `users.create` заводит акаунт только роли `client`, поэтому у
+    # менеджера его нет. Снятие роли делало его клиентом БЕЗ акаунта, а `account_id`
+    # во всех клиентских таблицах NOT NULL → первая же запись (ФОП/ТТН/склад) падала
+    # NotNullViolation. Путь достижим: найм по Telegram-ID → снятие роли → разблокировка.
+    owner = await _owner(db_session)
+    manager = await _manager(db_session, telegram_id=777)
+    accounts = ClientAccountRepository(db_session)
+    assert await accounts.get_membership(user_id=manager.id) is None
+
+    await staff.delete_manager(db_session, actor=owner, manager_id=manager.id)
+
+    assert manager.role is UserRole.client
+    membership = await accounts.get_membership(user_id=manager.id)
+    assert membership is not None, "клиент без аккаунта — сломанное состояние"
+    assert membership.role is MembershipRole.account_owner
+
+    # И запись клиентских данных теперь проходит, а не падает NotNullViolation.
+    await SenderProfileRepository(db_session).create(
+        client_id=manager.id, name="ФОП", np_api_key="k", is_default=True
+    )
+    await db_session.flush()

@@ -101,7 +101,7 @@ def _effective_client(context: EffectiveContext):
 
 
 def _account(context: EffectiveContext):
-    return getattr(context, "account", None)
+    return context.account
 
 
 def _account_id(context: EffectiveContext):
@@ -110,7 +110,7 @@ def _account_id(context: EffectiveContext):
 
 
 def _account_owner(context: EffectiveContext) -> bool:
-    membership = getattr(context, "membership", None)
+    membership = context.membership
     return membership is None or membership.role is MembershipRole.account_owner
 
 
