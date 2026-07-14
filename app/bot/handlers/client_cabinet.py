@@ -56,6 +56,7 @@ from app.bot.texts.client_cabinet import (
     stats_calendar_text,
     stats_text,
 )
+from app.bot.texts.common import invalid_phone_text
 from app.bot.types import EffectiveContext
 from app.config import get_settings
 from app.db.models.enums import MembershipRole, OrgType
@@ -1321,9 +1322,7 @@ async def receive_settings_profile(
         normalized = normalize_phone(value or "")
         if normalized is None:
             # Лишаємось у стані очікування — користувач введе номер ще раз.
-            await message.answer(
-                "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
-            )
+            await message.answer(invalid_phone_text())
             return
         value = normalized
     client = _effective_client(effective_context)

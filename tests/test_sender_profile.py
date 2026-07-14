@@ -181,6 +181,71 @@ async def test_update_clearing_phone_rejected(db_session: AsyncSession):
         await sp.update_profile(db_session, actor=client, profile_id=created.id, sender_phone="  ")
 
 
+async def test_create_normalizes_phone_to_np_format(db_session: AsyncSession):
+    # В НП уходит `SendersPhone` — храним уже нормализованным (380XXXXXXXXX),
+    # иначе НП отвечает своим «Вкажіть коректний номер телефону» вместо бота.
+    client = await _user(db_session, 115)
+    view = await sp.create_profile(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone="+38 (050) 111-22-33",
+    )
+    assert view.sender_phone == "380501112233"
+
+
+async def test_create_with_garbage_phone_rejected(db_session: AsyncSession):
+    client = await _user(db_session, 116)
+    with pytest.raises(SenderProfileIncomplete):
+        await sp.create_profile(
+            db_session,
+            actor=client,
+            client_id=client.id,
+            name="ФОП",
+            np_api_key="k",
+            sender_phone="Тест ФОП",
+        )
+    assert await sp.list_profiles(db_session, actor=client, client_id=client.id) == []
+
+
+async def test_update_with_garbage_phone_rejected(db_session: AsyncSession):
+    # Регрессия: путь редактирования раньше делал только .strip() и пропускал
+    # произвольный текст прямо в `SendersPhone` (ср. tests/test_phone.py).
+    client = await _user(db_session, 117)
+    created = await sp.create_profile(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
+    )
+    with pytest.raises(SenderProfileIncomplete):
+        await sp.update_profile(
+            db_session, actor=client, profile_id=created.id, sender_phone="Тест ФОП"
+        )
+    fresh = await sp.get_profile(db_session, actor=client, profile_id=created.id)
+    assert fresh.sender_phone == "380501112233"
+
+
+async def test_update_normalizes_phone(db_session: AsyncSession):
+    client = await _user(db_session, 118)
+    created = await sp.create_profile(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        sender_phone=_PHONE,
+    )
+    updated = await sp.update_profile(
+        db_session, actor=client, profile_id=created.id, sender_phone="0671234567"
+    )
+    assert updated.sender_phone == "380671234567"
+
+
 async def test_update_masks_api_key_in_audit(db_session: AsyncSession):
     from app.db.models.audit import AuditLog
     from sqlalchemy import select

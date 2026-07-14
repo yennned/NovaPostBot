@@ -41,6 +41,23 @@ from app.services.exceptions import (
     SenderProfileKeyInvalid,
     SenderProfileNotFound,
 )
+from app.utils.phone import normalize_phone
+
+
+def _validated_sender_phone(raw: str | None) -> str:
+    """Привести `sender_phone` к формату НП (`380XXXXXXXXX`) или отбить.
+
+    Гейт живёт в сервисе, а не только в хендлере: телефон уходит в НП как
+    `SendersPhone`, и НП отвечает на мусор своим текстом («Вкажіть коректний номер
+    телефону»), который клиент видит вместо понятной ошибки бота. Сервис — общая
+    точка для хендлеров, скриптов и сидов.
+    """
+    phone = normalize_phone(raw or "")
+    if phone is None:
+        raise SenderProfileIncomplete(
+            "невірний номер телефону відправника — очікується 0XXXXXXXXX або +380XXXXXXXXX"
+        )
+    return phone
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,9 +222,9 @@ async def create_profile(
     # Телефон отправителя обязателен: он уходит в НП как `SendersPhone` при создании
     # ТТН. Требуем его уже на сохранении, чтобы не возникало состояние «ключ валиден,
     # но телефона нет» (тогда `create_shipment` отбил бы ТТН гейтом отправителя).
-    sender_phone = (sender_phone or "").strip()
-    if not sender_phone:
+    if not (sender_phone or "").strip():
         raise SenderProfileIncomplete("телефон відправника обовʼязковий")
+    sender_phone = _validated_sender_phone(sender_phone)
     # Валидируем ключ ДО записи: плохой ключ → исключение, профиль не создаётся.
     refs = await _resolve_sender_refs(np_client, np_api_key, settings) if np_client else {}
     repo = SenderProfileRepository(session)
@@ -280,7 +297,7 @@ async def update_profile(
         phone = changes["sender_phone"]
         if phone is None or not str(phone).strip():
             raise SenderProfileIncomplete("телефон відправника не можна очистити")
-        changes["sender_phone"] = str(phone).strip()
+        changes["sender_phone"] = _validated_sender_phone(str(phone))
     if changes:
         await repo.update(profile, **changes)
         await AuditRepository(session).log(

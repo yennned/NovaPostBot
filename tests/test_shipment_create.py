@@ -265,6 +265,25 @@ async def test_create_shipment_incomplete_profile_no_contact_raises(db_session: 
     assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
 
 
+async def test_create_shipment_garbage_sender_phone_raises(db_session: AsyncSession):
+    # Легаси-профиль с мусором в телефоне (старый путь правки писал его без валидации).
+    # Гейт обязан отбить ДО НП: иначе НП ответит своим «Вкажіть коректний номер
+    # телефону», и клиент увидит его вместо понятной ошибки бота.
+    client = await _active_client(db_session, telegram_id=512)
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        np_sender_ref="sender-cp",
+        np_contact_ref="sender-ct",
+        sender_phone="Тест ФОП",
+        is_default=True,
+    )
+    with pytest.raises(SenderProfileIncomplete):
+        await _create(db_session, client, _exploding_np_client())  # НП не должна вызываться
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
+
+
 async def test_create_shipment_sender_dispatch_unconfigured_raises(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=511)
     await _validated_profile(db_session, client)  # профиль полный

@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+import structlog
+
 from app.bot.types import DevSession, EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, UserRepository
 from app.utils.phone import normalize_phone
+
+logger = structlog.get_logger(__name__)
 
 
 class UserStore(Protocol):
@@ -100,7 +104,17 @@ class StartService:
     async def register_contact(self, telegram_id: int, phone: str, full_name: str) -> StartResult:
         # Храним телефон в формате НП (380XXXXXXXXX): так найм менеджера по телефону
         # («Персонал») сверяет нормализованный ввод с колонкой точным равенством.
-        phone = normalize_phone(phone) or phone
+        normalized = normalize_phone(phone)
+        if normalized is None:
+            # Не украинский мобильный (напр. иностранная SIM). Вход не блокируем —
+            # контакт пришёл от Telegram, он настоящий; но точное сравнение при
+            # адопции по телефону такому номеру не сработает, поэтому логируем.
+            logger.warning(
+                "contact_phone_not_normalized",
+                telegram_id=telegram_id,
+                phone_len=len(phone or ""),
+            )
+        phone = normalized or phone
         existing = await self.user_store.get_by_telegram_id(telegram_id)
         if existing is not None:
             if existing.phone != phone:

@@ -6,6 +6,7 @@ import html
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from app.bot.texts.common import invalid_phone_text
 from app.db.models.enums import ShipmentStatus
 from app.services.client_settings import ClientSettingsView
 from app.services.inventory import InventoryItem, InventoryPage
@@ -254,7 +255,7 @@ def new_profile_key_invalid_text() -> str:
 
 
 def new_profile_invalid_phone_text() -> str:
-    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+    return invalid_phone_text()
 
 
 def new_profile_np_unavailable_text() -> str:
