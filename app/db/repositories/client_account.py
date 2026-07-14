@@ -67,6 +67,10 @@ class ClientAccountRepository(BaseRepository):
             # while the migration is rolled out.
             id=account_id or owner.id,
             name=name or owner.full_name or owner.phone or f"Клієнт {owner.id}",
+            # `active` даже для ещё `pending` владельца — в отличие от карты в
+            # `clients._transition`, где pending гасит акаунт. Расхождение
+            # осознанное: у новорождённого акаунта нет команды, а сам владелец
+            # заперт `require_account_member` по `user.status`.
             status=ClientAccountStatus.active,
             stock_sheet_key=stock_sheet_key or owner.stock_sheet_key,
             stock_view_book_id=stock_view_book_id or owner.stock_view_book_id,
