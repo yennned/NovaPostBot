@@ -86,7 +86,7 @@ def _effective_client(context: EffectiveContext):
 
 
 def _account(context: EffectiveContext):
-    return getattr(context, "account", None)
+    return context.account
 
 
 def _account_id(context: EffectiveContext):

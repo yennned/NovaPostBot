@@ -22,9 +22,19 @@ class EffectiveContext:
     effective_role: UserRole | None
     is_dev: bool
     dev_session: DevSession | None = None
-    account: ClientAccount | None = None
-    membership: ClientAccountMembership | None = None
     account_context: ClientAccountContext | None = None
+
+    # `account`/`membership` ВЫВОДЯТСЯ, а не хранятся: три поля об одном факте
+    # расходились молча (мидлварь писала все три подряд), а рассинхрон пары
+    # `(account_id, account)` уже стоил бага — работник видел свой склад вместо
+    # складского. Один источник правды — `account_context`.
+    @property
+    def account(self) -> ClientAccount | None:
+        return self.account_context.account if self.account_context else None
+
+    @property
+    def membership(self) -> ClientAccountMembership | None:
+        return self.account_context.membership if self.account_context else None
 
 
 @dataclass(frozen=True, slots=True)

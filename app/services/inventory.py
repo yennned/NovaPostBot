@@ -150,27 +150,6 @@ async def list_inventory(
     )
 
 
-async def list_inventory_all(
-    session: AsyncSession,
-    *,
-    client: User,
-    query: str | None = None,
-    category: str | None = None,
-    reader: StockSource | None = None,
-) -> list[InventoryItem]:
-    """Полный отфильтрованный список без UI-пагинации (jobs/reporting/internal use)."""
-    page = await list_inventory(
-        session,
-        client=client,
-        query=query,
-        category=category,
-        limit=10**9,
-        offset=0,
-        reader=reader,
-    )
-    return page.items
-
-
 @dataclass(frozen=True, slots=True)
 class StockTotals:
     """Краткая сводка по листу склада клиента: позиции и единицы."""

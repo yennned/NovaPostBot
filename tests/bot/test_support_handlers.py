@@ -32,7 +32,7 @@ from app.bot.handlers.support import (
 from app.bot.handlers.support import router as support_router
 from app.bot.keyboards.menus import CLIENT_TEAM_BUTTON
 from app.bot.states import SupportState
-from app.bot.types import EffectiveContext
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.db.models.client_account import ClientAccount, ClientAccountMembership
 from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
 from app.db.models.support import SupportMessage, SupportThread
@@ -508,8 +508,10 @@ async def test_exit_chat_keeps_team_button_for_account_owner(db_session: AsyncSe
         effective_user=client,
         effective_role=UserRole.client,
         is_dev=False,
-        account=account,
-        membership=membership,
+        # `account`/`membership` выводятся из `account_context` — ровно как в middleware.
+        account_context=ClientAccountContext(
+            user=client, account=account, membership=membership, actor_user=client
+        ),
     )
     msg = FakeMessage("⬅️ Завершити чат")
 

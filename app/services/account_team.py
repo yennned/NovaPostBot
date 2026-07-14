@@ -49,10 +49,6 @@ def _view(membership: ClientAccountMembership) -> AccountMemberView:
     )
 
 
-def _owner_context(context: ClientAccountContext) -> None:
-    require_account_owner(context)
-
-
 async def list_team(
     session: AsyncSession,
     *,
@@ -61,7 +57,7 @@ async def list_team(
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[AccountMemberView], int]:
-    _owner_context(context)
+    require_account_owner(context)
     rows, total = await ClientAccountRepository(session).list_members(
         context.account.id, query=query, limit=limit, offset=offset
     )
@@ -71,7 +67,7 @@ async def list_team(
 async def get_member(
     session: AsyncSession, *, context: ClientAccountContext, user_id: uuid.UUID
 ) -> AccountMemberView:
-    _owner_context(context)
+    require_account_owner(context)
     membership = await ClientAccountRepository(session).get_membership(
         user_id=user_id, account_id=context.account.id
     )
@@ -86,7 +82,7 @@ async def invite_employee(
     context: ClientAccountContext,
     phone: str,
 ) -> AccountMemberView:
-    _owner_context(context)
+    require_account_owner(context)
     normalized = normalize_phone(phone)
     if normalized is None:
         raise AccountMembershipConflict("вкажіть коректний номер телефону")
@@ -157,7 +153,7 @@ async def set_employee_status(
     user_id: uuid.UUID,
     status: MembershipStatus,
 ) -> AccountMemberView:
-    _owner_context(context)
+    require_account_owner(context)
     accounts = ClientAccountRepository(session)
     membership = await accounts.get_membership(user_id=user_id, account_id=context.account.id)
     if membership is None:
