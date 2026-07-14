@@ -249,7 +249,7 @@ async def test_delete_manager_gives_demoted_client_an_account(db_session: AsyncS
     # Регрессия: `users.create` заводит акаунт только роли `client`, поэтому у
     # менеджера его нет. Снятие роли делало его клиентом БЕЗ акаунта, а `account_id`
     # во всех клиентских таблицах NOT NULL → первая же запись (ФОП/ТТН/склад) падала
-    # NotNullViolation. Путь достижим: найм по Telegram-ID → зняття ролі → розблокування.
+    # NotNullViolation. Путь достижим: найм по Telegram-ID → снятие роли → разблокировка.
     owner = await _owner(db_session)
     manager = await _manager(db_session, telegram_id=777)
     accounts = ClientAccountRepository(db_session)
@@ -259,7 +259,7 @@ async def test_delete_manager_gives_demoted_client_an_account(db_session: AsyncS
 
     assert manager.role is UserRole.client
     membership = await accounts.get_membership(user_id=manager.id)
-    assert membership is not None, "клиент без акаунта — сломанное состояние"
+    assert membership is not None, "клиент без аккаунта — сломанное состояние"
     assert membership.role is MembershipRole.account_owner
 
     # И запись клиентских данных теперь проходит, а не падает NotNullViolation.

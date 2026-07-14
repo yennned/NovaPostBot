@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
@@ -346,14 +347,22 @@ async def delete_manager(
         await users.update_status(manager, UserStatus.blocked)
     await users.update_role(manager, UserRole.client)
     await users.set_permissions(manager, {})
-    # Клиент без акаунта — сломанное состояние: `account_id` во всех клиентских
+    # Клиент без аккаунта — сломанное состояние: `account_id` во всех клиентских
     # таблицах NOT NULL, а `resolve_account_scope` без членства вернёт None → любая
     # запись (ФОП, ТТН, склад) падает NotNullViolation. `users.create` заводит акаунт
     # только для роли `client`, поэтому у менеджера его нет, и смена роли обязана
-    # его создать. Достижимо через UI: найм по Telegram-ID → зняття ролі → розблокування.
+    # его создать. Достижимо через UI: найм по Telegram-ID → снятие роли → разблокировка.
     accounts = ClientAccountRepository(session)
     if await accounts.get_membership(user_id=manager.id) is None:
-        await accounts.create_for_owner(manager)
+        # Savepoint: между проверкой и вставкой есть гонка (двойной клик «Зняти роль»
+        # — два параллельных вызова, оба не видят членства). Акаунт создаётся с
+        # `id=manager.id`, поэтому второй падает на уникальности. Проигравший просто
+        # пропускает вставку: победитель уже создал ровно то, что нужно.
+        try:
+            async with session.begin_nested():
+                await accounts.create_for_owner(manager)
+        except IntegrityError:
+            pass
     await AuditRepository(session).log(
         "manager_deleted",
         user_id=actor.id,
