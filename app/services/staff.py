@@ -15,9 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import MembershipRole, UserRole, UserStatus
 from app.db.models.user import User
-from app.db.repositories import AuditRepository, SupportRepository, UserRepository
+from app.db.repositories import (
+    AuditRepository,
+    ClientAccountRepository,
+    SupportRepository,
+    UserRepository,
+)
 from app.services.exceptions import (
     AlreadyInStatus,
     InvalidPermissionFlag,
@@ -178,7 +183,9 @@ async def add_manager(
     """Назначить менеджера по Telegram-ID или телефону.
 
     Существующего владельца/уже-менеджера отклоняем; активного клиента нельзя
-    «переназначить» в менеджеры. Если по телефону пользователь ещё не найден —
+    «переназначить» в менеджеры; работника клиентского акаунта — тоже нельзя
+    (менеджер платформы и люди со стороны клиента не пересекаются). Если по
+    телефону пользователь ещё не найден —
     заводим предзаготовленную запись менеджера (`telegram_id` пуст): при первом
     входе по контакту `register_contact` подхватит её по номеру. Все флаги прав
     включены по умолчанию.
@@ -200,6 +207,15 @@ async def add_manager(
             raise StaffPromotionForbidden("не можна змінити роль власника")
         if existing.status is UserStatus.active:
             raise StaffPromotionForbidden("активного клієнта не можна призначити менеджером")
+        # Зеркало запрета в `account_team.invite_employee` («номер належить
+        # внутрішньому працівнику платформи»): клиент/его работники и менеджер
+        # платформы — непересекающиеся множества. Приглашённый работник заведён
+        # как `role=client, status=pending`, то есть мимо проверок выше проходит.
+        # Владельца акаунта (`account_owner`) НЕ отбиваем: членство автосоздаётся
+        # каждому клиенту, а найм `pending`-клиента и есть основной флоу найма.
+        membership = await ClientAccountRepository(session).get_membership(user_id=existing.id)
+        if membership is not None and membership.role is MembershipRole.employee:
+            raise StaffPromotionForbidden("номер належить працівнику клієнта")
         await users.update_role(existing, UserRole.manager)
         await users.update_status(existing, UserStatus.active)
         await users.set_permissions(existing, {})
