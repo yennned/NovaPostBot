@@ -25,11 +25,31 @@ _CLIENT_MENU_ROWS = [
     ["💬 Звернення до менеджера", "⚙️ Налаштування"],
 ]
 
-# Тексты кнопок нижней панели клиента — чтобы хендлеры, ловящие произвольный
-# текст (релей поддержки), их не глотали. Источник один: добавили кнопку в строки
-# выше — она автоматически здесь.
+_MANAGER_MENU_ROWS = [
+    ["🟢 Я на зв'язку", "📬 Відправлення"],
+    ["📦 Склад", "👥 Клієнти"],
+    ["💬 Підтримка", "📊 Звіти"],
+]
+
+_OWNER_MENU_ROWS = [
+    ["📬 Відправлення", "📦 Склад"],
+    ["👥 Клієнти", "👔 Персонал"],
+    ["📈 Аналітика"],
+]
+
 CLIENT_MENU_TEXTS = frozenset(
     [*(text for row in _CLIENT_MENU_ROWS for text in row), CLIENT_TEAM_BUTTON]
+)
+
+# Тексты ВСЕХ кнопок нижних панелей. Нужны хендлерам, которые ловят произвольный
+# текст в своём FSM-состоянии (поиск, ввод телефона/даты, релей поддержки): без
+# явного `~F.text.in_(MENU_TEXTS)` такой хендлер съедает тап кнопки меню как
+# «ввод», и кнопка выглядит сломанной. Источник один: добавили кнопку в строки
+# выше — она автоматически здесь. См. `app/bot/handlers/menu_escape.py`.
+MENU_TEXTS = frozenset(
+    CLIENT_MENU_TEXTS
+    | {text for row in _MANAGER_MENU_ROWS for text in row}
+    | {text for row in _OWNER_MENU_ROWS for text in row}
 )
 
 
@@ -46,17 +66,9 @@ def build_role_menu(role: UserRole, *, account_owner: bool) -> ReplyKeyboardMark
         if account_owner:
             rows.append([CLIENT_TEAM_BUTTON])
     elif role is UserRole.manager:
-        rows = [
-            ["🟢 Я на зв'язку", "📬 Відправлення"],
-            ["📦 Склад", "👥 Клієнти"],
-            ["💬 Підтримка", "📊 Звіти"],
-        ]
+        rows = _MANAGER_MENU_ROWS
     else:
-        rows = [
-            ["📬 Відправлення", "📦 Склад"],
-            ["👥 Клієнти", "👔 Персонал"],
-            ["📈 Аналітика"],
-        ]
+        rows = _OWNER_MENU_ROWS
 
     keyboard = [[KeyboardButton(text=text) for text in row] for row in rows]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)

@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards import account_team as kb
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.states import AccountTeamState
 from app.bot.types import EffectiveContext
 from app.db.models.enums import MembershipStatus
@@ -96,7 +97,12 @@ async def view_member(
     await callback.answer()
 
 
-@router.message(AccountTeamState.waiting_for_phone, F.text, ~F.text.startswith("/"))
+@router.message(
+    AccountTeamState.waiting_for_phone,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def invite_submit(
     message: Message,
     state: FSMContext,

@@ -8,6 +8,7 @@ from app.bot.handlers.dev import router as dev_router
 from app.bot.handlers.duty import router as duty_router
 from app.bot.handlers.errors import router as errors_router
 from app.bot.handlers.manager_shipments import router as manager_shipments_router
+from app.bot.handlers.menu_escape import router as menu_escape_router
 from app.bot.handlers.reports import router as reports_router
 from app.bot.handlers.staff import router as staff_router
 from app.bot.handlers.start import router as start_router
@@ -23,6 +24,7 @@ __all__ = [
     "duty_router",
     "errors_router",
     "manager_shipments_router",
+    "menu_escape_router",
     "reports_router",
     "staff_router",
     "start_router",
