@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.texts import account_team as texts
 from app.db.models.enums import MembershipStatus
 from app.services.account_team import AccountMemberView
 
@@ -13,14 +14,8 @@ def build_team_kb(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in items:
-        label = item.full_name or item.phone or str(item.user_id)
-        state = (
-            "очікує"
-            if item.status is MembershipStatus.invited
-            else "активний"
-            if item.status is MembershipStatus.active
-            else "заблокований"
-        )
+        label = texts.member_label(item)
+        state = texts.status_label(item.status)
         rows.append(
             [
                 InlineKeyboardButton(
