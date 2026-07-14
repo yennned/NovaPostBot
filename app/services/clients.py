@@ -123,9 +123,17 @@ async def _transition(
     await users.update_status(user, to)
     membership = await ClientAccountRepository(session).get_membership(user_id=user.id)
     if membership is not None:
+        # Доступ работников режет именно `account.status`: их членства здесь не
+        # трогаются (`get_membership` возвращает членство ВЛАДЕЛЬЦА), а
+        # `get_context_for_user` смотрит на статус акаунта.
         account_status = {
             UserStatus.blocked: ClientAccountStatus.blocked,
             UserStatus.archived: ClientAccountStatus.archived,
+            # `pending` — тоже НЕ active: `restore_client` возвращает archived→pending
+            # именно чтобы не снять блок молча, а активный акаунт вернул бы доступ
+            # всей команде раньше, чем менеджер повторно подтвердит владельца.
+            # Обратно в active акаунт вернёт `approve_client`.
+            UserStatus.pending: ClientAccountStatus.blocked,
         }.get(to, ClientAccountStatus.active)
         membership.account.status = account_status
         membership_status = (

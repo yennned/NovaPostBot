@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from app.bot.types import ClientAccountContext
 from app.db.models.audit import AuditLog
-from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
-from app.services import client_sheet_sync, clients
+from app.db.models.enums import ClientAccountStatus, UserRole, UserStatus
+from app.db.repositories import ClientAccountRepository, UserRepository
+from app.services import account_team, client_sheet_sync, clients
 from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
@@ -86,6 +87,44 @@ async def test_block_then_unblock(db_session: AsyncSession):
 
     restored = await clients.unblock_client(db_session, actor=actor, client_id=client.id)
     assert restored.status is UserStatus.active
+
+
+async def _account_context(session: AsyncSession, user):
+    membership = await ClientAccountRepository(session).get_membership(user_id=user.id)
+    assert membership is not None and membership.account is not None
+    return ClientAccountContext(user=user, account=membership.account, membership=membership)
+
+
+async def test_restore_client_keeps_employees_cut_off(db_session: AsyncSession):
+    # Регрессия: `restore_client` возвращает archived→pending именно чтобы не снять
+    # блок молча, но карта в `_transition` не знала про `pending` и ставила акаунт
+    # `active` — вся команда получала доступ к складу/ФОП/ТТН раньше, чем менеджер
+    # повторно подтвердит владельца (а сам владелец при этом войти не мог).
+    actor = await _manager(db_session)
+    owner = await _client(db_session, telegram_id=150, status=UserStatus.active)
+    invited = await account_team.invite_employee(
+        db_session, context=await _account_context(db_session, owner), phone="0507000055"
+    )
+    employee = await UserRepository(db_session).get_by_id(invited.user_id)
+    await account_team.activate_employee_contact(
+        db_session, user=employee, telegram_id=151, full_name="Працівник"
+    )
+    accounts = ClientAccountRepository(db_session)
+    assert await accounts.get_context_for_user(employee.id) is not None
+
+    await clients.archive_client(db_session, actor=actor, client_id=owner.id)
+    assert await accounts.get_context_for_user(employee.id) is None
+
+    restored = await clients.restore_client(db_session, actor=actor, client_id=owner.id)
+    assert restored.status is UserStatus.pending
+    account = await accounts.get_by_id(owner.id)
+    assert account is not None and account.status is ClientAccountStatus.blocked
+    assert await accounts.get_context_for_user(employee.id) is None
+
+    # Подтверждение владельца — и только оно — возвращает команду в строй.
+    await clients.approve_client(db_session, actor=actor, client_id=owner.id)
+    assert account.status is ClientAccountStatus.active
+    assert await accounts.get_context_for_user(employee.id) is not None
 
 
 async def test_archive_then_restore(db_session: AsyncSession):

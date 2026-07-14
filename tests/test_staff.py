@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import pytest
 from app.bot import permissions as perm
+from app.bot.types import ClientAccountContext
 from app.db.models.audit import AuditLog
-from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
-from app.db.repositories import SupportRepository, UserRepository
-from app.services import staff
+from app.db.models.enums import (
+    ClientAccountStatus,
+    SupportThreadStatus,
+    UserRole,
+    UserStatus,
+)
+from app.db.repositories import ClientAccountRepository, SupportRepository, UserRepository
+from app.services import account_team, staff
 from app.services.exceptions import (
     InvalidPermissionFlag,
     PermissionDenied,
@@ -200,3 +206,34 @@ async def test_delete_manager_blocks_demotes_and_clears_threads(db_session: Asyn
     assert refreshed.status is SupportThreadStatus.waiting
     assert refreshed.assigned_manager_id is None
     assert "manager_deleted" in await _audit_actions(db_session)
+
+
+async def test_add_manager_rejects_client_employee(db_session: AsyncSession):
+    # Инвариант владельца: клиент/его работники и менеджер платформы —
+    # непересекающиеся множества. Обратное направление уже закрыто в
+    # `account_team.invite_employee`, а найм работника проходил: приглашённый
+    # заведён как `role=client, status=pending`, то есть не «активный клиент».
+    actor = await _owner(db_session)
+    shop = await UserRepository(db_session).create(
+        telegram_id=700,
+        phone="380507000700",
+        full_name="Магазин",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+    accounts = ClientAccountRepository(db_session)
+    membership = await accounts.get_membership(user_id=shop.id)
+    assert membership is not None
+    invited = await account_team.invite_employee(
+        db_session,
+        context=ClientAccountContext(user=shop, account=membership.account, membership=membership),
+        phone="0507000701",
+    )
+
+    with pytest.raises(StaffPromotionForbidden):
+        await staff.add_manager(db_session, actor=actor, phone="380507000701")
+
+    # Работник остался работником, акаунт работодателя не тронут.
+    employee = await UserRepository(db_session).get_by_id(invited.user_id)
+    assert employee.role is UserRole.client
+    assert membership.account.status is ClientAccountStatus.active
