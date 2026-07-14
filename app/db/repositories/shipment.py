@@ -167,15 +167,7 @@ class ShipmentRepository(BaseRepository):
         if statuses:
             conditions.append(Shipment.status.in_(tuple(statuses)))
         if query:
-            stripped = query.strip()
-            text_filters = []
-            pattern = f"%{stripped}%"
-            text_filters.append(Shipment.ttn_number.ilike(pattern))
-            text_filters.append(Shipment.recipient_name.ilike(pattern))
-            parsed_date = _parse_query_date(stripped)
-            if parsed_date is not None:
-                text_filters.append(cast(Shipment.created_at, Date) == parsed_date)
-            conditions.append(or_(*text_filters))
+            conditions.append(or_(*_shipment_search_filters(query)))
 
         total = await self.session.scalar(
             select(func.count()).select_from(Shipment).where(*conditions)
@@ -210,10 +202,7 @@ class ShipmentRepository(BaseRepository):
         if statuses:
             conditions.append(Shipment.status.in_(tuple(statuses)))
         if query:
-            pattern = f"%{query.strip()}%"
-            conditions.append(
-                or_(Shipment.ttn_number.ilike(pattern), Shipment.recipient_name.ilike(pattern))
-            )
+            conditions.append(or_(*_shipment_search_filters(query)))
         total = await self.session.scalar(
             select(func.count()).select_from(Shipment).where(*conditions)
         )
@@ -376,17 +365,12 @@ class ShipmentRepository(BaseRepository):
             select(func.count()).select_from(Shipment).join(User, User.id == Shipment.client_id)
         )
         if query:
-            stripped = query.strip()
-            pattern = f"%{stripped}%"
-            text_filters = [
-                Shipment.ttn_number.ilike(pattern),
-                Shipment.recipient_name.ilike(pattern),
-                User.full_name.ilike(pattern),
-                User.phone.ilike(pattern),
-            ]
-            parsed_date = _parse_query_date(stripped)
-            if parsed_date is not None:
-                text_filters.append(cast(Shipment.created_at, Date) == parsed_date)
+            # У персонала список чужой, поэтому к базовому фильтру добавляется поиск
+            # по самому клиенту.
+            pattern = f"%{query.strip()}%"
+            text_filters = _shipment_search_filters(query)
+            text_filters.append(User.full_name.ilike(pattern))
+            text_filters.append(User.phone.ilike(pattern))
             conditions.append(or_(*text_filters))
         if conditions:
             stmt = stmt.where(*conditions)
@@ -454,3 +438,22 @@ def _parse_query_date(raw: str) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _shipment_search_filters(query: str) -> list:
+    """Базовый фильтр поиска отправления: ТТН, получатель, дата создания.
+
+    Единая точка — три реализации разъехались: account-путь потерял ветку даты, и
+    поиск по дате молча не работал у ВСЕХ клиентов (акаунт есть у каждого, значит
+    берётся именно он). `list_for_staff` дополняет список поиском по клиенту.
+    """
+    stripped = query.strip()
+    pattern = f"%{stripped}%"
+    filters = [
+        Shipment.ttn_number.ilike(pattern),
+        Shipment.recipient_name.ilike(pattern),
+    ]
+    parsed_date = _parse_query_date(stripped)
+    if parsed_date is not None:
+        filters.append(cast(Shipment.created_at, Date) == parsed_date)
+    return filters
