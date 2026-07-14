@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.bot.keyboards import support as kb
-from app.bot.keyboards.menus import CLIENT_MENU_TEXTS, build_role_menu
+from app.bot.keyboards.menus import CLIENT_MENU_TEXTS, MENU_TEXTS, build_role_menu
 from app.bot.notify import BotNotifier
 from app.bot.screen import remember_screen
 from app.bot.states import SupportState
@@ -174,27 +174,11 @@ async def client_chat_exit_stale(
     )
 
 
-@router.message(SupportState.client_chatting, F.text.in_(CLIENT_MENU_TEXTS))
-async def client_chat_menu_tap(message: Message, state: FSMContext) -> None:
-    """Кнопка нижнего меню, нажатая внутри чата, — это выход, а не реплика.
-
-    Клиент залипал в `client_chatting`, и релей ниже глотал ЛЮБОЙ текст, включая
-    тексты reply-кнопок: тап «⚙️ Налаштування» уходил менеджеру как сообщение
-    обращения, а клиент получал ack вместо экрана настроек — выглядело как
-    «кнопка не працює».
-
-    Снимаем стейт (чтобы следующий свободный текст уже не релеился) и отдаём
-    событие дальше. ВАЖНО: `SkipHandler` НЕ выкидывает событие из роутера — он
-    передаёт его следующему хендлеру ЭТОГО же роутера. Поэтому релей ниже обязан
-    сам исключать `CLIENT_MENU_TEXTS`: иначе он подхватит кнопку сразу после нас
-    и всё останется как было. По той же причине не полагаемся на `state.clear()`
-    как на фильтр: стейт для фильтров резолвится middleware один раз на апдейт,
-    и сброс внутри хендлера на проверки ниже уже не влияет.
-    """
-    await state.clear()
-    raise SkipHandler()
-
-
+# Кнопки нижней панели релей НЕ ловит: тап «⚙️ Налаштування» внутри чата уходил
+# менеджеру как реплика, а клиент получал ack вместо настроек. Стейт снимает общий
+# `menu_escape`-роутер (подключён первым), но одного его мало: `raw_state` для
+# фильтров резолвится middleware один раз на апдейт, поэтому без исключения ниже
+# релей всё равно подхватил бы кнопку. См. app/bot/handlers/menu_escape.py.
 @router.message(SupportState.client_chatting, F.text, ~F.text.in_(CLIENT_MENU_TEXTS))
 async def client_chat_message(
     message: Message,
@@ -426,7 +410,7 @@ async def staff_reply_exit(
     )
 
 
-@router.message(SupportState.manager_replying, F.text)
+@router.message(SupportState.manager_replying, F.text, ~F.text.in_(MENU_TEXTS))
 async def staff_reply_message(
     message: Message,
     effective_context: EffectiveContext,
@@ -651,7 +635,7 @@ async def cb_search(
     await callback.answer()
 
 
-@router.message(SupportState.log_search, F.text)
+@router.message(SupportState.log_search, F.text, ~F.text.in_(MENU_TEXTS))
 async def staff_search_input(
     message: Message,
     effective_context: EffectiveContext,

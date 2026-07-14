@@ -16,6 +16,7 @@ from app.bot.handlers import (
     duty_router,
     errors_router,
     manager_shipments_router,
+    menu_escape_router,
     reports_router,
     staff_router,
     start_router,
@@ -54,6 +55,10 @@ def build_dispatcher(
     dp.update.outer_middleware(services_middleware)
     dp.update.outer_middleware(context_middleware)
 
+    # Первым: тап кнопки нижней панели снимает FSM-стейт брошенного сценария и
+    # уходит дальше (SkipHandler). Хендлеры со свободным текстом дополнительно
+    # исключают MENU_TEXTS — см. app/bot/handlers/menu_escape.py.
+    dp.include_router(menu_escape_router)
     dp.include_router(start_router)
     dp.include_router(dev_router)
     dp.include_router(clients_router)

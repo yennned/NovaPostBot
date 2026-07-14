@@ -18,6 +18,7 @@ from app.bot.keyboards.manager_shipments import (
     build_queue_kb,
     build_return_inspection_kb,
 )
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.notify import BotNotifier
 from app.bot.states import ManagerShipmentState
 from app.bot.texts.manager_shipments import (
@@ -411,7 +412,12 @@ async def cb_clear(
     await callback.answer("Пошук скинуто.")
 
 
-@router.message(ManagerShipmentState.waiting_for_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ManagerShipmentState.waiting_for_search,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_search(
     message: Message,
     state: FSMContext,

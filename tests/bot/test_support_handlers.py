@@ -22,7 +22,6 @@ from app.bot.handlers.support import (
     cb_open,
     client_chat_exit,
     client_chat_exit_stale,
-    client_chat_menu_tap,
     client_chat_message,
     client_open,
     client_start,
@@ -468,15 +467,6 @@ async def test_concurrent_first_messages_create_single_thread(engine, monkeypatc
             await cleanup.commit()
 
 
-async def test_menu_button_tap_clears_chat_state():
-    state = FakeState({"support_thread_id": ""})
-
-    with pytest.raises(SkipHandler):
-        await client_chat_menu_tap(FakeMessage("⚙️ Налаштування"), state)
-
-    assert state.cleared  # чат покинут, следующий свободный текст уже не релеится
-
-
 @pytest.mark.parametrize("text", ["⚙️ Налаштування", "📦 Товари", CLIENT_TEAM_BUTTON])
 async def test_menu_button_escapes_support_router(text: str):
     """Кнопка меню обязана ПОКИНУТЬ support_router, а не осесть в релее.
@@ -504,7 +494,6 @@ async def test_menu_button_escapes_support_router(text: str):
     )
 
     assert result is UNHANDLED  # ушло дальше по роутерам — к своему хендлеру
-    assert state.cleared  # и чат при этом покинут
 
 
 async def test_exit_chat_keeps_team_button_for_account_owner(db_session: AsyncSession):

@@ -33,6 +33,7 @@ from app.bot.keyboards.client import (
     build_shipments_kb,
     build_stats_kb,
 )
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.screen import edit_stored_screen, remember_screen
 from app.bot.states import ClientCabinetState, SenderProfileCreateState
 from app.bot.texts.client_cabinet import (
@@ -610,7 +611,12 @@ async def cb_product_category(
     await callback.answer()
 
 
-@router.message(ClientCabinetState.waiting_for_product_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientCabinetState.waiting_for_product_search,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_product_search(
     message: Message,
     bot: Bot,
@@ -753,7 +759,12 @@ async def cb_shipment_clear(
     await callback.answer("Пошук скинуто.")
 
 
-@router.message(ClientCabinetState.waiting_for_shipment_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientCabinetState.waiting_for_shipment_search,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_shipment_search(
     message: Message,
     bot: Bot,
