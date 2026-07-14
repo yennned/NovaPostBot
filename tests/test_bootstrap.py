@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from app.config import get_settings
 from app.db.models.audit import AuditLog
-from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
+from app.db.models.enums import ClientAccountStatus, MembershipRole, UserRole, UserStatus
+from app.db.repositories import ClientAccountRepository, UserRepository
 from app.services.bootstrap import ensure_owners
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +50,27 @@ async def test_ensure_owners_promotes_existing(db_session: AsyncSession, owner_s
     assert existing.role is UserRole.owner
     assert existing.status is UserStatus.active
     assert await _audit_count(db_session) == 1
+
+
+async def test_ensure_owners_flags_but_never_freezes_client_account(
+    db_session: AsyncSession, owner_settings
+):
+    # Клиент в OWNER_TELEGRAM_IDS — ошибка конфига (владелец: клиент и менеджер
+    # платформы не пересекаются). Повышаем — иначе владелец молча остался бы
+    # клиентом; акаунт НЕ гасим — разморозка идёт через `_get_client`, который
+    # 404-ит на не-клиенте, то есть заморозка была бы необратимой. Только датчик.
+    users = UserRepository(db_session)
+    existing = await users.create(telegram_id=700700, phone="380507000900")
+    accounts = ClientAccountRepository(db_session)
+    membership = await accounts.get_membership(user_id=existing.id)
+    assert membership is not None and membership.role is MembershipRole.account_owner
+
+    await ensure_owners(db_session, owner_settings)
+
+    assert existing.role is UserRole.owner
+    assert membership.account.status is ClientAccountStatus.active  # не тронут
+    entry = await db_session.scalar(select(AuditLog).where(AuditLog.action == "owner_bootstrapped"))
+    assert str(membership.account_id) in entry.notes
 
 
 async def test_ensure_owners_is_idempotent(db_session: AsyncSession, owner_settings):
