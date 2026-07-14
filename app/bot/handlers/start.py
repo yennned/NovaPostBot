@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards import build_contact_keyboard, build_role_menu
 from app.bot.notify import BotNotifier
+from app.bot.permissions import is_account_owner
 from app.bot.services import StartService
 from app.bot.states import StartStates
 from app.bot.texts import (
@@ -51,12 +52,11 @@ async def _render_home(message: Message, context: EffectiveContext) -> None:
     else:
         parts.append(f"Відкриваю меню {context.effective_role.value}.")
 
-    owner = (
-        context.membership is not None and context.membership.role is MembershipRole.account_owner
-    )
     await message.answer(
         "\n".join(parts),
-        reply_markup=build_role_menu(context.effective_role, account_owner=owner),
+        reply_markup=build_role_menu(
+            context.effective_role, account_owner=is_account_owner(context)
+        ),
     )
 
 
@@ -87,12 +87,9 @@ async def start_command(
         return
 
     role = effective_context.effective_role or user.role
-    owner = (
-        effective_context.membership is not None
-        and effective_context.membership.role is MembershipRole.account_owner
-    )
     await message.answer(
-        welcome_text(user, role), reply_markup=build_role_menu(role, account_owner=owner)
+        welcome_text(user, role),
+        reply_markup=build_role_menu(role, account_owner=is_account_owner(effective_context)),
     )
 
 

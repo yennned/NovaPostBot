@@ -7,9 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+from datetime import UTC, datetime
+
 import pytest
-from aiogram.dispatcher.event.bases import SkipHandler
-from aiogram.types import ReplyKeyboardMarkup
+from aiogram.dispatcher.event.bases import UNHANDLED, SkipHandler
+from aiogram.types import Chat, Message, ReplyKeyboardMarkup
+from aiogram.types import User as TgUser
 from app.bot import permissions as perm
 from app.bot.handlers.support import (
     _can_handle_support,
@@ -17,15 +22,26 @@ from app.bot.handlers.support import (
     cb_open,
     client_chat_exit,
     client_chat_exit_stale,
+    client_chat_menu_tap,
     client_chat_message,
     client_open,
+    client_start,
     staff_open,
     staff_reply_exit,
     staff_reply_message,
 )
+from app.bot.handlers.support import router as support_router
+from app.bot.keyboards.menus import CLIENT_TEAM_BUTTON
+from app.bot.states import SupportState
 from app.bot.types import EffectiveContext
+from app.db.models.client_account import ClientAccount, ClientAccountMembership
 from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
-from app.db.repositories import SupportRepository, UserRepository
+from app.db.models.support import SupportMessage, SupportThread
+from app.db.models.user import User
+from app.db.repositories import ClientAccountRepository, SupportRepository, UserRepository
+from app.services import support as support_service
+from app.services.support import DutyContact
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -300,6 +316,230 @@ async def test_staff_reply_exit_restores_role_menu(db_session: AsyncSession):
 
     assert state.cleared
     assert isinstance(msg.answers[-1]["reply_markup"], ReplyKeyboardMarkup)
+
+
+def _patch_duty(monkeypatch, *, manager=None, office_open: bool = True) -> None:
+    """Зафиксировать дежурство: иначе маршрутизация треда зависит от часов работы."""
+
+    async def _fake(session, *, settings=None, now=None) -> DutyContact:
+        return DutyContact(manager=manager, window=None, office_open=office_open)
+
+    monkeypatch.setattr("app.services.support.get_duty_contact", _fake)
+
+
+async def test_client_start_creates_no_thread_and_asks_to_write(db_session: AsyncSession):
+    # Тап «Почати чат» раньше сразу писал пустой тред и отвечал «Повідомлення
+    # збережено», хотя клиент ничего не написал: в инбоксе висели пустышки.
+    client = await _client(db_session)
+    cb = FakeCallback(data="sup:start")
+    state = FakeState()
+
+    await client_start(cb, _ctx(client, UserRole.client), state)
+
+    assert await SupportRepository(db_session).get_active_thread_for_client(client.id) is None
+    assert state.state is SupportState.client_chatting
+    answer = str(cb.message.answers[-1]["text"])
+    assert "Напишіть повідомлення" in answer
+    assert "збережено" not in answer
+
+
+async def test_first_message_creates_thread_and_pings_managers(
+    db_session: AsyncSession, monkeypatch
+):
+    # Рабочее время, дежурного нет: тред рождается вместе с текстом, и только
+    # теперь менеджеры получают сигнал — а не на пустом тапе.
+    client = await _client(db_session)
+    manager = await _manager(db_session)
+    _patch_duty(monkeypatch, manager=None, office_open=True)
+    state = FakeState({"support_thread_id": ""})
+    bot = FakeBot()
+
+    await client_chat_message(
+        FakeMessage("Де моя посилка?"), _ctx(client, UserRole.client), db_session, state, bot
+    )
+
+    thread = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    assert thread is not None
+    assert thread.status is SupportThreadStatus.waiting
+    stored = await SupportRepository(db_session).get_with_messages(thread.id)
+    assert [m.text for m in stored.messages] == ["Де моя посилка?"]  # тред не пустой
+    assert any(tid == manager.telegram_id for tid, _ in bot.sent)  # менеджеров позвали
+    assert (await state.get_data())["support_thread_id"] == str(thread.id)
+
+
+async def test_client_start_denies_inactive_client(db_session: AsyncSession):
+    # Заблокированный клиент должен получить отказ на входе, а не после того,
+    # как напишет сообщение в чат, куда его позвали.
+    client = await _client(db_session)
+    client.status = UserStatus.blocked
+    await db_session.flush()
+    cb = FakeCallback(data="sup:start")
+
+    await client_start(cb, _ctx(client, UserRole.client), FakeState())
+
+    assert cb.acks[-1]["show_alert"] is True
+    assert cb.message.answers == []  # в чат не зовём
+
+
+async def test_first_message_routes_to_duty_manager(db_session: AsyncSession, monkeypatch):
+    client = await _client(db_session)
+    manager = await _manager(db_session)
+    _patch_duty(monkeypatch, manager=manager, office_open=True)
+    state = FakeState({"support_thread_id": ""})
+    bot = FakeBot()
+
+    await client_chat_message(
+        FakeMessage("Вітаю!"), _ctx(client, UserRole.client), db_session, state, bot
+    )
+
+    thread = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    assert thread.status is SupportThreadStatus.open
+    assert thread.assigned_manager_id == manager.id
+    assert any("Вітаю!" in text for tid, text in bot.sent if tid == manager.telegram_id)
+
+
+async def test_concurrent_first_messages_create_single_thread(engine, monkeypatch):
+    """Два первых сообщения из одного `getUpdates`-батча → один тред, не два.
+
+    Тред теперь рождается на первом сообщении, а aiogram обрабатывает апдейты
+    параллельными тасками с отдельными сессиями — без advisory-lock в
+    `open_or_get_thread` обе таски не находят активный тред и создают по своему.
+    Идёт на реальных соединениях (а не на общей savepoint-сессии), иначе
+    транзакционный лок нечему сериализовать; поэтому за собой прибираем руками.
+    Барьер в `get_duty_contact` сводит обе таски к get-or-create одновременно:
+    без него `gather` успевает выполнить их последовательно, и гонка не
+    воспроизводится — тест проходил бы и на сломанном коде.
+    """
+    barrier = asyncio.Barrier(2)
+
+    async def _fake_duty(session, *, settings=None, now=None) -> DutyContact:
+        await barrier.wait()
+        return DutyContact(manager=None, window=None, office_open=True)
+
+    monkeypatch.setattr("app.services.support.get_duty_contact", _fake_duty)
+
+    async with AsyncSession(engine, expire_on_commit=False) as setup:
+        client = await UserRepository(setup).create(
+            telegram_id=777001,
+            phone="+380507770010",
+            full_name="Гонка Клієнт",
+            role=UserRole.client,
+            status=UserStatus.active,
+        )
+        await setup.commit()
+        client_id = client.id
+
+    async def _first_message() -> uuid.UUID:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            user = await session.get(User, client_id)
+            result = await support_service.open_or_get_thread(session, client=user)
+            await support_service.post_message(
+                session, thread=result.thread, sender_role="client", text="Вітаю"
+            )
+            await session.commit()
+            return result.thread.id
+
+    try:
+        first, second = await asyncio.gather(_first_message(), _first_message())
+        assert first == second  # обе таски пишут в один тред
+
+        async with AsyncSession(engine) as check:
+            threads = (
+                await check.scalars(
+                    select(SupportThread).where(SupportThread.client_id == client_id)
+                )
+            ).all()
+        assert len(threads) == 1
+    finally:
+        async with AsyncSession(engine) as cleanup:
+            await cleanup.execute(
+                delete(SupportMessage).where(
+                    SupportMessage.thread_id.in_(
+                        select(SupportThread.id).where(SupportThread.client_id == client_id)
+                    )
+                )
+            )
+            await cleanup.execute(delete(SupportThread).where(SupportThread.client_id == client_id))
+            await cleanup.execute(
+                delete(ClientAccountMembership).where(ClientAccountMembership.user_id == client_id)
+            )
+            await cleanup.execute(delete(ClientAccount).where(ClientAccount.id == client_id))
+            await cleanup.execute(delete(User).where(User.id == client_id))
+            await cleanup.commit()
+
+
+async def test_menu_button_tap_clears_chat_state():
+    state = FakeState({"support_thread_id": ""})
+
+    with pytest.raises(SkipHandler):
+        await client_chat_menu_tap(FakeMessage("⚙️ Налаштування"), state)
+
+    assert state.cleared  # чат покинут, следующий свободный текст уже не релеится
+
+
+@pytest.mark.parametrize("text", ["⚙️ Налаштування", "📦 Товари", CLIENT_TEAM_BUTTON])
+async def test_menu_button_escapes_support_router(text: str):
+    """Кнопка меню обязана ПОКИНУТЬ support_router, а не осесть в релее.
+
+    Проверяем на реальном роутере через диспетчер: `SkipHandler` не выбрасывает
+    событие из роутера, а лишь передаёт следующему хендлеру того же роутера, —
+    поэтому релей сам исключает `CLIENT_MENU_TEXTS`. Если это условие потерять,
+    тап «Налаштування» снова уйдёт менеджеру как сообщение обращения, а до
+    `client_cabinet` (подключён после `support`) не доедет.
+    """
+    message = Message(
+        message_id=1,
+        date=datetime.now(UTC),
+        chat=Chat(id=1, type="private"),
+        from_user=TgUser(id=1, is_bot=False, first_name="Клієнт"),
+        text=text,
+    )
+    state = FakeState({"support_thread_id": ""})
+
+    result = await support_router.propagate_event(
+        "message",
+        message,
+        state=state,
+        raw_state=SupportState.client_chatting.state,
+    )
+
+    assert result is UNHANDLED  # ушло дальше по роутерам — к своему хендлеру
+    assert state.cleared  # и чат при этом покинут
+
+
+async def test_exit_chat_keeps_team_button_for_account_owner(db_session: AsyncSession):
+    # Выход из чата пересобирал нижнюю панель без «👥 Команда», и кнопка пропадала
+    # до следующего /start (reply-клавиатура живёт до замены).
+    client = await _client(db_session)
+    # `UserRepository.create` заводит клиенту аккаунт и владельческое членство —
+    # берём готовое ровно так же, как это делает middleware.
+    account, membership = await ClientAccountRepository(db_session).get_context_for_user(client.id)
+    ctx = EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+        account=account,
+        membership=membership,
+    )
+    msg = FakeMessage("⬅️ Завершити чат")
+
+    await client_chat_exit(msg, ctx, db_session, FakeState(), FakeBot())
+
+    keyboard = msg.answers[-1]["reply_markup"]
+    buttons = [button.text for row in keyboard.keyboard for button in row]
+    assert CLIENT_TEAM_BUTTON in buttons
+
+
+async def test_exit_chat_has_no_team_button_without_membership(db_session: AsyncSession):
+    client = await _client(db_session)
+    msg = FakeMessage("⬅️ Завершити чат")
+
+    await client_chat_exit(msg, _ctx(client, UserRole.client), db_session, FakeState(), FakeBot())
+
+    keyboard = msg.answers[-1]["reply_markup"]
+    buttons = [button.text for row in keyboard.keyboard for button in row]
+    assert CLIENT_TEAM_BUTTON not in buttons
 
 
 async def test_cb_open_denies_foreign_thread_access(db_session: AsyncSession):

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.bot.keyboards import support as kb
-from app.bot.keyboards.menus import build_role_menu
+from app.bot.keyboards.menus import CLIENT_MENU_TEXTS, build_role_menu
 from app.bot.notify import BotNotifier
 from app.bot.screen import remember_screen
 from app.bot.states import SupportState
@@ -103,9 +103,14 @@ async def _exit_chat_to_home(
     Во время чата висела ReplyKeyboardMarkup («Вийти з чату»/«Завершити
     відповідь»). Новая reply-панель роли заменяет её одним сообщением — НЕ
     ReplyKeyboardRemove, иначе нижнее меню исчезнет до наступного /start.
+
+    `account_owner` обязателен: без него панель пересобиралась без «👥 Команда»,
+    и кнопка пропадала до следующего /start (reply-клавиатура живёт до замены).
     """
     role = ctx.effective_role or default_role
-    await message.answer(text, reply_markup=build_role_menu(role))
+    await message.answer(
+        text, reply_markup=build_role_menu(role, account_owner=permissions.is_account_owner(ctx))
+    )
 
 
 async def _thread_id_from_state(state: FSMContext) -> uuid.UUID | None:
@@ -144,9 +149,10 @@ async def client_chat_exit(
         if manager_tid is not None:
             await BotNotifier(bot).send_message(manager_tid, closed_note)
     await state.clear()
-    await _exit_chat_to_home(
-        message, effective_context, texts.chat_closed_text(), default_role=UserRole.client
-    )
+    # Вышли, не написав ни слова, — треда нет, закрывать нечего: «звернення
+    # закрито» было бы неправдой.
+    exit_text = texts.chat_closed_text() if thread is not None else texts.chat_exited_text()
+    await _exit_chat_to_home(message, effective_context, exit_text, default_role=UserRole.client)
 
 
 @router.message(StateFilter(None), F.text == kb.CLIENT_CHAT_EXIT)
@@ -168,7 +174,28 @@ async def client_chat_exit_stale(
     )
 
 
-@router.message(SupportState.client_chatting, F.text)
+@router.message(SupportState.client_chatting, F.text.in_(CLIENT_MENU_TEXTS))
+async def client_chat_menu_tap(message: Message, state: FSMContext) -> None:
+    """Кнопка нижнего меню, нажатая внутри чата, — это выход, а не реплика.
+
+    Клиент залипал в `client_chatting`, и релей ниже глотал ЛЮБОЙ текст, включая
+    тексты reply-кнопок: тап «⚙️ Налаштування» уходил менеджеру как сообщение
+    обращения, а клиент получал ack вместо экрана настроек — выглядело как
+    «кнопка не працює».
+
+    Снимаем стейт (чтобы следующий свободный текст уже не релеился) и отдаём
+    событие дальше. ВАЖНО: `SkipHandler` НЕ выкидывает событие из роутера — он
+    передаёт его следующему хендлеру ЭТОГО же роутера. Поэтому релей ниже обязан
+    сам исключать `CLIENT_MENU_TEXTS`: иначе он подхватит кнопку сразу после нас
+    и всё останется как было. По той же причине не полагаемся на `state.clear()`
+    как на фильтр: стейт для фильтров резолвится middleware один раз на апдейт,
+    и сброс внутри хендлера на проверки ниже уже не влияет.
+    """
+    await state.clear()
+    raise SkipHandler()
+
+
+@router.message(SupportState.client_chatting, F.text, ~F.text.in_(CLIENT_MENU_TEXTS))
 async def client_chat_message(
     message: Message,
     effective_context: EffectiveContext,
@@ -188,7 +215,30 @@ async def client_chat_message(
         return
 
     thread_id = await _thread_id_from_state(state)
-    thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
+    notify_managers = False
+    if thread_id is None:
+        # Первое сообщение в чате — только теперь заводим тред, вместе с текстом.
+        # На тапе «Почати чат» треда уже не создаём (см. `client_start`), поэтому
+        # менеджер получает пинг с содержимым, а не пустую карточку.
+        try:
+            result = await support.open_or_get_thread(
+                db_session,
+                client=client,
+                account_id=effective_context.account.id if effective_context.account else None,
+            )
+        except ClientServiceError as exc:
+            await state.clear()
+            await _exit_chat_to_home(
+                message, effective_context, str(exc), default_role=UserRole.client
+            )
+            return
+        notify_managers = result.notify_managers
+        thread_id = result.thread.id
+        await state.update_data(support_thread_id=str(thread_id))
+
+    # Перечитываем с joinedload: у свежесозданного треда связи (client,
+    # assigned_manager) не загружены, а ленивый доступ в async-сессии упал бы.
+    thread = await SupportRepository(db_session).get_with_messages(thread_id)
     if (
         thread is None
         or thread.status is SupportThreadStatus.closed
@@ -206,7 +256,9 @@ async def client_chat_message(
         )
         return
 
+    # Тексты/получатели — до commit, пока ORM-атрибуты живые («commit, потім notify»).
     manager_tid = thread.assigned_manager.telegram_id if thread.assigned_manager else None
+    client_label = _client_label(thread.client)
     relay_text = notifications.support_message_for_manager_text(thread.client, message.text)
     await support.post_message(
         db_session,
@@ -218,6 +270,10 @@ async def client_chat_message(
         text=message.text,
     )
     await db_session.commit()
+    if notify_managers:
+        await notifications.notify_support_queued_to_managers(
+            db_session, BotNotifier(bot), client_label=client_label
+        )
     if manager_tid is not None:
         await BotNotifier(bot).send_message(manager_tid, relay_text)
         # Подтверждаем клиенту каждое сообщение: без ack чат выглядит «одноразовым»
@@ -297,33 +353,30 @@ async def client_open_home(
 async def client_start(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
-    db_session: AsyncSession,
     state: FSMContext,
-    bot: Bot,
 ) -> None:
     client = _client_user(effective_context)
     if client is None or callback.message is None:
         await callback.answer(_STALE, show_alert=True)
         return
     try:
-        result = await support.open_or_get_thread(
-            db_session,
-            client=client,
-            account_id=effective_context.account.id if effective_context.account else None,
-        )
+        # Доступ проверяем на входе, а не после того, как клиент напишет: иначе
+        # заблокированного/неподтверждённого зовут в чат и отшивают уже по тексту.
+        support.ensure_can_open(client)
     except ClientServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    client_label = _client_label(client)
-    await db_session.commit()
-    if result.notify_managers:
-        await notifications.notify_support_queued_to_managers(
-            db_session, BotNotifier(bot), client_label=client_label
-        )
+    # Тред НЕ создаём здесь: раньше тап «Почати чат» сразу писал пустой
+    # SupportThread, пинговал менеджеров и — если дежурного нет — отвечал
+    # «Повідомлення збережено», хотя клиент ещё ничего не написал. В инбоксе
+    # висели пустышки, а клиент был уверен, что обращение уже ушло. Теперь тап
+    # только открывает чат; тред рождается с первым сообщением
+    # (см. `client_chat_message`).
     await state.set_state(SupportState.client_chatting)
-    await state.update_data(support_thread_id=str(result.thread.id))
-    prompt = texts.chat_started_prompt_text() if result.routed else texts.queued_ack_text()
-    await callback.message.answer(prompt, reply_markup=kb.build_client_chat_kb())
+    await state.update_data(support_thread_id="")
+    await callback.message.answer(
+        texts.chat_started_prompt_text(), reply_markup=kb.build_client_chat_kb()
+    )
     await callback.answer()
 
 

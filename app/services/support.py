@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -64,6 +66,31 @@ async def get_duty_contact(
     )
 
 
+def ensure_can_open(client: User) -> None:
+    """Право открыть обращение. Отдельно от `open_or_get_thread`, чтобы UI мог
+    проверить доступ на входе в чат, не создавая тред."""
+    if client.role is not UserRole.client:
+        raise PermissionDenied("звернення до підтримки доступне лише клієнту")
+    if client.status is not UserStatus.active:
+        raise PermissionDenied("звернення доступне після підтвердження акаунта")
+
+
+async def _lock_thread_scope(session: AsyncSession, scope_id: uuid.UUID) -> None:
+    """Сериализовать get-or-create треда по клиенту/аккаунту на время транзакции.
+
+    Апдейты из одного `getUpdates`-батча aiogram обрабатывает параллельными
+    тасками (`handle_as_tasks=True` по умолчанию), у каждой своя сессия. Два
+    первых сообщения подряд иначе оба не находят активный тред и оба его
+    создают — у менеджера появляются два обращения вместо одного. Уникального
+    индекса на активный тред нет (и его не навесить: в проде уже лежат старые
+    дубли), поэтому берём advisory-lock, который снимается вместе с транзакцией.
+    """
+    key = int.from_bytes(
+        hashlib.blake2b(scope_id.bytes, digest_size=8).digest(), "big", signed=True
+    )
+    await session.execute(select(func.pg_advisory_xact_lock(key)))
+
+
 async def open_or_get_thread(
     session: AsyncSession,
     *,
@@ -74,15 +101,13 @@ async def open_or_get_thread(
     account_id: uuid.UUID | None = None,
 ) -> ThreadOpenResult:
     """Вернуть активный тред клиента или создать новый с маршрутизацией."""
-    if client.role is not UserRole.client:
-        raise PermissionDenied("звернення до підтримки доступне лише клієнту")
-    if client.status is not UserStatus.active:
-        raise PermissionDenied("звернення доступне після підтвердження акаунта")
+    ensure_can_open(client)
 
     cfg = settings or get_settings()
     repo = SupportRepository(session)
     contact = await get_duty_contact(session, settings=cfg, now=now)
 
+    await _lock_thread_scope(session, account_id or client.id)
     existing = (
         await repo.get_active_thread_for_client(client.id)
         if account_id is None
