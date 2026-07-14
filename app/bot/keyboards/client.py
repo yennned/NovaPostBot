@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.keyboards.common import category_chips
 from app.services.client_settings import (
+    NOTIFY_ALL_ACCOUNT_SHIPMENTS,
     NOTIFY_APPROVED,
     NOTIFY_LOW_STOCK,
     NOTIFY_SHIPMENT_STATUS,
@@ -21,10 +22,18 @@ from app.services.shipments import ShipmentPage
 PRODUCTS_PAGE_SIZE = 6
 SHIPMENTS_PAGE_SIZE = 6
 
+# Короткие токены вместо полных ключей: callback_data у Telegram — максимум 64 байта.
+# ИНВАРИАНТ: здесь обязан быть ключ на КАЖДУЮ запись `DEFAULT_NOTIFICATION_SETTINGS` —
+# `build_settings_kb` идёт по списку из `_settings_view`, и пропущенный ключ роняет
+# весь экран настроек с `KeyError`. Для пользователя это выглядит как «кнопка не
+# работает»: aiogram пишет трейс в лог и молча ничего не отвечает. Ровно так и
+# случилось с `notify_all_account_shipments` (добавлен в 76e48af без токена).
+# Инвариант держит `test_every_notification_key_has_callback_token`.
 NOTIFICATION_CALLBACK_TOKENS = {
     NOTIFY_APPROVED: "apr",
     NOTIFY_SHIPMENT_STATUS: "shp",
     NOTIFY_LOW_STOCK: "stk",
+    NOTIFY_ALL_ACCOUNT_SHIPMENTS: "acc",
 }
 SENDER_PROFILE_FIELD_TOKENS = {
     "name": "nm",
