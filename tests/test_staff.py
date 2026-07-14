@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 from app.bot import permissions as perm
-from app.db.models.audit import AuditLog
 from app.bot.types import ClientAccountContext
+from app.db.models.audit import AuditLog
 from app.db.models.enums import (
     ClientAccountStatus,
     SupportThreadStatus,
