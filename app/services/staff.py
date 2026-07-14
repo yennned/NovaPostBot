@@ -346,6 +346,14 @@ async def delete_manager(
         await users.update_status(manager, UserStatus.blocked)
     await users.update_role(manager, UserRole.client)
     await users.set_permissions(manager, {})
+    # Клиент без акаунта — сломанное состояние: `account_id` во всех клиентских
+    # таблицах NOT NULL, а `resolve_account_scope` без членства вернёт None → любая
+    # запись (ФОП, ТТН, склад) падает NotNullViolation. `users.create` заводит акаунт
+    # только для роли `client`, поэтому у менеджера его нет, и смена роли обязана
+    # его создать. Достижимо через UI: найм по Telegram-ID → зняття ролі → розблокування.
+    accounts = ClientAccountRepository(session)
+    if await accounts.get_membership(user_id=manager.id) is None:
+        await accounts.create_for_owner(manager)
     await AuditRepository(session).log(
         "manager_deleted",
         user_id=actor.id,
