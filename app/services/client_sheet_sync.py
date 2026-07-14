@@ -88,9 +88,17 @@ async def sync_client_sheets(
         source_key = client.stock_sheet_key or target_key
         view_book_id = client.stock_view_book_id
     else:
-        target_key = account.name or str(account.id)
+        # `.strip()`, а не голый `or`: имя из пробелов прошло бы мимо фолбэка и
+        # стало бы именем вкладки (ср. `desired_stock_sheet_key`).
+        target_key = (account.name or "").strip() or str(account.id)
         source_key = account.stock_sheet_key or target_key
         view_book_id = account.stock_view_book_id
+        # `previous_sheet_key` — понятие user-scope (прежнее имя вкладки клиента).
+        # Для аккаунта оно не просто бессмысленно, а опасно: `_sync_client_sheets_sync`
+        # переименовывает вкладку `previous_sheet_key` → `target_key`, поэтому правка
+        # ПІБ работником увела бы вкладку с его именем в имя общего акаунта. Источник
+        # правды для аккаунта — `account.stock_sheet_key`, он уже в `source_key`.
+        previous_sheet_key = None
 
     if not _sheets_enabled(cfg):
         scope = account or client
