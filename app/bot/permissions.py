@@ -175,6 +175,18 @@ def require_account_member(context: EffectiveContext | ClientAccountContext) -> 
         raise PermissionDenied("членство в акаунті неактивне")
 
 
+def is_account_owner(context: EffectiveContext) -> bool:
+    """Владелец ли клиентского аккаунта (предикат, ничего не кидает).
+
+    Для рендера меню: без membership владельца нет (соло-клиент команду не ведёт),
+    поэтому `None → False`. Не путать с `_account_owner` в `client_cabinet`, который
+    на тот же `None` отвечает `True` — там вопрос другой («соло-клиент может править
+    свой профиль»).
+    """
+    membership = context.membership
+    return membership is not None and membership.role is MembershipRole.account_owner
+
+
 def require_account_owner(context: EffectiveContext | ClientAccountContext) -> None:
     """Доступ до команди, ФОП, реквізитів і ключів НП."""
     require_account_member(context)
