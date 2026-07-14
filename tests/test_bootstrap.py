@@ -73,6 +73,26 @@ async def test_ensure_owners_flags_but_never_freezes_client_account(
     assert str(membership.account_id) in entry.notes
 
 
+async def test_ensure_owners_promotion_without_account_stays_quiet(
+    db_session: AsyncSession, owner_settings
+):
+    # Негативная половина датчика. Без неё условие не пришпилено ничем: заменив его
+    # на `if True:`, весь сьют остаётся зелёным — то есть ложная тревога на каждом
+    # легитимном повышении прошла бы незамеченной. Датчик ценен только точностью.
+    users = UserRepository(db_session)
+    # Менеджер → `create_for_owner` не зовётся (гейт `role is client`), членства нет.
+    existing = await users.create(
+        telegram_id=700700, role=UserRole.manager, status=UserStatus.blocked
+    )
+    assert await ClientAccountRepository(db_session).get_membership(user_id=existing.id) is None
+
+    await ensure_owners(db_session, owner_settings)
+
+    assert existing.role is UserRole.owner
+    entry = await db_session.scalar(select(AuditLog).where(AuditLog.action == "owner_bootstrapped"))
+    assert entry.notes == "повышение до владельца из OWNER_TELEGRAM_IDS"  # без пометки
+
+
 async def test_ensure_owners_is_idempotent(db_session: AsyncSession, owner_settings):
     await ensure_owners(db_session, owner_settings)
     await ensure_owners(db_session, owner_settings)  # повторный запуск — без изменений
