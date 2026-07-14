@@ -150,11 +150,3 @@ class ClientAccountRepository(BaseRepository):
         membership.blocked_at = now if status is MembershipStatus.blocked else None
         await self.session.flush()
         return membership
-
-    async def count_active_owners(self, account_id: uuid.UUID) -> int:
-        stmt = select(func.count()).where(
-            ClientAccountMembership.account_id == account_id,
-            ClientAccountMembership.role == MembershipRole.account_owner,
-            ClientAccountMembership.status == MembershipStatus.active,
-        )
-        return int(await self.session.scalar(stmt) or 0)
