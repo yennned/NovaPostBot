@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.bot.keyboards.client import (
+    NOTIFICATION_CALLBACK_TOKENS,
     build_inventory_kb,
     build_sender_profile_kb,
     build_settings_kb,
@@ -14,7 +15,11 @@ from app.bot.keyboards.client import (
 )
 from app.bot.texts.client_cabinet import products_text
 from app.db.models.enums import OrgType
-from app.services.client_settings import ClientSettingsView, NotificationSettingView
+from app.services.client_settings import (
+    DEFAULT_NOTIFICATION_SETTINGS,
+    ClientSettingsView,
+    NotificationSettingView,
+)
 from app.services.inventory import InventoryPage
 from app.services.sender_profile import SenderProfileView
 from app.services.shipments import ShipmentPage
@@ -29,26 +34,27 @@ def _all_callbacks(markup) -> list[str]:
     ]
 
 
+def test_every_notification_key_has_callback_token():
+    """Пропуск токена роняет весь экран настроек `KeyError` — молча, без ответа.
+
+    Так и было с `notify_all_account_shipments`: ключ добавили в дефолты, метку и
+    рассылку, а токен — нет. Экран настроек умер у всех клиентов, а тесты остались
+    зелёными, потому что ниже собирали `view` из трёх ключей вручную.
+    """
+    assert set(NOTIFICATION_CALLBACK_TOKENS) == set(DEFAULT_NOTIFICATION_SETTINGS)
+    tokens = list(NOTIFICATION_CALLBACK_TOKENS.values())
+    assert len(set(tokens)) == len(tokens), "токены обязаны быть уникальными"
+
+
 def test_settings_callbacks_fit_telegram_limit():
+    # Уведомления — из настоящих дефолтов, а не из ручного списка: иначе тест не
+    # видит ключи, добавленные в сервис (см. тест выше).
     view = ClientSettingsView(
         full_name="Клієнт",
         phone="+380001",
         notifications=[
-            NotificationSettingView(
-                key="notify_registration_approved",
-                label="Підтвердження реєстрації",
-                enabled=True,
-            ),
-            NotificationSettingView(
-                key="notify_shipment_status",
-                label="Статуси відправлень",
-                enabled=True,
-            ),
-            NotificationSettingView(
-                key="notify_low_stock",
-                label="Залишки та low-stock",
-                enabled=True,
-            ),
+            NotificationSettingView(key=key, label=key, enabled=True)
+            for key in DEFAULT_NOTIFICATION_SETTINGS
         ],
         sender_profiles_count=1,
         default_sender_name="ФОП-1",
