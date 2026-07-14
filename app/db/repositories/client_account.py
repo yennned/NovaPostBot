@@ -42,7 +42,7 @@ class ClientAccountRepository(BaseRepository):
         Статус аккаунта проверяем наравне с членством: при блокировке клиента
         `clients._transition` гасит `account.status`, но членства его работников
         остаются active. Без этой проверки работники заблокированного клиента
-        сохраняли бы полный доступ к складу/ФОП/ТТН акаунта.
+        сохраняли бы полный доступ к складу/ФОП/ТТН аккаунта.
         """
         membership = await self.get_membership(user_id=user_id)
         if membership is None or membership.status is not MembershipStatus.active:
