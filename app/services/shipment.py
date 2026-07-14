@@ -47,6 +47,7 @@ from app.services.exceptions import (
 )
 from app.services.notifications import Notifier
 from app.sheets import StockSource
+from app.utils.phone import normalize_phone
 from app.utils.sla import shipment_sla_deadline
 
 logger = structlog.get_logger(__name__)
@@ -65,13 +66,19 @@ def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> No
     `contact_ref`/`phone`/`city_ref`/`warehouse_ref`, и НП отклонила бы ТТН уже на
     save. Порядок проверок — от «ключ» к «профиль» к «системный конфиг»:
     - нет `np_sender_ref` → `SenderProfileNotValidated` (ключ не подтверждён);
-    - нет `np_contact_ref`/`sender_phone` → `SenderProfileIncomplete` (дозаполнить ФОП);
+    - нет `np_contact_ref` / телефон пуст или некорректен → `SenderProfileIncomplete`
+      (дозаполнить ФОП);
     - пуст город/відділення отправителя → `SenderDispatchNotConfigured` (конфиг `.env`).
+
+    Телефон проверяем `normalize_phone`, а не на непустоту: в БД могли осесть
+    профили с мусором (`Тест ФОП`) от старого пути правки, где валидации не было.
+    Иначе мусор доходит до НП, и клиент видит её текст («Вкажіть коректний номер
+    телефону») вместо понятной ошибки бота.
     """
     if not profile.np_sender_ref:
         raise SenderProfileNotValidated("ключ ФОП не підтверджено в НП")
-    if not profile.np_contact_ref or not (profile.sender_phone or "").strip():
-        raise SenderProfileIncomplete("немає контакту/телефону відправника")
+    if not profile.np_contact_ref or normalize_phone(profile.sender_phone or "") is None:
+        raise SenderProfileIncomplete("немає контакту або коректного телефону відправника")
     warehouse_ref = profile.np_sender_warehouse or settings.np_sender_warehouse_ref
     if not settings.np_sender_city_ref or not warehouse_ref:
         raise SenderDispatchNotConfigured("склад відправника не налаштований")

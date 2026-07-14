@@ -184,14 +184,3 @@ def require_account_owner(context: EffectiveContext | ClientAccountContext) -> N
         or account_context.membership.role is not MembershipRole.account_owner
     ):
         raise PermissionDenied("потрібна роль головного клієнта")
-
-
-def require_account_resource(
-    context: EffectiveContext | ClientAccountContext,
-    resource_account_id,
-) -> None:
-    """Заборонити доступ до ресурсу іншого акаунта навіть через callback/UUID."""
-    require_account_member(context)
-    account_context = context.account_context if isinstance(context, EffectiveContext) else context
-    if account_context is None or account_context.account.id != resource_account_id:
-        raise PermissionDenied("ресурс належить іншому акаунту")

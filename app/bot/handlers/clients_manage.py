@@ -43,6 +43,7 @@ from app.bot.texts.clients import (
     return_received_text,
     search_prompt_text,
 )
+from app.bot.texts.common import invalid_phone_text
 from app.bot.types import EffectiveContext
 from app.db.models.enums import UserRole
 from app.db.models.user import User
@@ -462,9 +463,7 @@ async def receive_edit(
         # поиск клиента по телефону разъедутся с сохранённым значением.
         normalized = normalize_phone(value)
         if normalized is None:
-            await message.answer(
-                "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
-            )
+            await message.answer(invalid_phone_text())
             return
         value = normalized
     try:

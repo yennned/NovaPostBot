@@ -185,6 +185,7 @@ async def start_create_ttn(
         profile_id=None,
         edit=edit,
         account_id=_account_id(effective_context),
+        account=_account(effective_context),
     )
 
 
@@ -197,6 +198,7 @@ async def _resolve_sender_and_begin(
     profile_id: uuid.UUID | None,
     edit: bool,
     account_id: uuid.UUID | None = None,
+    account=None,
 ) -> None:
     """Гейт ФОП (предусловие create_shipment) → вход в кошик выбранным профилем."""
     try:
@@ -235,6 +237,10 @@ async def _resolve_sender_and_begin(
             offset=0,
             edit=edit,
             account_id=account_id,
+            # `account` обязателен вместе с `account_id`: без него `list_inventory`
+            # берёт ключ листа от `client`, а это User работника, а не аккаунт →
+            # работник увидел бы чужой (свой) склад вместо складу магазина.
+            account=account,
         )
     except PermissionDenied as exc:
         await target.answer(str(exc))
@@ -267,6 +273,7 @@ async def cb_pick_sender(
         profile_id=profile_id,
         edit=True,
         account_id=_account_id(effective_context),
+        account=_account(effective_context),
     )
     await callback.answer()
 

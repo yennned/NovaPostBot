@@ -228,10 +228,16 @@ def upgrade() -> None:
         "low_stock_alerts",
         "support_threads",
     ):
+        # Join по `client_accounts`, а НЕ по `users` с фильтром role=client: аккаунт
+        # выше создан для КАЖДОГО legacy-владельца (CTE `legacy_owners` роль не
+        # ограничивает), и `client_accounts.id = users.id`. Фильтр по роли оставил бы
+        # строки бывших клиентов, повышенных до manager/owner, без `account_id` —
+        # и `alter_column(nullable=False)` ниже уронил бы всю транзакцию деплоя
+        # (ровно то, о чём предупреждает комментарий выше).
         op.execute(
             sa.text(
-                f"update {table} t set account_id = u.id from users u "  # noqa: S608
-                "where t.client_id = u.id and u.role = 'client'::user_role"
+                f"update {table} t set account_id = a.id from client_accounts a "  # noqa: S608
+                "where t.client_id = a.id"
             )
         )
 

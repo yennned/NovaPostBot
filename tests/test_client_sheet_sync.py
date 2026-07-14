@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
+from app.db.repositories import ClientAccountRepository, UserRepository
 from app.services.client_sheet_sync import (
     _VIEW_HEADERS,
     ViewRow,
@@ -115,6 +115,77 @@ async def test_stock_sheet_key_unchanged_when_rename_fails(
 
     # Переименование упало → ключ остаётся прежним, чтобы PG указывал на реальный лист.
     assert client.stock_sheet_key == "old_key"
+
+
+async def test_account_sync_ignores_user_scoped_previous_key(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Регрессия: `_sync_client_sheets_sync` переименовывает вкладку
+    # `previous_sheet_key` → `target_key`. `update_self_profile` передаёт туда ключ
+    # ПОЛЬЗОВАТЕЛЯ, а `target_key` в account-ветке — имя АКАУНТА. Правка ПІБ
+    # работником увела бы вкладку с его именем в имя общего склада.
+    import app.services.client_sheet_sync as css
+
+    client = await _active_client(db_session, telegram_id=902)
+    account = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    account = account.account
+    account.name = "Магазин"
+    account.stock_sheet_key = "Магазин"
+    await db_session.flush()
+    seen: dict = {}
+
+    def fake_rename(gc, settings, source, target):
+        seen["source"] = source
+        seen["target"] = target
+        return True
+
+    monkeypatch.setattr(css, "_rename_main_worksheets", fake_rename)
+    monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=False))
+
+    await sync_client_sheets(
+        db_session,
+        client=client,
+        account=account,
+        previous_sheet_key="Іван Працівник",  # ключ работника — не должен участвовать
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
+    )
+
+    assert seen["source"] == "Магазин"  # не «Іван Працівник»
+    assert seen["target"] == "Магазин"
+    assert account.stock_sheet_key == "Магазин"
+
+
+async def test_account_sync_whitespace_name_falls_back_to_id(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `account.name or str(account.id)` пропускал имя из пробелов в имя вкладки.
+    import app.services.client_sheet_sync as css
+
+    client = await _active_client(db_session, telegram_id=903)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    account = membership.account
+    account.name = "   "
+    account.stock_sheet_key = None
+    await db_session.flush()
+    seen: dict = {}
+
+    monkeypatch.setattr(
+        css,
+        "_rename_main_worksheets",
+        lambda gc, s, source, target: seen.update(target=target) or True,
+    )
+    monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=False))
+
+    await sync_client_sheets(
+        db_session,
+        client=client,
+        account=account,
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
+    )
+
+    assert seen["target"] == str(account.id)
 
 
 async def test_view_book_not_created_at_runtime(

@@ -37,8 +37,17 @@ class ClientAccountRepository(BaseRepository):
     async def get_context_for_user(
         self, user_id: uuid.UUID
     ) -> tuple[ClientAccount, ClientAccountMembership] | None:
+        """Активный бизнес-контекст пользователя или `None`.
+
+        Статус аккаунта проверяем наравне с членством: при блокировке клиента
+        `clients._transition` гасит `account.status`, но членства его работников
+        остаются active. Без этой проверки работники заблокированного клиента
+        сохраняли бы полный доступ к складу/ФОП/ТТН акаунта.
+        """
         membership = await self.get_membership(user_id=user_id)
         if membership is None or membership.status is not MembershipStatus.active:
+            return None
+        if membership.account.status is not ClientAccountStatus.active:
             return None
         return membership.account, membership
 
@@ -141,11 +150,3 @@ class ClientAccountRepository(BaseRepository):
         membership.blocked_at = now if status is MembershipStatus.blocked else None
         await self.session.flush()
         return membership
-
-    async def count_active_owners(self, account_id: uuid.UUID) -> int:
-        stmt = select(func.count()).where(
-            ClientAccountMembership.account_id == account_id,
-            ClientAccountMembership.role == MembershipRole.account_owner,
-            ClientAccountMembership.status == MembershipStatus.active,
-        )
-        return int(await self.session.scalar(stmt) or 0)

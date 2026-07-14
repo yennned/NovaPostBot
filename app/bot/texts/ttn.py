@@ -6,6 +6,7 @@ import html
 from decimal import Decimal
 
 from app.bot.keyboards.ttn import SIZE_PRESETS
+from app.bot.texts.common import invalid_phone_text
 from app.services.inventory import InventoryItem, InventoryPage
 
 
@@ -140,7 +141,7 @@ def phone_prompt() -> str:
 
 
 def phone_invalid() -> str:
-    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+    return invalid_phone_text()
 
 
 def city_prompt() -> str:
