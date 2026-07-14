@@ -239,7 +239,7 @@ async def _resolve_sender_and_begin(
             account_id=account_id,
             # `account` обязателен вместе с `account_id`: без него `list_inventory`
             # берёт ключ листа от `client`, а это User работника, а не аккаунт →
-            # работник увидел бы чужой (свой) склад вместо складу магазина.
+            # работник увидел бы свой склад вместо склада аккаунта.
             account=account,
         )
     except PermissionDenied as exc:

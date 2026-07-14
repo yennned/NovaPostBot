@@ -109,11 +109,10 @@ class StartService:
             # Не украинский мобильный (напр. иностранная SIM). Вход не блокируем —
             # контакт пришёл от Telegram, он настоящий; но точное сравнение при
             # адопции по телефону такому номеру не сработает, поэтому логируем.
-            logger.warning(
-                "contact_phone_not_normalized",
-                telegram_id=telegram_id,
-                phone_len=len(phone or ""),
-            )
+            # `telegram_id` и сам номер не логируем: это прямые идентификаторы, а
+            # ветка срабатывает на каждом некорректном контакте. Длины хватает, чтобы
+            # отличить иностранный номер от мусора.
+            logger.warning("contact_phone_not_normalized", phone_len=len(phone or ""))
         phone = normalized or phone
         existing = await self.user_store.get_by_telegram_id(telegram_id)
         if existing is not None:

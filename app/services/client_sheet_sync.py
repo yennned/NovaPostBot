@@ -96,7 +96,7 @@ async def sync_client_sheets(
         # `previous_sheet_key` — понятие user-scope (прежнее имя вкладки клиента).
         # Для аккаунта оно не просто бессмысленно, а опасно: `_sync_client_sheets_sync`
         # переименовывает вкладку `previous_sheet_key` → `target_key`, поэтому правка
-        # ПІБ работником увела бы вкладку с его именем в имя общего акаунта. Источник
+        # ПІБ работником увела бы вкладку с его именем в имя общего аккаунта. Источник
         # правды для аккаунта — `account.stock_sheet_key`, он уже в `source_key`.
         previous_sheet_key = None
 

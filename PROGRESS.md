@@ -33,7 +33,7 @@
     транзакции → migrate падает → bot/worker не стартуют. UPDATE переведён на join по
     `client_accounts`. В CI добавлен шаг «Alembic upgrade over legacy data»: пустая
     база такие бэкофиллы не ловит структурно.
-  - `3cb50d8 fix(ttn)` — работник видел свой склад вместо складу акаунта:
+  - `3cb50d8 fix(ttn)` — работник видел свой склад вместо склада аккаунта:
     `_resolve_sender_and_begin` — единственный из 6 call-site'ов, не передававший
     `account=` в `_show_picker`. Рассинхрон пары (account_id, account) компилировался
     молча, тесты не ловили из-за `**kwargs` в моке инвентаря.
@@ -41,7 +41,7 @@
     доступ: `get_context_for_user` смотрел только на статус членства, а
     `ClientAccountStatus.blocked` в живом пути не читался вообще.
   - `abb02d5 fix(sheets)` — правка ПІБ работником могла переименовать вкладку общего
-    складу: `previous_sheet_key` — user-scope, а `target_key` в account-ветке — имя
+    склада: `previous_sheet_key` — user-scope, а `target_key` в account-ветке — имя
     аккаунта. Плюс `account.name or ...` пропускал имя из пробелов.
   - `e4a3bf1 chore` — удалены мёртвые `require_account_resource`, `count_active_owners`.
 - **Дальше:** PR в `main` (в первую очередь ради фикса миграции — прод-деплой на
