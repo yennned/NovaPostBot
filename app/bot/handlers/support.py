@@ -234,7 +234,6 @@ async def client_chat_message(
             return
         notify_managers = result.notify_managers
         thread_id = result.thread.id
-        await state.update_data(support_thread_id=str(thread_id))
 
     # Перечитываем с joinedload: у свежесозданного треда связи (client,
     # assigned_manager) не загружены, а ленивый доступ в async-сессии упал бы.
@@ -270,6 +269,11 @@ async def client_chat_message(
         text=message.text,
     )
     await db_session.commit()
+    # id треда — в стейт только после успешного commit: иначе упавший `post_message`
+    # откатил бы создание, а в FSM остался бы id несуществующего треда — следующее
+    # сообщение выкинуло бы клиента из чата через `thread_unavailable`, потеряв текст.
+    # До commit'а стейт хранит "" → повтор просто создаст тред заново.
+    await state.update_data(support_thread_id=str(thread_id))
     if notify_managers:
         await notifications.notify_support_queued_to_managers(
             db_session, BotNotifier(bot), client_label=client_label
