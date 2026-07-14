@@ -15,7 +15,11 @@ from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import SenderProfileRepository, UserRepository
+from app.db.repositories import (
+    ClientAccountRepository,
+    SenderProfileRepository,
+    UserRepository,
+)
 from app.novaposhta.schemas import City, PriceQuote, Warehouse
 from app.services.inventory import InventoryItem, InventoryPage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -215,6 +219,60 @@ async def test_entry_ok_shows_picker(db_session: AsyncSession, monkeypatch):
     assert state._data["cart"] == {}
     assert state._data["nonce"]
     assert "Створення ТТН" in msg.answers[-1]["text"]
+
+
+def _capture_inventory(monkeypatch, page: InventoryPage) -> dict:
+    """Как `_patch_inventory`, но запоминает kwargs — иначе проброс не проверить."""
+    seen: dict = {}
+
+    async def fake_list_inventory(session, *, client, **kwargs):
+        seen.update(kwargs)
+        seen["client"] = client
+        return page
+
+    monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+    return seen
+
+
+async def _account_ctx(session, client):
+    """Контекст с РЕАЛЬНЫМ аккаунтом: `_require_account_actor` сверяет членство в БД."""
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    account = membership.account
+    return SimpleNamespace(
+        effective_user=client, actor_user=client, account=account, membership=membership
+    ), account
+
+
+async def test_entry_passes_account_to_inventory(db_session: AsyncSession, monkeypatch):
+    # Регрессия: `_resolve_sender_and_begin` передавал в `_show_picker` только
+    # `account_id`, но не `account`. `list_inventory` берёт ключ листа от
+    # `account or client`, поэтому работник видел свой склад вместо складу
+    # магазина. Пара (account_id, account) обязана ехать вместе.
+    client = await _active_client(db_session, 930)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    await _dispatchable_profile(db_session, client, "ФОП", is_default=True)
+    ctx, account = await _account_ctx(db_session, client)
+    seen = _capture_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
+
+    await h.start_create_ttn(FakeMessage(), FakeState(), ctx, db_session)
+
+    assert seen["account"] is account
+    assert seen["account_id"] == account.id
+
+
+async def test_cb_pick_sender_passes_account_to_inventory(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 931)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    profile = await _dispatchable_profile(db_session, client, "ФОП A", is_default=True)
+    ctx, account = await _account_ctx(db_session, client)
+    seen = _capture_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
+
+    await h.cb_pick_sender(FakeCallback(f"ttn:sender:{profile.id}"), FakeState(), ctx, db_session)
+
+    assert seen["account"] is account
+    assert seen["account_id"] == account.id
 
 
 async def _dispatchable_profile(session, client, name, *, is_default):
