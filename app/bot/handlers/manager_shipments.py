@@ -30,8 +30,8 @@ from app.bot.texts.manager_shipments import (
 )
 from app.bot.types import EffectiveContext
 from app.config import get_settings
-from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
-from app.db.models.user import User
+from app.db.models.client_account import ClientAccount
+from app.db.models.enums import ClientAccountStatus, ShipmentStatus, UserRole
 from app.novaposhta.client import NovaPoshtaClient
 from app.services import inventory, manager_shipments
 from app.services.exceptions import ClientServiceError
@@ -53,15 +53,15 @@ def _book_link(book_id: str, title: str) -> str:
     return f'🔗 <a href="https://docs.google.com/spreadsheets/d/{html.escape(book_id)}">{title}</a>'
 
 
-@router.message(F.text == WAREHOUSE_BUTTON)
-async def open_warehouse(
-    message: Message,
-    effective_context: EffectiveContext,
-    db_session: AsyncSession,
-) -> None:
-    """📦 Склад менеджера: посилання на книги + зведення залишків по клієнтах."""
-    if not _is_staff(effective_context):
-        raise SkipHandler()
+async def _warehouse_text(db_session: AsyncSession) -> str:
+    """Текст экрана «📦 Склад»: ссылки на книги + сводка остатков по аккаунтам.
+
+    Сводка идёт по **аккаунтам**, а не по `User`: лист склада принадлежит
+    аккаунту. Раньше выбирались все `role=client`, и каждый работник аккаунта
+    попадал сюда отдельной строкой «лист недоступний» (своего листа у него нет,
+    `users.stock_sheet_key` работника — это его телефон), а его аккаунт при этом
+    дублировался строкой владельца.
+    """
     settings = get_settings()
     lines = ["📦 <b>Склад</b>"]
 
@@ -76,39 +76,53 @@ async def open_warehouse(
     if links:
         lines += ["", *links]
 
-    clients = (
+    accounts = (
         (
             await db_session.execute(
-                select(User)
-                .where(User.role == UserRole.client, User.status == UserStatus.active)
-                .order_by(User.full_name)
+                select(ClientAccount)
+                .where(ClientAccount.status == ClientAccountStatus.active)
+                .order_by(ClientAccount.name)
             )
         )
         .scalars()
         .all()
     )
     lines += ["", "<b>Залишки по клієнтах:</b>"]
-    if not clients:
+    if not accounts:
         lines.append("• активних клієнтів немає")
-    else:
-        total_positions = total_units = 0
-        read_ok = False
-        for client, totals in await inventory.stock_summary(list(clients)):
-            # full_name приходит из Telegram/ввода клиента → экранируем под parse_mode=HTML.
-            label = html.escape(client.full_name or str(client.telegram_id))
-            if totals is None:
-                lines.append(f"• {label} — лист недоступний")
-                continue
-            read_ok = True
-            total_positions += totals.positions
-            total_units += totals.units
-            lines.append(f"• {label} — {totals.positions} поз. / {totals.units} од.")
-        if read_ok:
-            lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
-        else:
-            lines += ["", "⚠️ Залишки тимчасово недоступні (немає доступу до листів)."]
+        return "\n".join(lines)
 
-    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+    total_positions = total_units = 0
+    read_ok = False
+    for account, totals in await inventory.stock_summary(list(accounts)):
+        # name приходит из ПІБ клиента (Telegram/ввод) → экранируем под parse_mode=HTML.
+        label = html.escape(account.name or str(account.id))
+        if totals is None:
+            lines.append(f"• {label} — лист недоступний")
+            continue
+        read_ok = True
+        total_positions += totals.positions
+        total_units += totals.units
+        lines.append(f"• {label} — {totals.positions} поз. / {totals.units} од.")
+    if read_ok:
+        lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
+    else:
+        lines += ["", "⚠️ Залишки тимчасово недоступні (немає доступу до листів)."]
+    return "\n".join(lines)
+
+
+@router.message(F.text == WAREHOUSE_BUTTON)
+async def open_warehouse(
+    message: Message,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+) -> None:
+    """📦 Склад менеджера: посилання на книги + зведення залишків по клієнтах."""
+    if not _is_staff(effective_context):
+        raise SkipHandler()
+    await message.answer(
+        await _warehouse_text(db_session), parse_mode="HTML", disable_web_page_preview=True
+    )
 
 
 @router.callback_query(F.data == "home:warehouse")
@@ -122,53 +136,8 @@ async def open_warehouse_home(
         return
     if not _is_staff(effective_context):
         raise SkipHandler()
-    settings = get_settings()
-    lines = ["📦 <b>Склад</b>"]
-
-    links = [
-        _book_link(book_id, title)
-        for book_id, title in (
-            (settings.sheets_stock_book_id, "Книга «Склад»"),
-            (settings.sheets_intake_book_id, "Книга «Приймання»"),
-        )
-        if book_id
-    ]
-    if links:
-        lines += ["", *links]
-
-    clients = (
-        (
-            await db_session.execute(
-                select(User)
-                .where(User.role == UserRole.client, User.status == UserStatus.active)
-                .order_by(User.full_name)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    lines += ["", "<b>Залишки по клієнтах:</b>"]
-    if not clients:
-        lines.append("• активних клієнтів немає")
-    else:
-        total_positions = total_units = 0
-        read_ok = False
-        for client, totals in await inventory.stock_summary(list(clients)):
-            label = html.escape(client.full_name or str(client.telegram_id))
-            if totals is None:
-                lines.append(f"• {label} — лист недоступний")
-                continue
-            read_ok = True
-            total_positions += totals.positions
-            total_units += totals.units
-            lines.append(f"• {label} — {totals.positions} поз. / {totals.units} од.")
-        if read_ok:
-            lines += ["", f"<b>Разом:</b> {total_positions} поз. / {total_units} од."]
-        else:
-            lines += ["", "⚠️ Залишки тимчасово недоступні (немає доступу до листів)."]
-
     await callback.message.edit_text(
-        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+        await _warehouse_text(db_session), parse_mode="HTML", disable_web_page_preview=True
     )
     await callback.answer()
 
