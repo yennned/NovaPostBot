@@ -140,6 +140,7 @@ async def toggle_notification(
     await AuditRepository(session).log(
         "client_notification_toggled",
         user_id=client.id,
+        account_id=account_id,
         affected_entity=f"user:{client.id}",
         after={key: enabled},
     )
@@ -174,6 +175,7 @@ async def update_self_profile(
         await AuditRepository(session).log(
             "client_self_profile_updated",
             user_id=client.id,
+            account_id=account_id,
             affected_entity=f"user:{client.id}",
             before=before,
             after={"full_name": client.full_name, "phone": client.phone},

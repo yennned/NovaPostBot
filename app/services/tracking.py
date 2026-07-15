@@ -136,6 +136,7 @@ async def apply_tracking_status(
 
     await AuditRepository(session).log(
         "shipment_tracking_status_updated",
+        account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before={"status": before_status.value if before_status else None},
         after={

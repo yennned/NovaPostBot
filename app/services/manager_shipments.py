@@ -184,6 +184,7 @@ async def confirm_shipment(
     await AuditRepository(session).log(
         "shipment_confirmed_by_staff",
         user_id=actor.id,
+        account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
         after={"status": shipment.status.value},
@@ -231,6 +232,7 @@ async def cancel_shipment(
     await AuditRepository(session).log(
         "shipment_cancelled_by_staff",
         user_id=actor.id,
+        account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
         after={"status": shipment.status.value},
@@ -293,6 +295,7 @@ async def mark_nonstandard(
     await AuditRepository(session).log(
         "shipment_marked_nonstandard_by_staff",
         user_id=actor.id,
+        account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
         after={"status": shipment.status.value},

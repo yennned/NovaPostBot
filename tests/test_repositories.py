@@ -14,6 +14,7 @@ from app.db.models.enums import (
 )
 from app.db.repositories import (
     AuditRepository,
+    ClientAccountRepository,
     NotificationSettingRepository,
     SenderProfileRepository,
     ShipmentItemDraft,
@@ -117,6 +118,30 @@ async def test_audit_log_append(db_session: AsyncSession):
     assert entry.before == {"status": "pending"}
     assert entry.after == {"status": "active"}
     assert entry.created_at is not None
+
+
+async def test_audit_log_never_infers_account_from_actor(db_session: AsyncSession):
+    """`account_id` — субъект действия, а не аккаунт актора.
+
+    Раньше `log()` догружал членство актора и писал его аккаунт. Правило было
+    инвертировано: `client_approved` менеджера уезжал в NULL (у менеджера нет
+    членства), а `duty_started` клиента получал клиентский аккаунт. Ни один
+    вызывающий не должен получать аккаунт «сам собой».
+    """
+    users = UserRepository(db_session)
+    audit = AuditRepository(db_session)
+    # У клиента членство есть — ровно тот случай, где старый код догружал аккаунт.
+    actor = await users.create(telegram_id=557, role=UserRole.client)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=actor.id)
+    assert membership is not None, "клиенту заводится аккаунт при создании"
+
+    implicit = await audit.log("duty_started", user_id=actor.id)
+    explicit = await audit.log(
+        "client_approved", user_id=actor.id, account_id=membership.account_id
+    )
+
+    assert implicit.account_id is None
+    assert explicit.account_id == membership.account_id
 
 
 async def test_notification_setting_repository_upserts(db_session: AsyncSession):

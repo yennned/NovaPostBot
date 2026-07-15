@@ -130,6 +130,7 @@ async def receive_returned_shipment(
     await AuditRepository(session).log(
         "shipment_return_received",
         user_id=actor_user_id,
+        account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
         after={

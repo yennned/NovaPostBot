@@ -246,6 +246,7 @@ async def create_profile(
     await AuditRepository(session).log(
         "sender_profile_created",
         user_id=actor.id,
+        account_id=profile.account_id,
         affected_entity=f"sender_profile:{profile.id}",
         after={
             "client_id": str(client_id),
@@ -303,6 +304,7 @@ async def update_profile(
         await AuditRepository(session).log(
             "sender_profile_updated",
             user_id=actor.id,
+            account_id=profile.account_id,
             affected_entity=f"sender_profile:{profile.id}",
             after={k: ("***" if k == "np_api_key" else v) for k, v in changes.items()},
         )
@@ -337,6 +339,7 @@ async def set_default(
     await AuditRepository(session).log(
         "sender_profile_set_default",
         user_id=actor.id,
+        account_id=profile.account_id,
         affected_entity=f"sender_profile:{profile.id}",
     )
     return _view(profile)
