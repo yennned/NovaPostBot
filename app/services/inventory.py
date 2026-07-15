@@ -46,8 +46,13 @@ def stock_sheet_key(account: ClientAccount) -> str:
     для данных, заведённых до миграции ключей.
 
     Лист принадлежит аккаунту, а не человеку: у работника своего листа нет.
+
+    `.strip()`, а не голый `or`: имя из пробелов — непустая строка, и она прошла бы
+    мимо фолбэка. Синк (`client_sheet_sync`) на таком имени берёт `account.id`, и
+    расхождение читателя с синком означало бы чтение несуществующей вкладки, то
+    есть молча пустой склад.
     """
-    return account.stock_sheet_key or account.name or str(account.id)
+    return account.stock_sheet_key or account.name.strip() or str(account.id)
 
 
 def stock_view_book_url(account: ClientAccount) -> str | None:

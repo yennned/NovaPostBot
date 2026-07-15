@@ -62,10 +62,9 @@ class ClientAccountRepository(BaseRepository):
     ) -> tuple[ClientAccount, ClientAccountMembership]:
         account_name = name or owner.full_name or owner.phone or f"Клієнт {owner.id}"
         account = ClientAccount(
-            # Keep the legacy identity stable for the first rollout: the owner
-            # UUID is also the account UUID.  New account-scoped code never
-            # relies on this coincidence, but it lets old read paths coexist
-            # while the migration is rolled out.
+            # UUID аккаунта намеренно совпадает с UUID владельца — так legacy-
+            # идентичность пережила первый rollout. Новый код на это совпадение
+            # не опирается, оно осталось только ради старых данных.
             id=account_id or owner.id,
             name=account_name,
             # `active` даже для ещё `pending` владельца — в отличие от карты в
