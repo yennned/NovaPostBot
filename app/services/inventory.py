@@ -41,9 +41,15 @@ class InventoryPage:
 def stock_sheet_key(client: User | ClientAccount) -> str:
     """Ключ листа склада.
 
-    Предпочитаем персистентное поле `users.stock_sheet_key`, чтобы смена ПІБ не
-    ломала связь с Sheets между чтением и следующей синхронизацией. Fallback —
-    старое поведение для обратной совместимости и данных до миграции.
+    Предпочитаем персистентное поле `stock_sheet_key`, чтобы смена ПІБ не ломала
+    связь с Sheets между чтением и следующей синхронизацией. Fallback — старое
+    поведение для обратной совместимости и данных до миграции.
+
+    User-ветка — легаси: лист склада принадлежит аккаунту, а не человеку, и у
+    работника аккаунта своего листа нет. Она доживает только на путях, где
+    `account` ещё объявлен опциональным (`account or client`); снести её вместе с
+    колонками `users.stock_sheet_key`/`stock_view_book_id` можно после того, как
+    инвариант «аккаунт есть всегда» станет типом, а не соглашением.
     """
 
     if isinstance(client, ClientAccount):
@@ -158,33 +164,40 @@ class StockTotals:
     units: int
 
 
-async def stock_totals(client: User, *, reader: StockSource | None = None) -> StockTotals | None:
-    """Свод по листу склада клиента (позиции/единицы). `None` — лист недоступен.
+async def stock_totals(
+    account: ClientAccount, *, reader: StockSource | None = None
+) -> StockTotals | None:
+    """Свод по листу склада аккаунта (позиции/единицы). `None` — лист недоступен.
+
+    Именно аккаунта, а не пользователя: лист склада принадлежит аккаунту, а не
+    конкретному человеку. Работник аккаунта своего листа не имеет — раньше
+    сводка звалась по `User` и показывала каждого работника отдельной строкой
+    «лист недоступний».
 
     Чтение Sheets синхронно (gspread) → уводим в поток, чтобы не блокировать луп.
-    Ошибку одного клиента (нет листа, блип НП/Sheets) глотаем — сводка по
+    Ошибку одного аккаунта (нет листа, блип НП/Sheets) глотаем — сводка по
     остальным не должна падать целиком.
     """
     source = reader or build_stock_source()
     try:
-        rows = await asyncio.to_thread(source.read_stock, stock_sheet_key(client))
+        rows = await asyncio.to_thread(source.read_stock, stock_sheet_key(account))
     except Exception:
-        # Устойчивость сводки важнее: лист одного клиента может отсутствовать или
+        # Устойчивость сводки важнее: лист одного аккаунта может отсутствовать или
         # Sheets/НП блипнуть — это не должно валить сводку по остальным.
-        logger.warning("inventory.stock_totals_failed", client_id=str(client.id), exc_info=True)
+        logger.warning("inventory.stock_totals_failed", account_id=str(account.id), exc_info=True)
         return None
     return StockTotals(positions=len(rows), units=sum(row.quantity for row in rows))
 
 
 async def stock_summary(
-    clients: list[User], *, reader: StockSource | None = None
-) -> list[tuple[User, StockTotals | None]]:
-    """Свод склада по клиентам — лист на клиента (для экрана менеджера «📦 Склад»).
+    accounts: list[ClientAccount], *, reader: StockSource | None = None
+) -> list[tuple[ClientAccount, StockTotals | None]]:
+    """Свод склада по аккаунтам — лист на аккаунт (для экрана менеджера «📦 Склад»).
 
     Читаем последовательно (не `asyncio.gather`): один `SheetsClient`/gspread-сессия
-    не рассчитана на параллельные потоки, а активных клиентов немного. Если число
-    клиентов сильно вырастет — заводить отдельный источник на поток + ограничитель
+    не рассчитана на параллельные потоки, а активных аккаунтов немного. Если число
+    аккаунтов сильно вырастет — заводить отдельный источник на поток + ограничитель
     конкуренции, а не делить одну сессию.
     """
     source = reader or build_stock_source()
-    return [(client, await stock_totals(client, reader=source)) for client in clients]
+    return [(account, await stock_totals(account, reader=source)) for account in accounts]
