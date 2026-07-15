@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
-
 from app.db.models.audit import AuditLog
-from app.db.models.client_account import ClientAccountMembership
 from app.db.repositories.base import BaseRepository
 
 
@@ -23,12 +20,19 @@ class AuditRepository(BaseRepository):
         after: dict | None = None,
         notes: str | None = None,
     ) -> AuditLog:
-        if account_id is None and user_id is not None:
-            account_id = await self.session.scalar(
-                select(ClientAccountMembership.account_id).where(
-                    ClientAccountMembership.user_id == user_id
-                )
-            )
+        """Записать действие в аудит.
+
+        `user_id` — **актор** (кто сделал). `account_id` — **субъект**: чей
+        клиентский аккаунт затронут действием. Это разные вещи, и выводить одно
+        из другого нельзя: менеджер подтверждает отправление клиента (актор —
+        менеджер, субъект — аккаунт клиента), а дежурство менеджера не касается
+        клиентских аккаунтов вовсе.
+
+        Поэтому `account_id` проставляет вызывающий и только явно. У действия нет
+        аккаунта-субъекта (дежурство, персонал, bootstrap, dev) — остаётся `None`.
+        Раньше метод догружал членство актора и писал его аккаунт: staff-действия
+        о клиенте получали `NULL`, а дежурство — чужой аккаунт.
+        """
         entry = AuditLog(
             action=action,
             user_id=user_id,

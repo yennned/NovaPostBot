@@ -65,6 +65,26 @@ async def test_approve_pending_client(db_session: AsyncSession):
     assert "client_approved" in await _audit_actions(db_session)
 
 
+async def test_approve_audits_client_account_not_actor(db_session: AsyncSession):
+    """Субъект аудита — аккаунт клиента, а не актора.
+
+    Регрессия: `log()` выводил `account_id` из членства актора, поэтому у
+    менеджера (членства нет) все `client_approved` уезжали в NULL — то есть поле
+    пустовало ровно там, где оно и нужно.
+    """
+    actor = await _manager(db_session)
+    client = await _client(db_session)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    assert membership is not None
+
+    await clients.approve_client(db_session, actor=actor, client_id=client.id)
+
+    entry = await db_session.scalar(select(AuditLog).where(AuditLog.action == "client_approved"))
+    assert entry is not None
+    assert entry.user_id == actor.id, "актор — менеджер"
+    assert entry.account_id == membership.account_id, "субъект — аккаунт клиента"
+
+
 async def test_approve_non_pending_raises(db_session: AsyncSession):
     actor = await _manager(db_session)
     active = await _client(db_session, telegram_id=101, status=UserStatus.active)

@@ -145,6 +145,8 @@ async def _transition(
     await AuditRepository(session).log(
         action,
         user_id=actor.id,
+        # Субъект — аккаунт клиента, которого менеджер трогает, а не аккаунт актора.
+        account_id=membership.account_id if membership is not None else None,
         affected_entity=f"user:{user.id}",
         before=before,
         after={"status": to},
@@ -306,9 +308,13 @@ async def update_client_profile(
         changed = True
     if changed:
         await session.flush()
+        # Субъект — аккаунт клиента, чей профиль правят. Актор (владелец) здесь ни
+        # при чём, поэтому членство тянем по `user`, а не по `actor`.
+        membership = await ClientAccountRepository(session).get_membership(user_id=user.id)
         await AuditRepository(session).log(
             "client_profile_updated",
             user_id=actor.id,
+            account_id=membership.account_id if membership is not None else None,
             affected_entity=f"user:{user.id}",
             before=before,
             after={"full_name": user.full_name, "phone": user.phone},
