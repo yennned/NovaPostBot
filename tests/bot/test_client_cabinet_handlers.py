@@ -23,10 +23,10 @@ from app.bot.handlers.client_cabinet import (
     receive_new_profile_sender_name,
 )
 from app.bot.states import SenderProfileCreateState
-from app.bot.types import EffectiveContext
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.config import Settings
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
-from app.db.repositories import SenderProfileRepository, UserRepository
+from app.db.repositories import ClientAccountRepository, SenderProfileRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
 from app.services.client_settings import ClientSettingsView, NotificationSettingView
 from app.services.inventory import InventoryItem, InventoryPage
@@ -40,15 +40,27 @@ from app.services.stats import ClientStatsSnapshot, TopSkuStat
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _ctx(client) -> EffectiveContext:
-    """Настоящий EffectiveContext: у SimpleNamespace нет `account`/`account_context`,
-    и хендлеры держались только на `getattr(..., None)`. User остаётся фейковым."""
-    return EffectiveContext(
+async def _ctx(session, client) -> EffectiveContext:
+    """Настоящий EffectiveContext — как его собирает мидлварь.
+
+    Включая `account_context`: у клиента аккаунт есть всегда, и склад/ТТН
+    account-scoped. Контекст без аккаунта — сломанное состояние, которое сервисы
+    теперь отвергают (`shipments.require_client_account`), поэтому и в тестах его
+    строить нельзя: тест на несуществующем состоянии ничего не доказывает.
+    """
+    account_scope = await ClientAccountRepository(session).get_context_for_user(client.id)
+    context = EffectiveContext(
         actor_user=client,
         effective_user=client,
         effective_role=UserRole.client,
         is_dev=False,
     )
+    if account_scope is not None:
+        account, membership = account_scope
+        context.account_context = ClientAccountContext(
+            user=client, account=account, membership=membership
+        )
+    return context
 
 
 class FakeState:
@@ -171,7 +183,7 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
     await open_products(
         msg,
         FakeState(),
-        _ctx(client),
+        await _ctx(db_session, client),
         db_session,
     )
 
@@ -206,7 +218,7 @@ async def test_open_shipments_renders_list(db_session: AsyncSession, monkeypatch
     await open_shipments(
         msg,
         FakeState(),
-        _ctx(client),
+        await _ctx(db_session, client),
         db_session,
     )
 
@@ -254,7 +266,7 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_shipment_card", fake_get_shipment_card)
     await cb_shipment_card(
         cb,
-        _ctx(client),
+        await _ctx(db_session, client),
         db_session,
         FakeState(),
     )
@@ -275,7 +287,7 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
     monkeypatch.setattr("app.bot.handlers.client_cabinet.cancel_shipment", fake_cancel_shipment)
     await cb_cancel_shipment(
         cb,
-        _ctx(client),
+        await _ctx(db_session, client),
         db_session,
         object(),  # np_client (фейк — реальная отмена замокана)
         FakeState(),
@@ -301,7 +313,7 @@ async def test_open_settings_renders_view(db_session: AsyncSession, monkeypatch)
     await open_settings(
         msg,
         FakeState(),
-        _ctx(client),
+        await _ctx(db_session, client),
         db_session,
     )
 
@@ -323,7 +335,7 @@ async def test_cb_settings_toggle_updates_view(db_session: AsyncSession, monkeyp
     )
     await cb_settings_toggle(
         cb,
-        _ctx(client),
+        await _ctx(db_session, client),
         db_session,
         FakeState(),
     )
@@ -352,7 +364,7 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
         )
 
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_client_stats", fake_get_client_stats)
-    await cb_stats(cb, _ctx(client), db_session, FakeState())
+    await cb_stats(cb, await _ctx(db_session, client), db_session, FakeState())
 
     assert cb.message.edits
     assert "Статистика" in cb.message.edits[0]["text"]
@@ -382,7 +394,7 @@ _VALID_KEY_ROUTES = {
 
 async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=710)
-    ctx = _ctx(client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
 
     await receive_new_profile_name(FakeMessage("ФОП Тест"), state)
@@ -407,7 +419,7 @@ async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession
 
 async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=711)
-    ctx = _ctx(client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
     await receive_new_profile_name(FakeMessage("ФОП Х"), state)
     await receive_new_profile_key(FakeMessage("bad-key"), state)
@@ -432,7 +444,7 @@ async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
 async def test_add_fop_wizard_np_unavailable_keeps_phone_step(db_session: AsyncSession):
     """НП недоступна (5xx) при проверке ключа → черновик цел, шаг телефона держим."""
     client = await _active_client(db_session, telegram_id=712)
-    ctx = _ctx(client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
     await receive_new_profile_name(FakeMessage("ФОП Down"), state)
     await receive_new_profile_key(FakeMessage("np-secret-key"), state)
@@ -454,7 +466,7 @@ async def test_calendar_range_flow_passes_date_from_to(db_session: AsyncSession,
     from datetime import date
 
     client = await _active_client(db_session, telegram_id=730)
-    ctx = _ctx(client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
     captured: dict = {}
 

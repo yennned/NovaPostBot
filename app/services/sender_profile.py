@@ -310,10 +310,14 @@ async def update_profile(
         )
         if "name" in changes:
             client = await UserRepository(session).get_by_id(profile.client_id)
-            if client is not None:
+            # `profile.account_id` NOT NULL → аккаунт у ФОП есть всегда; синк
+            # account-scoped, поэтому тянем именно его, а не полагаемся на клиента.
+            account = await ClientAccountRepository(session).get_by_id(profile.account_id)
+            if client is not None and account is not None:
                 await best_effort_sync(
                     session,
                     client=client,
+                    account=account,
                     log_key="sender_profile_sheet_sync_failed",
                     profile_id=str(profile.id),
                 )

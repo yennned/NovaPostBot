@@ -258,7 +258,7 @@ async def _notification_enabled(
     key: str,
 ) -> bool:
     default = bool(DEFAULT_NOTIFICATION_SETTINGS.get(key, True))
-    enabled = bool((user.permissions or {}).get(key, default))
+    enabled = bool(user.permissions.get(key, default))
     row = await NotificationSettingRepository(session).get_by_user_and_key(user.id, key)
     if row is not None:
         enabled = row.enabled
@@ -294,32 +294,33 @@ async def notify_shipment_status_changed(
     session: AsyncSession,
     notifier: Notifier,
     *,
-    client: User,
     shipment: Shipment,
 ) -> None:
+    """Уведомить активную команду аккаунта об изменении статуса ТТН.
+
+    Получатели — участники аккаунта отправления. Отдельного `client` тут нет и
+    быть не может: `shipments.account_id` NOT NULL, поэтому «клиент без аккаунта»
+    (когда уведомляли одного `client.telegram_id`) — недостижимое состояние.
+    """
     recipients: list[int] = []
-    if shipment.account_id is None:
-        if await _notification_enabled(session, user=client, key=NOTIFY_SHIPMENT_STATUS):
-            recipients.append(client.telegram_id)
-    else:
-        members = await session.scalars(
-            select(User)
-            .join(ClientAccountMembership, ClientAccountMembership.user_id == User.id)
-            .where(
-                ClientAccountMembership.account_id == shipment.account_id,
-                ClientAccountMembership.status == MembershipStatus.active,
-                User.status == UserStatus.active,
-            )
+    members = await session.scalars(
+        select(User)
+        .join(ClientAccountMembership, ClientAccountMembership.user_id == User.id)
+        .where(
+            ClientAccountMembership.account_id == shipment.account_id,
+            ClientAccountMembership.status == MembershipStatus.active,
+            User.status == UserStatus.active,
         )
-        for member in members:
-            own = shipment.created_by_user_id == member.id
-            all_account = await _notification_enabled(
-                session, user=member, key=NOTIFY_ALL_ACCOUNT_SHIPMENTS
-            )
-            if (own or all_account) and await _notification_enabled(
-                session, user=member, key=NOTIFY_SHIPMENT_STATUS
-            ):
-                recipients.append(member.telegram_id)
+    )
+    for member in members:
+        own = shipment.created_by_user_id == member.id
+        all_account = await _notification_enabled(
+            session, user=member, key=NOTIFY_ALL_ACCOUNT_SHIPMENTS
+        )
+        if (own or all_account) and await _notification_enabled(
+            session, user=member, key=NOTIFY_SHIPMENT_STATUS
+        ):
+            recipients.append(member.telegram_id)
     await _send_many(notifier, recipients, shipment_status_text(shipment))
 
 

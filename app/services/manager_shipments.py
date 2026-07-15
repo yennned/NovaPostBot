@@ -311,14 +311,9 @@ async def notify_client_about_status(
     shipment_id: uuid.UUID,
 ) -> None:
     shipment = await ShipmentRepository(session).get_by_id(shipment_id)
-    if shipment is None or shipment.client is None:
+    if shipment is None:
         raise ShipmentNotFound(str(shipment_id))
-    await notifications.notify_shipment_status_changed(
-        session,
-        notifier,
-        client=shipment.client,
-        shipment=shipment,
-    )
+    await notifications.notify_shipment_status_changed(session, notifier, shipment=shipment)
 
 
 async def notify_client_about_nonstandard(
@@ -328,7 +323,7 @@ async def notify_client_about_nonstandard(
     shipment_id: uuid.UUID,
 ) -> None:
     shipment = await ShipmentRepository(session).get_by_id(shipment_id)
-    if shipment is None or shipment.client is None:
+    if shipment is None:
         raise ShipmentNotFound(str(shipment_id))
     note = {
         ShipmentStatus.lost: "Менеджер позначив відправлення як втрачене.",

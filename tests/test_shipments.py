@@ -18,6 +18,8 @@ from app.services.exceptions import ShipmentActionForbidden
 from app.sheets.inventory import StockRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import account_of
+
 
 async def _active_client(session: AsyncSession, telegram_id: int = 100):
     return await UserRepository(session).create(
@@ -179,6 +181,7 @@ async def test_stats_snapshot_aggregates_by_status(db_session: AsyncSession, mon
     snapshot = await stats.get_client_stats(
         db_session,
         client=client,
+        account=await account_of(db_session, client),
         period="today",
         reader=FakeReader(),
     )

@@ -53,7 +53,7 @@ class SupportThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     client: Mapped[User] = relationship(foreign_keys=[client_id])
-    account: Mapped[ClientAccount | None] = relationship()
+    account: Mapped[ClientAccount] = relationship()
     assigned_manager: Mapped[User | None] = relationship(foreign_keys=[assigned_manager_id])
     shipment: Mapped[Shipment | None] = relationship()
     messages: Mapped[list[SupportMessage]] = relationship(

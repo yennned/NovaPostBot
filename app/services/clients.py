@@ -294,7 +294,6 @@ async def update_client_profile(
 
     before = {"full_name": user.full_name, "phone": user.phone}
     changed = False
-    previous_sheet_key = user.stock_sheet_key
     if full_name is not None and full_name != user.full_name:
         user.full_name = full_name
         changed = True
@@ -319,12 +318,12 @@ async def update_client_profile(
             before=before,
             after={"full_name": user.full_name, "phone": user.phone},
         )
-        if full_name is not None:
+        if full_name is not None and membership is not None:
             await best_effort_sync(
                 session,
                 client=user,
+                account=membership.account,
                 log_key="client_profile_sheet_sync_failed",
-                previous_sheet_key=previous_sheet_key,
                 user_id=str(user.id),
             )
     return await _card(session, user)

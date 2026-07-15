@@ -33,4 +33,4 @@ class LowStockAlert(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=True
     )
 
-    account: Mapped[ClientAccount | None] = relationship()
+    account: Mapped[ClientAccount] = relationship()

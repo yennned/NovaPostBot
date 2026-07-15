@@ -163,7 +163,7 @@ async def _show_inventory(
     )
     await state.update_data(product_categories=page.categories)
     await target.answer(
-        products_text(page, sheet_url=stock_view_book_url(_account(context) or client)),
+        products_text(page, sheet_url=stock_view_book_url(_account(context))),
         reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -208,7 +208,7 @@ async def _edit_inventory(
     )
     await state.update_data(product_categories=page.categories)
     await message.edit_text(
-        products_text(page, sheet_url=stock_view_book_url(_account(context) or client)),
+        products_text(page, sheet_url=stock_view_book_url(_account(context))),
         reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -342,7 +342,7 @@ async def _edit_inventory_screen(
     return await edit_stored_screen(
         bot,
         state,
-        text=products_text(page, sheet_url=stock_view_book_url(_account(context) or client)),
+        text=products_text(page, sheet_url=stock_view_book_url(_account(context))),
         reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
         disable_web_page_preview=True,

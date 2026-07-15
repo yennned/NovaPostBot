@@ -64,7 +64,7 @@ class SenderProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     client: Mapped[User] = relationship(back_populates="sender_profiles")
-    account: Mapped[ClientAccount | None] = relationship()
+    account: Mapped[ClientAccount] = relationship()
 
     def __repr__(self) -> str:  # pragma: no cover - отладочное представление
         return f"<SenderProfile id={self.id!s} client={self.client_id!s} name={self.name!r}>"

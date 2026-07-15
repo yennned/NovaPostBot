@@ -30,6 +30,8 @@ from app.services.exceptions import (
 from app.sheets.inventory import StockRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import account_of
+
 
 class _FakeReader:
     def read_stock(self, client_key: str):
@@ -118,6 +120,8 @@ async def _validated_profile(session: AsyncSession, client):
 async def _create(session, client, np_client, *, items=None, notifier=None, **over):
     kwargs = {
         "client": client,
+        # Аккаунт есть у каждого клиента — как в проде (мидлварь отдаёт его хендлеру).
+        "account": await account_of(session, client),
         "items": items if items is not None else [("COF-1", 3)],
         "recipient_kind": "person",
         "recipient_name": "Іван Петренко",

@@ -49,6 +49,6 @@ class StockMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         foreign_keys=[client_id],
         back_populates="stock_movements",
     )
-    account: Mapped[ClientAccount | None] = relationship()
+    account: Mapped[ClientAccount] = relationship()
     actor_user: Mapped[User | None] = relationship(foreign_keys=[actor_user_id])
     shipment: Mapped[Shipment | None] = relationship(back_populates="stock_movements")

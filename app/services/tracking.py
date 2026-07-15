@@ -148,12 +148,7 @@ async def apply_tracking_status(
 
     pushed = False
     if notifier is not None:
-        await notifications.notify_shipment_status_changed(
-            session,
-            notifier,
-            client=shipment.client,
-            shipment=shipment,
-        )
+        await notifications.notify_shipment_status_changed(session, notifier, shipment=shipment)
         pushed = True
         if target_status in NONSTANDARD_STATUSES:
             await notifications.notify_nonstandard_shipment(
@@ -178,7 +173,7 @@ async def _apply_dispatch_stock(
 
     await run_on_sheets_executor(
         (mutator or build_stock_source()).apply_deltas,
-        stock_sheet_key(shipment.account or shipment.client),
+        stock_sheet_key(shipment.account),
         [
             StockDelta(
                 sku=item.sku,

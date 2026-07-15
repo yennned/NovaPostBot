@@ -57,10 +57,9 @@ async def test_employee_does_not_get_a_phantom_warehouse_row(db_session: AsyncSe
         db_session, user=employee, telegram_id=8101, full_name="Працівник"
     )
     await db_session.flush()
-    # Ключ работника — его телефон: листа с таким именем не существует.
-    assert employee.stock_sheet_key == "+380990000101" or employee.stock_sheet_key.endswith(
-        "0990000101"
-    )
+    # У работника нет и не может быть своего ключа склада: колонка снесена, склад —
+    # свойство аккаунта. Раньше ключом был его телефон, отсюда и брался фантом.
+    assert not hasattr(employee, "stock_sheet_key")
 
     # Зовём НАСТОЯЩИЙ билдер экрана, а не копию его запроса: иначе откат хендлера
     # на выборку по `User` тест бы не заметил. Фейкается только адаптер Sheets.

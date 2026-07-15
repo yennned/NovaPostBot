@@ -10,6 +10,8 @@ DB-регрессия на работников (они не должны дав
 
 from __future__ import annotations
 
+import uuid
+
 from app.db.models.client_account import ClientAccount
 from app.services import inventory
 from app.services.inventory import StockTotals
@@ -62,6 +64,22 @@ async def test_stock_summary_pairs_accounts_with_totals() -> None:
     assert [a.name for a, _ in summary] == ["Аліса", "Боб"]
     assert summary[0][1] == StockTotals(positions=1, units=4)
     assert summary[1][1] is None  # недоступный лист → None, сводка не падает
+
+
+def test_stock_sheet_key_whitespace_name_falls_back_to_id() -> None:
+    """Читатель и синк должны сходиться на имени из пробелов.
+
+    Синк на таком имени берёт `account.id` (см. `test_client_sheet_sync`), а
+    голый `or` пропустил бы «   » как непустую строку — читатель полез бы во
+    вкладку, которой нет, и склад молча стал бы пустым.
+    """
+    account = ClientAccount(name="   ", stock_sheet_key=None)
+    account.id = uuid.uuid4()
+    assert inventory.stock_sheet_key(account) == str(account.id)
+
+    # Обычное имя фолбэком не портится.
+    named = ClientAccount(name="Магазин", stock_sheet_key=None)
+    assert inventory.stock_sheet_key(named) == "Магазин"
 
 
 async def test_stock_totals_reads_account_key_not_owner_name() -> None:

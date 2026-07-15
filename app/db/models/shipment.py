@@ -84,7 +84,7 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     fee_free: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
     client: Mapped[User] = relationship(foreign_keys=[client_id])
-    account: Mapped[ClientAccount | None] = relationship()
+    account: Mapped[ClientAccount] = relationship()
     created_by_user: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
     sender_profile: Mapped[SenderProfile | None] = relationship()
     items: Mapped[list[ShipmentItem]] = relationship(

@@ -96,7 +96,7 @@ async def receive_returned_shipment(
         )
     await run_on_sheets_executor(
         (mutator or build_stock_source()).apply_deltas,
-        stock_sheet_key(shipment.account or shipment.client),
+        stock_sheet_key(shipment.account),
         deltas,
     )
 
