@@ -32,8 +32,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Телефон появляется после request_contact → nullable до этого момента.
     phone: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    stock_sheet_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    stock_view_book_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="user_role"),

@@ -104,3 +104,19 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         await session.close()
         await trans.rollback()
         await conn.close()
+
+
+async def account_of(session: AsyncSession, client):
+    """Аккаунт клиента — так же, как его отдаёт мидлварь хендлерам.
+
+    Каждому `role=client` аккаунт заводится при создании, а склад/ТТН/статистика
+    account-scoped. Раньше тесты звали эти сервисы без аккаунта и тем держали
+    легаси-путь «клиент без аккаунта» живым; теперь путь запрещён гейтом
+    `shipments.require_client_account`, и тесты обязаны передавать аккаунт —
+    ровно как прод.
+    """
+    from app.db.repositories import ClientAccountRepository
+
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    assert membership is not None, f"у клиента {client.id} нет аккаунта — сломанное состояние"
+    return membership.account

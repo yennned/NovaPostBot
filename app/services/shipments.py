@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.client_account import ClientAccount
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.models.shipment import Shipment, ShipmentItem
 from app.db.models.user import User
@@ -89,6 +90,22 @@ def _require_active_client(client: User) -> None:
         raise PermissionDenied("кабінет доступний тільки клієнту")
     if client.status is not UserStatus.active:
         raise PermissionDenied("кабінет клієнта доступний після підтвердження")
+
+
+def require_client_account(client: User, account: ClientAccount | None) -> ClientAccount:
+    """Гейт клиентских account-scoped данных: проверяет пользователя И аккаунт.
+
+    Проверки только пользователя не хватало. `clients._transition` при блокировке
+    гасит `account.status` и статус ВЛАДЕЛЬЦА, а статус работника остаётся
+    `active` — поэтому `_require_active_client` работника пропускал, мидлварь не
+    отдавала контекст неактивного аккаунта (`account=None`), и человек видел
+    лживое «склад порожній» вместо «акаунт заблоковано». Заодно этот гейт и делает
+    аккаунт гарантированным для складских путей.
+    """
+    _require_active_client(client)
+    if account is None:
+        raise PermissionDenied("клієнтський акаунт заблоковано або недоступний")
+    return account
 
 
 def statuses_for_bucket(bucket: str) -> set[ShipmentStatus]:

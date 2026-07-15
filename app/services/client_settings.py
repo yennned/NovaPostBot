@@ -93,7 +93,7 @@ async def _notification_payload(session: AsyncSession, user: User) -> dict[str, 
     # Backward-compat: если тумблер ещё не переехал в `notification_settings`,
     # читаем legacy-значение из `users.permissions`.
     payload = {
-        key: bool((user.permissions or {}).get(key, default))
+        key: bool(user.permissions.get(key, default))
         for key, default in DEFAULT_NOTIFICATION_SETTINGS.items()
     }
     repo = NotificationSettingRepository(session)
@@ -160,7 +160,6 @@ async def update_self_profile(
     repo = UserRepository(session)
     before = {"full_name": client.full_name, "phone": client.phone}
     changed = False
-    previous_sheet_key = client.stock_sheet_key
     if full_name is not None and full_name != client.full_name:
         client.full_name = full_name
         changed = True
@@ -186,7 +185,6 @@ async def update_self_profile(
                 client=client,
                 account=account,
                 log_key="client_self_profile_sheet_sync_failed",
-                previous_sheet_key=previous_sheet_key,
                 user_id=str(client.id),
             )
     return await get_client_settings(session, client=client, account_id=account_id)

@@ -60,20 +60,24 @@ class ClientAccountRepository(BaseRepository):
         stock_sheet_key: str | None = None,
         stock_view_book_id: str | None = None,
     ) -> tuple[ClientAccount, ClientAccountMembership]:
+        account_name = name or owner.full_name or owner.phone or f"Клієнт {owner.id}"
         account = ClientAccount(
             # Keep the legacy identity stable for the first rollout: the owner
             # UUID is also the account UUID.  New account-scoped code never
             # relies on this coincidence, but it lets old read paths coexist
             # while the migration is rolled out.
             id=account_id or owner.id,
-            name=name or owner.full_name or owner.phone or f"Клієнт {owner.id}",
+            name=account_name,
             # `active` даже для ещё `pending` владельца — в отличие от карты в
             # `clients._transition`, где pending гасит акаунт. Расхождение
             # осознанное: у новорождённого акаунта нет команды, а сам владелец
             # заперт `require_account_member` по `user.status`.
             status=ClientAccountStatus.active,
-            stock_sheet_key=stock_sheet_key or owner.stock_sheet_key,
-            stock_view_book_id=stock_view_book_id or owner.stock_view_book_id,
+            # Ключ листа сеем из имени аккаунта (раньше — из `users.stock_sheet_key`,
+            # которого больше нет). Совпадает со старым результатом: та же цепочка
+            # `full_name → phone`, только без промежуточной копии на пользователе.
+            stock_sheet_key=stock_sheet_key or account_name,
+            stock_view_book_id=stock_view_book_id,
         )
         self.session.add(account)
         await self.session.flush()

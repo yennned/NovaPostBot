@@ -38,33 +38,26 @@ class InventoryPage:
     categories: list[str]
 
 
-def stock_sheet_key(client: User | ClientAccount) -> str:
-    """Ключ листа склада.
+def stock_sheet_key(account: ClientAccount) -> str:
+    """Ключ листа склада аккаунта.
 
-    Предпочитаем персистентное поле `stock_sheet_key`, чтобы смена ПІБ не ломала
-    связь с Sheets между чтением и следующей синхронизацией. Fallback — старое
-    поведение для обратной совместимости и данных до миграции.
+    Предпочитаем персистентное поле `stock_sheet_key`, чтобы переименование не
+    ломало связь с Sheets между чтением и следующей синхронизацией. Fallback —
+    для данных, заведённых до миграции ключей.
 
-    User-ветка — легаси: лист склада принадлежит аккаунту, а не человеку, и у
-    работника аккаунта своего листа нет. Она доживает только на путях, где
-    `account` ещё объявлен опциональным (`account or client`); снести её вместе с
-    колонками `users.stock_sheet_key`/`stock_view_book_id` можно после того, как
-    инвариант «аккаунт есть всегда» станет типом, а не соглашением.
+    Лист принадлежит аккаунту, а не человеку: у работника своего листа нет.
     """
-
-    if isinstance(client, ClientAccount):
-        return client.stock_sheet_key or client.name or str(client.id)
-    return client.stock_sheet_key or client.full_name or str(client.telegram_id)
+    return account.stock_sheet_key or account.name or str(account.id)
 
 
-def stock_view_book_url(client: User | ClientAccount) -> str | None:
-    """Ссылка на персональную read-only Google-таблицу склада клиента.
+def stock_view_book_url(account: ClientAccount) -> str | None:
+    """Ссылка на персональную read-only Google-таблицу склада аккаунта.
 
-    `None`, пока книга-зеркало не заведена провижином (`users.stock_view_book_id`).
+    `None`, пока книга-зеркало не заведена провижином (`stock_view_book_id`).
     """
-    if not client.stock_view_book_id:
+    if not account.stock_view_book_id:
         return None
-    return f"https://docs.google.com/spreadsheets/d/{client.stock_view_book_id}"
+    return f"https://docs.google.com/spreadsheets/d/{account.stock_view_book_id}"
 
 
 def _build_items(rows: list[StockRow], reserved: dict[str, int]) -> list[InventoryItem]:
@@ -93,8 +86,8 @@ async def get_inventory_snapshot(
     account: ClientAccount | None = None,
     reader: StockSource | None = None,
 ) -> list[InventoryItem]:
-    shipments._require_active_client(client)
-    key = stock_sheet_key(account or client)
+    account = shipments.require_client_account(client, account)
+    key = stock_sheet_key(account)
     try:
         rows = await asyncio.to_thread((reader or build_stock_source()).read_stock, key)
     except StockSheetNotFound:

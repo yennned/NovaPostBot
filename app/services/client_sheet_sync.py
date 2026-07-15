@@ -63,10 +63,6 @@ class ViewRow:
     available: int
 
 
-def desired_stock_sheet_key(*, full_name: str | None, telegram_id: int) -> str:
-    return (full_name or "").strip() or str(telegram_id)
-
-
 def _sheets_enabled(settings: Settings) -> bool:
     return bool(settings.google_sa_json.strip())
 
@@ -75,42 +71,32 @@ async def sync_client_sheets(
     session: AsyncSession,
     *,
     client: User,
-    account: ClientAccount | None = None,
-    previous_sheet_key: str | None = None,
+    account: ClientAccount,
     reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> None:
+    """Синхронизировать вкладки склада аккаунта и его книгу-зеркало.
+
+    Всё здесь account-scoped: вкладка принадлежит аккаунту, а не человеку.
+    `client` нужен только как читатель остатков (`get_inventory_snapshot`).
+    """
     cfg = settings or get_settings()
-    if account is None:
-        target_key = desired_stock_sheet_key(
-            full_name=client.full_name, telegram_id=client.telegram_id
-        )
-        source_key = client.stock_sheet_key or target_key
-        view_book_id = client.stock_view_book_id
-    else:
-        # `.strip()`, а не голый `or`: имя из пробелов прошло бы мимо фолбэка и
-        # стало бы именем вкладки (ср. `desired_stock_sheet_key`).
-        target_key = (account.name or "").strip() or str(account.id)
-        source_key = account.stock_sheet_key or target_key
-        view_book_id = account.stock_view_book_id
-        # `previous_sheet_key` — понятие user-scope (прежнее имя вкладки клиента).
-        # Для аккаунта оно не просто бессмысленно, а опасно: `_sync_client_sheets_sync`
-        # переименовывает вкладку `previous_sheet_key` → `target_key`, поэтому правка
-        # ПІБ работником увела бы вкладку с его именем в имя общего аккаунта. Источник
-        # правды для аккаунта — `account.stock_sheet_key`, он уже в `source_key`.
-        previous_sheet_key = None
+    # `.strip()`, а не голый `or`: имя из пробелов прошло бы мимо фолбэка и
+    # стало бы именем вкладки.
+    target_key = (account.name or "").strip() or str(account.id)
+    source_key = account.stock_sheet_key or target_key
+    view_book_id = account.stock_view_book_id
 
     if not _sheets_enabled(cfg):
-        scope = account or client
-        if scope.stock_sheet_key != target_key:
-            scope.stock_sheet_key = target_key
+        if account.stock_sheet_key != target_key:
+            account.stock_sheet_key = target_key
             await session.flush()
         return
 
     snapshot = await get_inventory_snapshot(
         session,
         client=client,
-        account_id=account.id if account else None,
+        account_id=account.id,
         account=account,
         reader=reader,
     )
@@ -132,7 +118,7 @@ async def sync_client_sheets(
             _sync_client_sheets_sync,
             cfg,
             source_key,
-            previous_sheet_key or (source_key if source_key != target_key else None),
+            source_key if source_key != target_key else None,
             target_key,
             view_book_id,
             rows,
@@ -141,15 +127,9 @@ async def sync_client_sheets(
     # Продвигаем ключ только при подтверждённом переименовании вкладок: иначе PG
     # указывал бы на лист с новым именем, которого в «Складі» нет → пустой остаток.
     if rename_ok:
-        if account is None:
-            client.stock_sheet_key = target_key
-        else:
-            account.stock_sheet_key = target_key
+        account.stock_sheet_key = target_key
     if book_id and view_book_id != book_id:
-        if account is None:
-            client.stock_view_book_id = book_id
-        else:
-            account.stock_view_book_id = book_id
+        account.stock_view_book_id = book_id
     await session.flush()
 
 
@@ -157,9 +137,8 @@ async def best_effort_sync(
     session: AsyncSession,
     *,
     client: User,
-    account: ClientAccount | None = None,
+    account: ClientAccount,
     log_key: str,
-    previous_sheet_key: str | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
     **log_context: str,
@@ -176,7 +155,6 @@ async def best_effort_sync(
             session,
             client=client,
             account=account,
-            previous_sheet_key=previous_sheet_key,
             reader=reader,
             settings=settings,
         )

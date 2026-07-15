@@ -30,8 +30,6 @@ class UserRepository(BaseRepository):
         telegram_id: int | None = None,
         phone: str | None = None,
         full_name: str | None = None,
-        stock_sheet_key: str | None = None,
-        stock_view_book_id: str | None = None,
         role: UserRole = UserRole.client,
         status: UserStatus = UserStatus.pending,
         permissions: dict | None = None,
@@ -42,8 +40,6 @@ class UserRepository(BaseRepository):
             telegram_id=telegram_id,
             phone=phone,
             full_name=full_name,
-            stock_sheet_key=stock_sheet_key or full_name or phone or str(telegram_id),
-            stock_view_book_id=stock_view_book_id,
             role=role,
             status=status,
             permissions=permissions or {},
@@ -52,9 +48,8 @@ class UserRepository(BaseRepository):
         if create_account and role is UserRole.client:
             from app.db.repositories.client_account import ClientAccountRepository
 
-            await ClientAccountRepository(self.session).create_for_owner(
-                user, name=account_name, stock_sheet_key=user.stock_sheet_key
-            )
+            # Ключ листа склада — свойство АККАУНТА: у пользователя его больше нет.
+            await ClientAccountRepository(self.session).create_for_owner(user, name=account_name)
         return user
 
     async def update_status(self, user: User, status: UserStatus) -> User:

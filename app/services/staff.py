@@ -93,7 +93,7 @@ def _require_owner(actor: User, settings: Settings | None) -> None:
 
 
 def _permission_states(user: User) -> list[StaffPermissionState]:
-    perms = user.permissions or {}
+    perms = user.permissions
     return [
         StaffPermissionState(
             key=flag.key,
@@ -256,7 +256,7 @@ async def set_permission(
     users = UserRepository(session)
     manager = await _get_manager(users, manager_id)
     _require_can_manage(actor, manager, settings)
-    perms = dict(manager.permissions or {})
+    perms = dict(manager.permissions)
     before = bool(perms.get(flag, True))
     perms[flag] = enabled
     await users.set_permissions(manager, perms)
