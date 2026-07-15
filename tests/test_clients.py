@@ -85,6 +85,45 @@ async def test_approve_audits_client_account_not_actor(db_session: AsyncSession)
     assert entry.account_id == membership.account_id, "субъект — аккаунт клиента"
 
 
+async def test_every_transition_audits_client_account(db_session: AsyncSession):
+    """Каждый переход `_transition` пишет аккаунт-субъект — без исключений.
+
+    Регрессия: ремонтная миграция `b2c3d4e5f6a7` перечисляла переходы вручную и
+    потеряла `client_unblocked`. Перечисление, которое надо руками держать в
+    синхроне с кодом, разъезжается — этот тест ловит любой новый/забытый переход
+    целиком, а не по одному.
+    """
+    actor = await _manager(db_session)
+    client = await _client(db_session, telegram_id=170)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    assert membership is not None
+
+    # Все пять переходов из `_transition`, по валидной цепочке статусов.
+    await clients.approve_client(db_session, actor=actor, client_id=client.id)
+    await clients.block_client(db_session, actor=actor, client_id=client.id, reason="тест")
+    await clients.unblock_client(db_session, actor=actor, client_id=client.id)
+    await clients.archive_client(db_session, actor=actor, client_id=client.id)
+    await clients.restore_client(db_session, actor=actor, client_id=client.id)
+
+    rows = (
+        await db_session.execute(
+            select(AuditLog.action, AuditLog.account_id).where(
+                AuditLog.affected_entity == f"user:{client.id}"
+            )
+        )
+    ).all()
+    actions = {r.action for r in rows}
+    assert actions == {
+        "client_approved",
+        "client_blocked",
+        "client_unblocked",
+        "client_archived",
+        "client_restored",
+    }, "изменился набор переходов — проверь, что новый тоже пишет account_id"
+    orphans = [r.action for r in rows if r.account_id != membership.account_id]
+    assert not orphans, f"переходы без аккаунта-субъекта: {orphans}"
+
+
 async def test_approve_non_pending_raises(db_session: AsyncSession):
     actor = await _manager(db_session)
     active = await _client(db_session, telegram_id=101, status=UserStatus.active)
