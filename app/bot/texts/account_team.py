@@ -38,6 +38,17 @@ def team_list_text(total: int) -> str:
     return f"👥 <b>Команда</b> · {total}\nОберіть працівника або запросіть нового."
 
 
+def invite_result_text(item) -> str:
+    """Підсумок запрошення. Розвилка по стану, а не один текст на всі випадки.
+
+    Номер, який уже надсилав контакт боту, вступає одразу `active` — вимагати з
+    нього ще один контакт було б неправдою (див. `account_team._joining_status`).
+    """
+    if item.status is MembershipStatus.active:
+        return f"✅ {item.phone} додано до команди."
+    return f"✅ Запрошення створено для {item.phone}. Працівник має надіслати власний контакт боту."
+
+
 def member_card_text(item, *, with_phone: bool = True) -> str:
     lines = [f"👤 <b>{_esc(member_label(item))}</b>"]
     if with_phone:
