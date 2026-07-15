@@ -19,6 +19,7 @@ from app.services.exceptions import (
     LastAccountOwnerError,
     PermissionDenied,
 )
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -265,6 +266,39 @@ async def test_invite_without_contact_stays_invited(db_session: AsyncSession):
         db_session, user=stranger, telegram_id=7104, full_name="Працівник"
     )
     assert stranger.status is UserStatus.active
+
+
+async def test_invite_reads_the_invitee_row_locked(db_session: AsyncSession):
+    # Сторож замка из ревью: чтение → решение → запись не были сериализованы.
+    # UNIQUE по `user_id` ловит только двойную вставку; два владельца, зовущие
+    # один номер одновременно, оба прошли бы проверки и перезаписали
+    # `membership.account` — оба увидели бы успех, а человек остался бы у того,
+    # кто закоммитил последним.
+    #
+    # Ловим SQL, который реально уходит в БД. Настоящую гонку тут не
+    # воспроизвести: она требует второго соединения, а данные фикстуры не
+    # закоммичены и другому соединению не видны. Смысл теста — чтобы снятие
+    # `for_update` из `invite_employee` не прошло молча.
+    owner = await _owner(db_session)
+    context = await _context(db_session, owner)
+    stranger, _ = await _self_registered(db_session, telegram_id=7108, phone="380507000108")
+
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, ctx, executemany):
+        statements.append(" ".join(statement.split()))
+
+    sync_conn = (await db_session.connection()).sync_connection
+    event.listen(sync_conn, "before_cursor_execute", _capture)
+    try:
+        member = await account_team.invite_employee(db_session, context=context, phone="0507000108")
+    finally:
+        event.remove(sync_conn, "before_cursor_execute", _capture)
+
+    reads = [s for s in statements if s.startswith("SELECT") and "FROM users" in s]
+    assert reads, "приглашение не читало `users` — тест смотрит не туда"
+    assert any("FOR UPDATE" in s for s in reads), "строку приглашаемого читаем без FOR UPDATE"
+    assert member.user_id == stranger.id and member.account_id == context.account.id
 
 
 async def test_invite_refuses_active_client_and_self(db_session: AsyncSession):
