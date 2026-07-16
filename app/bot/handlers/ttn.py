@@ -431,7 +431,13 @@ def _price_key(data: dict) -> str:
 
 
 async def _card_price(
-    session: AsyncSession, client, data: dict, np_client: NovaPoshtaClient, *, force: bool
+    session: AsyncSession,
+    client,
+    data: dict,
+    np_client: NovaPoshtaClient,
+    *,
+    force: bool,
+    account_id: uuid.UUID | None = None,
 ) -> dict:
     """Цена НП с кэшем в FSM-data по `_price_key` + graceful-degradation."""
     key = _price_key(data)
@@ -450,6 +456,7 @@ async def _card_price(
             session,
             client=client,
             sender_profile_id=_profile_uuid(data),
+            account_id=account_id,
             city_recipient_ref=data["recipient_city_ref"],
             weight=Decimal(data["weight"]),
             cost=Decimal(data["insured_amount"]),
@@ -476,9 +483,12 @@ async def _show_card(
     np_client: NovaPoshtaClient,
     edit: bool,
     force_price: bool = False,
+    account_id: uuid.UUID | None = None,
 ) -> None:
     data = await _ensure_card_defaults(state)
-    price = await _card_price(session, client, data, np_client, force=force_price)
+    price = await _card_price(
+        session, client, data, np_client, force=force_price, account_id=account_id
+    )
     await state.update_data(price_cache=price)
     text = texts.card_text(data, price)
     kb = build_card_kb(is_org=data.get("recipient_kind") == "organization")
@@ -1141,6 +1151,7 @@ async def receive_city_query(
             np_client=np_client,
             cache=np_cache,
             sender_profile_id=_profile_uuid(await state.get_data()),
+            account_id=_account_id(effective_context),
         )
     except ClientServiceError as exc:
         await message.answer(str(exc))
@@ -1170,6 +1181,7 @@ async def receive_city_query(
                 np_client=np_client,
                 cache=np_cache,
                 sender_profile_id=_profile_uuid(await state.get_data()),
+                account_id=_account_id(effective_context),
             )
         except ClientServiceError as exc:
             await message.answer(str(exc))
@@ -1345,6 +1357,7 @@ async def cb_city(
             np_client=np_client,
             cache=np_cache,
             sender_profile_id=_profile_uuid(data),
+            account_id=_account_id(effective_context),
         )
     except ClientServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1442,6 +1455,7 @@ async def receive_warehouse_query(
             cache=np_cache,
             query=query,
             sender_profile_id=_profile_uuid(data),
+            account_id=_account_id(effective_context),
         )
     except ClientServiceError as exc:
         await message.answer(str(exc))
@@ -1496,7 +1510,13 @@ async def cb_wh(
     )
     await state.set_state(CreateTtnState.summary)
     await _show_card(
-        callback.message, state, session=db_session, client=client, np_client=np_client, edit=True
+        callback.message,
+        state,
+        session=db_session,
+        client=client,
+        np_client=np_client,
+        edit=True,
+        account_id=_account_id(effective_context),
     )
     await callback.answer()
 
@@ -1528,6 +1548,7 @@ async def cb_recompute(
         np_client=np_client,
         edit=True,
         force_price=True,
+        account_id=_account_id(effective_context),
     )
     await callback.answer("Перераховано.")
 
@@ -1553,7 +1574,13 @@ async def _back_to_card(
         return False
     await state.set_state(CreateTtnState.summary)
     await _show_card(
-        callback.message, state, session=session, client=client, np_client=np_client, edit=True
+        callback.message,
+        state,
+        session=session,
+        client=client,
+        np_client=np_client,
+        edit=True,
+        account_id=_account_id(effective_context),
     )
     return True
 
@@ -1701,7 +1728,9 @@ async def receive_edit(
         await message.answer("Авторизуйтесь через /start.")
         return
     data = await _ensure_card_defaults(state)
-    price = await _card_price(db_session, client, data, np_client, force=True)
+    price = await _card_price(
+        db_session, client, data, np_client, force=True, account_id=_account_id(effective_context)
+    )
     await state.update_data(price_cache=price)
     await answer_latest_screen(
         bot,

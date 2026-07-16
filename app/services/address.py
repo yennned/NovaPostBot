@@ -14,32 +14,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models.user import User
-from app.db.repositories import SenderProfileRepository
 from app.novaposhta import methods
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import City, Warehouse
-from app.services.exceptions import SenderProfileNotConfigured
+from app.services.sender_scope import resolve_scoped_profile
 
 
 async def _profile_key(
-    session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None
+    session: AsyncSession,
+    client: User,
+    sender_profile_id: uuid.UUID | None,
+    account_id: uuid.UUID | None = None,
 ) -> str:
-    """Ключ НП профиля клиента (явного/дефолтного) для вызова справочников."""
-    repo = SenderProfileRepository(session)
-    if sender_profile_id is not None:
-        profile = await repo.get_by_id(sender_profile_id)
-        if profile is None or profile.client_id != client.id:
-            raise SenderProfileNotConfigured("ФОП не знайдено")
-    else:
-        profile = await repo.get_default_for_client(client.id)
-        if profile is None:
-            raise SenderProfileNotConfigured("ФОП ще не налаштований, зверніться до менеджера")
+    """Ключ НП профиля в скоупе актора (явного/дефолтного) для вызова справочников."""
+    profile = await resolve_scoped_profile(
+        session, client=client, sender_profile_id=sender_profile_id, account_id=account_id
+    )
     return profile.np_api_key  # EncryptedString расшифровывает при чтении
 
 
 async def _key_and_limits(
-    session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None
+    session: AsyncSession,
+    client: User,
+    sender_profile_id: uuid.UUID | None,
+    account_id: uuid.UUID | None = None,
 ) -> tuple[str, dict[str, int | float]]:
     """Ключ ФОП + «интерактивные» лимиты НП для одного lookup'а.
 
@@ -48,7 +47,7 @@ async def _key_and_limits(
     жёсткий таймаут/меньше ретраев (быстрый фейл вместо зависания).
     """
     settings = get_settings()
-    api_key = await _profile_key(session, client, sender_profile_id)
+    api_key = await _profile_key(session, client, sender_profile_id, account_id)
     limits: dict[str, int | float] = {
         "attempts": settings.np_lookup_max_retries,
         "timeout_seconds": settings.np_lookup_timeout_seconds,
@@ -64,11 +63,12 @@ async def search_cities(
     np_client: NovaPoshtaClient,
     cache: NPReferenceCache,
     sender_profile_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> list[City]:
     """Найти города по подстроке (через кэш справочников НП; ключ ФОП — лениво)."""
 
     async def loader() -> list[City]:
-        api_key, limits = await _key_and_limits(session, client, sender_profile_id)
+        api_key, limits = await _key_and_limits(session, client, sender_profile_id, account_id)
         return await methods.get_cities(np_client, api_key=api_key, query=query, **limits)
 
     return await cache.cities(query, loader=loader)
@@ -83,11 +83,12 @@ async def search_warehouses(
     cache: NPReferenceCache,
     query: str | None = None,
     sender_profile_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> list[Warehouse]:
     """Найти відділення в городе (опц. поиск; ключ ФОП резолвим лениво в `loader`)."""
 
     async def loader() -> list[Warehouse]:
-        api_key, limits = await _key_and_limits(session, client, sender_profile_id)
+        api_key, limits = await _key_and_limits(session, client, sender_profile_id, account_id)
         return await methods.get_warehouses(
             np_client, api_key=api_key, city_ref=city_ref, query=query, **limits
         )
