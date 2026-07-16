@@ -46,6 +46,28 @@ def build_member_kb(item: AccountMemberView) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [action],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Видалити працівника", callback_data=f"team:delete:{item.user_id}"
+                )
+            ],
             [InlineKeyboardButton(text="◀ До команди", callback_data="team:list:0")],
+        ]
+    )
+
+
+def build_member_delete_confirm_kb(item: AccountMemberView) -> InlineKeyboardMarkup:
+    """Двойное подтверждение — как у удаления менеджера (`stf:delete:`/`stf:deleteok:`).
+
+    Удаление безвозвратно, а карточка работника до сих пор исполняла всё в один клик.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Так, видалити", callback_data=f"team:deleteok:{item.user_id}"
+                )
+            ],
+            [InlineKeyboardButton(text="◀ Скасувати", callback_data=f"team:view:{item.user_id}")],
         ]
     )

@@ -269,6 +269,51 @@ async def set_employee_status(
     return _view(membership)
 
 
+async def delete_employee(
+    session: AsyncSession, *, context: ClientAccountContext, user_id: uuid.UUID
+) -> AccountMemberView:
+    """Физически удалить работника из команды: строка `users` исчезает, номер свободен.
+
+    Блокировка оставляет человека в базе: доступ закрыт, но номер занят навсегда и
+    в другую команду его не пригласить. Удаление — для «этот человек у нас больше
+    не работает», без следа.
+
+    ТТН, склад и переписка аккаунта не страдают: `e5f6a7b8c1d3` перевела `client_id`
+    на `SET NULL`, поэтому ТТН работника остаются в аккаунте работодателя, просто без
+    имени автора. Собственного ФОП у работника нет и быть не может — их заводит
+    только владелец (`owner_only`), так что ключ НП аккаунта удаление не задевает.
+
+    Владельца этим путём не удалить: он не `employee`, а его уход — это удаление
+    клиента целиком (отдельный сценарий с гейтом по активным ТТН).
+    """
+    require_account_owner(context)
+    accounts = ClientAccountRepository(session)
+    membership = await accounts.get_membership(user_id=user_id, account_id=context.account.id)
+    if membership is None:
+        raise AccountMemberNotFound(str(user_id))
+    if membership.user_id == context.user.id:
+        raise LastAccountOwnerError("не можна видалити самого себе")
+    if membership.role is not MembershipRole.employee:
+        raise LastAccountOwnerError("це головний клієнт акаунта, а не працівник")
+    # Карточку снимаем до удаления: после него у ORM-объекта уже не спросить ни имя,
+    # ни телефон, а хендлеру нужно чем-то подписать «видалено».
+    view = _view(membership)
+    audit = AuditRepository(session)
+    await audit.log(
+        "account_employee_deleted",
+        user_id=context.user.id,
+        account_id=context.account.id,
+        affected_entity=f"user:{user_id}",
+        before={"role": membership.role.value, "status": membership.status.value},
+    )
+    # До `session.delete`: потом строк с этим `user_id` не найти — FK обнулится,
+    # и payload'ы с ПИБ/телефоном осиротеют неочищенными.
+    await audit.scrub_user_pii(user_id)
+    await session.delete(membership.user)  # членство уйдёт каскадом
+    await session.flush()
+    return view
+
+
 async def block_employee(
     session: AsyncSession, *, context: ClientAccountContext, user_id: uuid.UUID
 ) -> AccountMemberView:

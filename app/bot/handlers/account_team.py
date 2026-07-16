@@ -152,6 +152,46 @@ async def _mutate(
     await callback.answer("Готово")
 
 
+@router.callback_query(F.data.startswith("team:delete:"))
+async def delete_prompt(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    if callback.message is None or effective_context.account_context is None:
+        return
+    try:
+        user_id = uuid.UUID(callback.data.split(":")[2])
+        item = await account_team.get_member(
+            db_session, context=effective_context.account_context, user_id=user_id
+        )
+    except (ValueError, ClientServiceError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text(
+        texts.member_delete_confirm_text(item),
+        reply_markup=kb.build_member_delete_confirm_kb(item),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("team:deleteok:"))
+async def delete_confirm(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    if callback.message is None or effective_context.account_context is None:
+        return
+    try:
+        user_id = uuid.UUID(callback.data.split(":")[2])
+        item = await account_team.delete_employee(
+            db_session, context=effective_context.account_context, user_id=user_id
+        )
+    except (ValueError, ClientServiceError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer(texts.member_deleted_text(item))
+    await _render(callback.message, effective_context, db_session, offset=0)
+
+
 @router.callback_query(F.data.startswith("team:block:"))
 async def block(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
