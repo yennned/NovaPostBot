@@ -228,6 +228,28 @@ class SupportRepository(BaseRepository):
         await self.session.flush()
         return thread
 
+    async def close_open_for_account(self, account_id: uuid.UUID) -> int:
+        """Закрыть все незакрытые треды аккаунта (при физическом удалении клиента).
+
+        Уникального индекса на активный тред нет — в проде осели старые дубли, —
+        поэтому закрываем набор, а не один. FK `client_id` тредов уйдёт в NULL при
+        удалении пользователей (SET NULL, этап 2), но статус `open`/`waiting`
+        оставил бы «висящий» тред без клиента в инбоксе дежурного."""
+        rows = list(
+            await self.session.scalars(
+                select(SupportThread).where(
+                    SupportThread.account_id == account_id,
+                    SupportThread.status.in_(tuple(ACTIVE_STATUSES)),
+                )
+            )
+        )
+        now = datetime.now(UTC)
+        for thread in rows:
+            thread.status = SupportThreadStatus.closed
+            thread.closed_at = now
+        await self.session.flush()
+        return len(rows)
+
     async def unassign_open_for_manager(self, manager_id: uuid.UUID) -> int:
         """Снять назначение и вернуть в очередь открытые треды менеджера (снятие роли)."""
         rows = list(

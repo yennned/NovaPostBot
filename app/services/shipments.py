@@ -214,6 +214,36 @@ async def get_shipment_card(
     return _to_card(shipment)
 
 
+async def apply_cancel(
+    session: AsyncSession,
+    *,
+    shipment: Shipment,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID,
+) -> ShipmentCard:
+    """Флип статуса ТТН в `cancelled` + аудит. **Без гейтов** — вызывающий уже
+    проверил доступ (активный клиент / удаление аккаунта).
+
+    Выделено, чтобы этим пользовались оба пути отмены: клиентский `cancel_shipment`
+    (после `_require_active_client`) и удаление клиента (`clients.delete_client`, где
+    клиент к этому моменту уже неактивен и гейт неприменим). Одна реализация флипа —
+    без риска, что пути разъедутся.
+    """
+    if shipment.status not in CANCELABLE_STATUSES:
+        raise ShipmentActionForbidden("cancel", shipment.status)
+    before = {"status": shipment.status}
+    await ShipmentRepository(session).update_status(shipment, ShipmentStatus.cancelled)
+    await AuditRepository(session).log(
+        "shipment_cancelled_by_client",
+        user_id=actor_user_id,
+        account_id=account_id or shipment.account_id,
+        affected_entity=f"shipment:{shipment.id}",
+        before=before,
+        after={"status": shipment.status},
+    )
+    return _to_card(shipment)
+
+
 async def cancel_shipment(
     session: AsyncSession,
     *,
@@ -231,16 +261,6 @@ async def cancel_shipment(
     )
     if shipment is None or (account_id is None and shipment.client_id != client.id):
         raise ShipmentNotFound(str(shipment_id))
-    if shipment.status not in CANCELABLE_STATUSES:
-        raise ShipmentActionForbidden("cancel", shipment.status)
-    before = {"status": shipment.status}
-    await repo.update_status(shipment, ShipmentStatus.cancelled)
-    await AuditRepository(session).log(
-        "shipment_cancelled_by_client",
-        user_id=actor_user_id or client.id,
-        account_id=account_id or shipment.account_id,
-        affected_entity=f"shipment:{shipment.id}",
-        before=before,
-        after={"status": shipment.status},
+    return await apply_cancel(
+        session, shipment=shipment, account_id=account_id, actor_user_id=actor_user_id or client.id
     )
-    return _to_card(shipment)

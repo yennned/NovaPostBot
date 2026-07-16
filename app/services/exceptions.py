@@ -124,6 +124,29 @@ class LastAccountOwnerError(ClientServiceError):
     """Неможливо залишити акаунт без активного власника."""
 
 
+class ClientDeletionBlocked(ClientServiceError):
+    """Видалення клієнта заблоковане активними відправленнями.
+
+    Активні ТТН (`dispatched`/`in_transit`/`arrived`/`returning`, а також
+    `returned` без оформленого повернення на склад) кинути не можна — їх спершу
+    доводить до кінця менеджер. `blocking` — список таких ТТН для показу власнику;
+    у БД при цьому нічого не змінюється.
+    """
+
+    def __init__(self, blocking: list) -> None:
+        self.blocking = blocking
+        super().__init__("є активні відправлення, які має завершити менеджер")
+
+
+class ClientDeletionRetryable(ClientServiceError):
+    """Частину ТТН не вдалося скасувати в НП — акаунт лишається замороженим.
+
+    Відмова НП (крім «вже видалено») перериває видалення до сносу команди, тому
+    жоден користувач ще не видалений. Повтор безпечний: `NovaPoshtaNotFound` на
+    вже видалених ТТН вважається успіхом, а вже скасовані ТТН пропускаються.
+    """
+
+
 class StaffNotFound(ClientServiceError):
     """Сотрудник (менеджер) с таким id не найден."""
 
