@@ -27,6 +27,7 @@ from app.bot.keyboards.clients import (
     parse_status_token,
     status_token,
 )
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.notify import BotNotifier
 from app.bot.states import ClientManageState
 from app.bot.texts.clients import (
@@ -371,7 +372,9 @@ async def cb_search(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(ClientManageState.waiting_for_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientManageState.waiting_for_search, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS)
+)
 async def receive_search(
     message: Message,
     state: FSMContext,
@@ -438,7 +441,9 @@ async def cb_edit_field(
     await callback.answer()
 
 
-@router.message(ClientManageState.waiting_for_edit, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientManageState.waiting_for_edit, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS)
+)
 async def receive_edit(
     message: Message,
     state: FSMContext,
