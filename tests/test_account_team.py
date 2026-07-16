@@ -352,3 +352,78 @@ async def test_invite_refuses_active_employee_of_another_team(db_session: AsyncS
     assert member.status is MembershipStatus.active
     # Чужой аккаунт живой — работник ушёл, но гасить его нельзя.
     assert rival_context.account.status is ClientAccountStatus.active
+
+
+async def _employee(session: AsyncSession, owner, *, phone: str, telegram_id: int):
+    context = await _context(session, owner)
+    invited = await account_team.invite_employee(session, context=context, phone=phone)
+    employee = await UserRepository(session).get_by_id(invited.user_id)
+    await account_team.activate_employee_contact(
+        session, user=employee, telegram_id=telegram_id, full_name="Працівник"
+    )
+    return employee
+
+
+async def test_delete_employee_removes_the_row_and_frees_the_phone(db_session: AsyncSession):
+    """Удаление работника физическое: блокировка оставляла номер занятым навсегда."""
+    owner = await _owner(db_session)
+    employee = await _employee(db_session, owner, phone="0507000021", telegram_id=7021)
+    employee_id, phone = employee.id, employee.phone
+
+    view = await account_team.delete_employee(
+        db_session, context=await _context(db_session, owner), user_id=employee_id
+    )
+
+    users = UserRepository(db_session)
+    assert view.user_id == employee_id  # карточка снята до удаления — есть чем подписать ответ
+    assert await users.get_by_id(employee_id) is None, "строка работника пережила удаление"
+    assert await users.get_by_phone(phone) is None, "номер обязан освободиться"
+    accounts = ClientAccountRepository(db_session)
+    assert await accounts.get_membership(user_id=employee_id) is None, "членство ушло каскадом"
+
+
+async def test_delete_employee_keeps_the_employers_shipment(db_session: AsyncSession):
+    """ТТН работника остаётся в аккаунте работодателя — исчезает только автор.
+
+    У ТТН работника `client_id` — это id **работника**, поэтому до `e5f6a7b8c1d3`
+    удаление унесло бы её каскадом вместе с ним.
+    """
+    from app.db.models.enums import ShipmentStatus
+    from app.db.models.shipment import Shipment
+    from app.db.repositories import ShipmentRepository
+    from app.db.repositories.shipment import ShipmentItemDraft
+
+    owner = await _owner(db_session)
+    employee = await _employee(db_session, owner, phone="0507000022", telegram_id=7022)
+    account = (await ClientAccountRepository(db_session).get_membership(user_id=owner.id)).account
+    shipment = await ShipmentRepository(db_session).create(
+        client_id=employee.id,
+        account_id=account.id,
+        created_by_user_id=employee.id,
+        recipient_name="Отримувач",
+        items=[ShipmentItemDraft(sku="A1", name="Товар", quantity=1)],
+        status=ShipmentStatus.delivered,
+        ttn_number="20450000007022",
+    )
+    await db_session.flush()
+    shipment_id, account_id = shipment.id, account.id
+
+    await account_team.delete_employee(
+        db_session, context=await _context(db_session, owner), user_id=employee.id
+    )
+    db_session.expire_all()
+
+    alive = await db_session.get(Shipment, shipment_id)
+    assert alive is not None, "ТТН работника снесло вместе с ним"
+    assert alive.account_id == account_id, "ТТН обязана остаться в аккаунте работодателя"
+    assert alive.client_id is None and alive.created_by_user_id is None
+
+
+async def test_delete_employee_refuses_the_account_owner_and_self(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    context = await _context(db_session, owner)
+
+    with pytest.raises(LastAccountOwnerError):
+        await account_team.delete_employee(db_session, context=context, user_id=owner.id)
+
+    assert await UserRepository(db_session).get_by_id(owner.id) is not None
