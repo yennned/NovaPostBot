@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from app.bot.handlers.clients_manage import (
     cb_action,
     cb_card,
+    cb_delete,
+    cb_delete_ok,
     cb_edit_field,
     cb_return_card,
     cb_return_receive,
@@ -103,10 +105,10 @@ async def _owner(session: AsyncSession, telegram_id: int = 8):
     )
 
 
-def _ctx(actor, *, effective_role: UserRole | None = None):
-    """Мини-EffectiveContext для хендлеров: actor + эффективная роль."""
+def _ctx(actor, *, effective_role: UserRole | None = None, is_dev: bool = False):
+    """Мини-EffectiveContext для хендлеров: actor + эффективная роль + dev-флаг."""
     role = effective_role if effective_role is not None else (actor.role if actor else None)
-    return SimpleNamespace(actor_user=actor, effective_role=role)
+    return SimpleNamespace(actor_user=actor, effective_role=role, is_dev=is_dev)
 
 
 async def _pending(session: AsyncSession, telegram_id: int = 100):
@@ -364,3 +366,76 @@ async def test_cb_return_receive_acknowledges(db_session: AsyncSession, monkeypa
 
     assert cb.acks
     assert "Повернення прийнято" in str(cb.acks[-1]["text"])
+
+
+# --- Физическое удаление клиента (этап 5): owner/dev-гейт хендлера + happy-path ---
+
+
+class _NoNP:
+    """НП, которая падает при любом обращении — доказывает, что клиент без ТТН её не зовёт."""
+
+    def __getattr__(self, name):
+        raise AssertionError("НП не має викликатися для клієнта без ТТН")
+
+
+async def _active_client(session: AsyncSession, telegram_id: int = 300):
+    """Активный клиент-владелец собственного аккаунта (мидлварь заводит аккаунт при create)."""
+    return await UserRepository(session).create(
+        telegram_id=telegram_id,
+        phone=f"380{telegram_id:09d}",
+        full_name="Оля Клієнт",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+
+
+async def test_cb_delete_shows_confirm_for_owner(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    client = await _active_client(db_session)
+    cb = FakeCallback(data=f"cl:del:active:{client.id}")
+
+    await cb_delete(cb, _ctx(owner), db_session)
+
+    assert cb.message.edits, "владельцу показываем экран подтверждения"
+    assert "Видалити клієнта" in str(cb.message.edits[0]["text"])
+
+
+async def test_cb_delete_refused_for_manager(db_session: AsyncSession):
+    """Кнопки у менеджера нет, но подделанный/устаревший callback хендлер обязан отбить."""
+    manager = await _manager(db_session)
+    client = await _active_client(db_session)
+    cb = FakeCallback(data=f"cl:del:active:{client.id}")
+
+    await cb_delete(cb, _ctx(manager), db_session)
+
+    assert not cb.message.edits, "менеджеру экран подтверждения не рисуем"
+    assert cb.acks and cb.acks[-1]["show_alert"]
+    assert "лише власнику" in str(cb.acks[-1]["text"])
+
+
+async def test_cb_delete_ok_refused_for_manager_changes_nothing(db_session: AsyncSession):
+    manager = await _manager(db_session)
+    client = await _active_client(db_session)
+    cb = FakeCallback(data=f"cl:delok:active:{client.id}")
+
+    await cb_delete_ok(cb, _ctx(manager), db_session, _NoNP())
+
+    assert cb.acks and cb.acks[-1]["show_alert"]
+    assert "лише власнику" in str(cb.acks[-1]["text"])
+    # Ни одного изменения: клиент на месте.
+    refreshed = await UserRepository(db_session).get_by_id(client.id)
+    assert refreshed is not None and refreshed.status is UserStatus.active
+
+
+async def test_cb_delete_ok_deletes_and_returns_to_list(db_session: AsyncSession):
+    owner = await _owner(db_session)
+    client = await _active_client(db_session)
+    cb = FakeCallback(data=f"cl:delok:active:{client.id}")
+
+    # У клиента нет ТТН → НП не зовётся, снос атомарный, хендлер уводит обратно в список.
+    await cb_delete_ok(cb, _ctx(owner), db_session, _NoNP())
+
+    assert cb.acks and "видалено" in str(cb.acks[-1]["text"]).lower()
+    assert cb.message.edits and "Клієнти" in str(cb.message.edits[-1]["text"])
+    refreshed = await UserRepository(db_session).get_by_id(client.id)
+    assert refreshed is None, "владелец клиентского аккаунта физически удалён"
