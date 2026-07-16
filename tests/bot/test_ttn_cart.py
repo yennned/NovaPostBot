@@ -14,7 +14,7 @@ from uuid import uuid4
 from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
-from app.bot.types import EffectiveContext
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import (
     ClientAccountRepository,
@@ -135,6 +135,20 @@ def _ctx(client):
         effective_user=client,
         effective_role=UserRole.client,
         is_dev=False,
+    )
+
+
+def _ctx_with_account(client, account_id):
+    """Контекст работника: `account_context` заполнен, как это делает мидлварь."""
+    account = SimpleNamespace(id=account_id)
+    return EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+        account_context=ClientAccountContext(
+            user=client, account=account, membership=SimpleNamespace(id="mid")
+        ),
     )
 
 
@@ -712,17 +726,31 @@ async def test_receive_phone_normalizes_and_advances():
     assert state.state == CreateTtnState.entering_city_query
 
 
-def _patch_cities(monkeypatch, cities):
-    async def fake(session, *, client, query, np_client, cache, sender_profile_id=None):
+def _patch_cities(monkeypatch, cities, *, seen=None):
+    async def fake(
+        session, *, client, query, np_client, cache, sender_profile_id=None, account_id=None
+    ):
+        if seen is not None:
+            seen["account_id"] = account_id
         return cities
 
     monkeypatch.setattr(h.address, "search_cities", fake)
 
 
-def _patch_warehouses(monkeypatch, whs):
+def _patch_warehouses(monkeypatch, whs, *, seen=None):
     async def fake(
-        session, *, client, city_ref, np_client, cache, query=None, sender_profile_id=None
+        session,
+        *,
+        client,
+        city_ref,
+        np_client,
+        cache,
+        query=None,
+        sender_profile_id=None,
+        account_id=None,
     ):
+        if seen is not None:
+            seen["account_id"] = account_id
         return whs
 
     monkeypatch.setattr(h.address, "search_warehouses", fake)
@@ -738,6 +766,53 @@ async def test_city_query_shows_results(monkeypatch):
     assert state._data["cities"][0]["ref"] == "c1"
     assert msg.answers[-1]["reply_markup"] is not None
     assert bot.actions and bot.actions[-1]["action"] == "typing"  # индикатор загрузки
+
+
+async def test_city_query_passes_account_id_to_address(monkeypatch):
+    """Проводка: хендлер отдаёт `account_id` в поиск городов.
+
+    Сервисный фикс без этого бесполезен — `address` ушёл бы в legacy-ветку по
+    `client_id`, и работник снова получил бы «ФОП не знайдено». Тест ловит именно
+    обрыв провода между хендлером и сервисом.
+    """
+    seen: dict = {}
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")], seen=seen)
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+
+    await h.receive_city_query(
+        FakeMessage(text="Ки"),
+        FakeBot(),
+        state,
+        _ctx_with_account(_CLIENT, "acc-1"),
+        None,
+        object(),
+        object(),
+    )
+
+    assert seen["account_id"] == "acc-1"
+
+
+async def test_warehouse_pick_passes_account_id_to_address(monkeypatch):
+    seen: dict = {}
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
+    _patch_warehouses(
+        monkeypatch, [Warehouse(ref="w1", number="5", description="Хрещатик")], seen=seen
+    )
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+
+    await h.receive_city_query(
+        FakeMessage(text="Київ"),  # точное совпадение → сразу грузит відділення
+        FakeBot(),
+        state,
+        _ctx_with_account(_CLIENT, "acc-2"),
+        None,
+        object(),
+        object(),
+    )
+
+    assert seen["account_id"] == "acc-2"
 
 
 async def test_city_query_exact_match_opens_warehouses(monkeypatch):
@@ -827,7 +902,7 @@ async def test_back_from_warehouse_search_returns_to_warehouse_list():
     assert "Відділення у місті Київ" in cb.message.edits[-1]["text"]
 
 
-def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None):
+def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None, seen=None):
     async def fake(
         session,
         *,
@@ -838,10 +913,13 @@ def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None):
         cost,
         np_client,
         cod_amount=None,
+        account_id=None,
         settings=None,
     ):
         if counter is not None:
             counter["n"] = counter.get("n", 0) + 1
+        if seen is not None:
+            seen["account_id"] = account_id
         if raise_exc is not None:
             raise raise_exc
         return quote

@@ -16,6 +16,8 @@ from app.services import address
 from app.services.exceptions import SenderProfileNotConfigured
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import account_of, employee_of
+
 
 def _np_client(routes: dict[tuple[str, str], object], calls: dict | None = None):
     settings = Settings(_env_file=None)
@@ -45,6 +47,16 @@ async def _client_with_profile(session: AsyncSession, telegram_id: int = 600):
         client_id=client.id, name="ФОП", np_api_key="np-key", is_default=True
     )
     return client
+
+
+async def _owner_with_profile(session: AsyncSession, *, telegram_id: int, phone: str):
+    owner = await UserRepository(session).create(
+        telegram_id=telegram_id, phone=phone, role=UserRole.client, status=UserStatus.active
+    )
+    profile = await SenderProfileRepository(session).create(
+        client_id=owner.id, name="ФОП", np_api_key="np-key", is_default=True
+    )
+    return owner, profile
 
 
 async def test_search_cities_returns_and_caches(db_session: AsyncSession):
@@ -104,6 +116,69 @@ async def test_search_warehouses_returns(db_session: AsyncSession):
     )
     assert whs[0].ref == "w1"
     assert whs[0].number == "5"
+
+
+async def test_employee_searches_cities_with_owner_profile(db_session: AsyncSession):
+    """Регрессия: работник ищет город по ФОП владельца аккаунта.
+
+    `address` скоупился по `client_id`, а у работника он свой, а не владельца, —
+    поэтому работник входил в кошик (`resolve_sender_id` account-scoped и проходил),
+    но на выборе города получал «ФОП не знайдено» и ТТН создать не мог.
+    """
+    owner, profile = await _owner_with_profile(db_session, telegram_id=620, phone="380507770001")
+    employee = await employee_of(db_session, owner, phone="0507770002", telegram_id=621)
+    account = await account_of(db_session, owner)
+
+    cities = await address.search_cities(
+        db_session,
+        client=employee,
+        query="Львів",
+        np_client=_np_client({("Address", "getCities"): [{"Ref": "c9", "Description": "Львів"}]}),
+        cache=_cache(),
+        sender_profile_id=profile.id,
+        account_id=account.id,
+    )
+    assert [c.ref for c in cities] == ["c9"]
+
+
+async def test_employee_searches_warehouses_with_owner_profile(db_session: AsyncSession):
+    owner, profile = await _owner_with_profile(db_session, telegram_id=622, phone="380507770003")
+    employee = await employee_of(db_session, owner, phone="0507770004", telegram_id=623)
+    account = await account_of(db_session, owner)
+
+    whs = await address.search_warehouses(
+        db_session,
+        client=employee,
+        city_ref="c9",
+        np_client=_np_client(
+            {("Address", "getWarehouses"): [{"Ref": "w9", "Number": "9", "Description": "№9"}]}
+        ),
+        cache=_cache(),
+        sender_profile_id=profile.id,
+        account_id=account.id,
+    )
+    assert [w.ref for w in whs] == ["w9"]
+
+
+async def test_profile_of_another_account_still_refused(db_session: AsyncSession):
+    """Скоуп не «отключён», а переехал на аккаунт: чужой ФОП по-прежнему не отдаётся."""
+    owner, _ = await _owner_with_profile(db_session, telegram_id=624, phone="380507770005")
+    account = await account_of(db_session, owner)
+    stranger, stranger_profile = await _owner_with_profile(
+        db_session, telegram_id=625, phone="380507770006"
+    )
+
+    with pytest.raises(SenderProfileNotConfigured):
+        await address.search_cities(
+            db_session,
+            client=owner,
+            query="Київ",
+            np_client=_np_client({("Address", "getCities"): []}),
+            cache=_cache(),
+            sender_profile_id=stranger_profile.id,
+            account_id=account.id,
+        )
+    assert stranger.id != owner.id
 
 
 async def test_search_without_profile_raises(db_session: AsyncSession):
