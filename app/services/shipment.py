@@ -19,11 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db.models.client_account import ClientAccount
-from app.db.models.enums import ShipmentStatus, StockMovementType
+from app.db.models.enums import ClientAccountStatus, ShipmentStatus, StockMovementType
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
 from app.db.repositories import (
     AuditRepository,
+    ClientAccountRepository,
     SenderProfileRepository,
     ShipmentItemDraft,
     ShipmentRepository,
@@ -37,6 +38,7 @@ from app.services import inventory, notifications, shipments
 from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     InsufficientStock,
+    PermissionDenied,
     SenderDispatchNotConfigured,
     SenderProfileIncomplete,
     SenderProfileNotValidated,
@@ -82,6 +84,22 @@ def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> No
     warehouse_ref = profile.np_sender_warehouse or settings.np_sender_warehouse_ref
     if not settings.np_sender_city_ref or not warehouse_ref:
         raise SenderDispatchNotConfigured("склад відправника не налаштований")
+
+
+async def _refuse_if_account_frozen(session: AsyncSession, client: User) -> None:
+    """Отказать в создании/отмене ТТН, если аккаунт актора не `active`.
+
+    Дыра, которую это закрывает: при блокировке (и при удалении клиента, где мы
+    ставим `blocked`) `get_context_for_user` отдаёт `None`, хендлер зовёт сервис с
+    `account_id=None`, и путь молча падал в legacy client-скоуп — работник
+    замороженного аккаунта мог создавать/отменять свои ТТН в обход заморозки
+    (`_require_active_client` смотрит на статус пользователя, а у работника он
+    остаётся `active`). Проверяем аккаунт напрямую по членству: и владелец, и
+    работник неактивного аккаунта получают отказ. Соло-клиент без членства — без
+    изменений (`membership is None`)."""
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    if membership is not None and membership.account.status is not ClientAccountStatus.active:
+        raise PermissionDenied("клієнтський акаунт заблоковано або видаляється")
 
 
 async def _resolve_sender(
@@ -188,6 +206,7 @@ async def create_shipment(
     FSM на шаге накладеного платежу).
     """
     shipments._require_active_client(client)
+    await _refuse_if_account_frozen(session, client)
     settings = settings or get_settings()
     profile = await _resolve_sender(
         session, client, sender_profile_id, settings, account_id=account_id
@@ -320,31 +339,30 @@ async def _cancel_api_key(session: AsyncSession, shipment) -> str:
     return profile.np_api_key  # EncryptedString расшифровывает при чтении
 
 
-async def cancel_shipment(
+async def cancel_shipment_np_first(
     session: AsyncSession,
     *,
+    shipment,
     client: User,
-    shipment_id: uuid.UUID,
     np_client: NovaPoshtaClient,
     account_id: uuid.UUID | None = None,
     actor_user_id: uuid.UUID | None = None,
+    sync: bool = True,
 ) -> shipments.ShipmentCard:
-    """Отменить ТТН **NP-first**: сначала `InternetDocument.delete` в НП, и только
-    при успехе снимаем статус в БД (резерв выводится из статуса → освободится).
+    """Ядро отмены ТТН **NP-first** без гейта активности клиента.
 
-    Иначе (сними мы резерв до удаления в НП) при сбое НП получили бы «живую» ТТН в
-    НП с освобождённым резервом → риск oversell. «Уже удалено» в НП
-    (`NovaPoshtaNotFound`) — идемпотентный успех. Прочие ошибки НП → `TtnCancelFailed`
-    (статус не трогаем, отмену можно повторить).
+    Сначала `InternetDocument.delete` в НП, и только при успехе флип статуса в БД
+    (резерв выводится из статуса → освободится). Иначе (сними мы резерв до удаления
+    в НП) при сбое НП была бы «живая» ТТН в НП с освобождённым резервом → oversell.
+    «Уже удалено» в НП (`NovaPoshtaNotFound`) — идемпотентный успех; прочие ошибки НП
+    → `TtnCancelFailed` (статус не трогаем, отмену можно повторить).
+
+    Вынесено из `cancel_shipment`, чтобы этим же путём отменял ТТН и `delete_client`,
+    где клиент к этому моменту уже неактивен: там `_require_active_client` неприменим,
+    а дублировать NP-first оркестрацию нельзя — она разъехалась бы. `sync=False`
+    отключает синк листа (при массовой отмене под удаление аккаунта лист всё равно
+    осиротеет, а N обращений к Sheets — лишняя латентность и риск).
     """
-    shipments._require_active_client(client)
-    shipment = (
-        await ShipmentRepository(session).get_by_id(shipment_id)
-        if account_id is None
-        else await ShipmentRepository(session).get_by_id_for_account(shipment_id, account_id)
-    )
-    if shipment is None or (account_id is None and shipment.client_id != client.id):
-        raise ShipmentNotFound(str(shipment_id))
     # Удаляем в НП только для отменяемых статусов с реальным np_ref; статус-гейт
     # (ShipmentActionForbidden для dispatched и далее) отдаём делегату ниже.
     if shipment.np_ref and shipment.status in shipments.CANCELABLE_STATUSES:
@@ -355,10 +373,9 @@ async def cancel_shipment(
             logger.info("ttn_already_deleted_in_np", shipment_id=str(shipment.id))
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
-    card = await shipments.cancel_shipment(
+    card = await shipments.apply_cancel(
         session,
-        client=client,
-        shipment_id=shipment_id,
+        shipment=shipment,
         account_id=account_id,
         actor_user_id=actor_user_id or client.id,
     )
@@ -371,11 +388,41 @@ async def cancel_shipment(
         sign=1,
         comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
     )
-    await best_effort_sync(
-        session,
-        client=client,
-        account=shipment.account,
-        log_key="shipment_cancel_sheet_sync_failed",
-        shipment_id=str(shipment.id),
-    )
+    if sync:
+        await best_effort_sync(
+            session,
+            client=client,
+            account=shipment.account,
+            log_key="shipment_cancel_sheet_sync_failed",
+            shipment_id=str(shipment.id),
+        )
     return card
+
+
+async def cancel_shipment(
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    np_client: NovaPoshtaClient,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
+) -> shipments.ShipmentCard:
+    """Клиентская отмена ТТН: гейт активности + NP-first ядро."""
+    shipments._require_active_client(client)
+    await _refuse_if_account_frozen(session, client)
+    shipment = (
+        await ShipmentRepository(session).get_by_id(shipment_id)
+        if account_id is None
+        else await ShipmentRepository(session).get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
+        raise ShipmentNotFound(str(shipment_id))
+    return await cancel_shipment_np_first(
+        session,
+        shipment=shipment,
+        client=client,
+        np_client=np_client,
+        account_id=account_id,
+        actor_user_id=actor_user_id,
+    )

@@ -76,7 +76,7 @@ def build_clients_list_kb(page: ClientPage, token: str) -> InlineKeyboardMarkup:
 
 
 def build_client_card_kb(
-    card: ClientCard, token: str, *, can_edit: bool = False
+    card: ClientCard, token: str, *, can_edit: bool = False, is_owner: bool = False
 ) -> InlineKeyboardMarkup:
     # Единое «удалённое» состояние — `blocked` (скрытие + запрет доступа),
     # обратимо «Розблокувати» → active. Отдельной кнопки «Архів» больше нет;
@@ -110,8 +110,48 @@ def build_client_card_kb(
             )
         ]
     )
+    # Физическое удаление клиента (безвозвратно) — только владелец/dev. Блокировка
+    # остаётся per-flag `can_manage_clients` у менеджеров, а удаление — нет, поэтому
+    # менеджер этой кнопки даже не видит (и `cl:delok:` в сервисе гейтится тоже).
+    if is_owner:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Видалити клієнта", callback_data=f"cl:del:{token}:{card.id}"
+                )
+            ]
+        )
     rows.extend(nav_footer(back=f"cl:list:{token}:0", back_label="До списку"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_client_delete_confirm_kb(token: str, client_id) -> InlineKeyboardMarkup:
+    """Двойное подтверждение удаления клиента — как у `stf:delete:`/`stf:deleteok:`."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Так, видалити назавжди",
+                    callback_data=f"cl:delok:{token}:{client_id}",
+                )
+            ],
+            *nav_footer(back=f"cl:card:{token}:{client_id}", back_label="Скасувати"),
+        ]
+    )
+
+
+def build_deletion_blocked_kb(token: str, client_id) -> InlineKeyboardMarkup:
+    """Экран отказа: активные ТТН сначала завершает менеджер в очереди відправлень."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📬 До відправлень", callback_data="home:manager_shipments"
+                )
+            ],
+            *nav_footer(back=f"cl:card:{token}:{client_id}", back_label="До клієнта"),
+        ]
+    )
 
 
 def build_edit_fields_kb(token: str, client_id) -> InlineKeyboardMarkup:

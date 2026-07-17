@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import html
+
+from app.bot.texts.client_cabinet import _STATUS_LABELS as SHIPMENT_STATUS_LABELS
 from app.bot.texts.client_cabinet import shipment_card_text
 from app.db.models.enums import UserStatus
-from app.services.clients import ClientCard, ClientListItem
+from app.services.clients import (
+    BlockingShipment,
+    ClientCard,
+    ClientDeletionPreview,
+    ClientListItem,
+)
 from app.services.exceptions import (
     AlreadyInStatus,
+    ClientDeletionRetryable,
     ClientNotFound,
     ClientServiceError,
     PermissionDenied,
@@ -104,6 +113,45 @@ def return_received_text() -> str:
     return "✅ Повернення прийнято, залишки оновлено."
 
 
+def client_delete_confirm_text(preview: ClientDeletionPreview) -> str:
+    """Подтверждение удаления клиента: необратимость и масштаб — ДО нажатия."""
+    name = html.escape(preview.full_name or preview.phone or "клієнт")
+    return (
+        f"🗑 Видалити клієнта <b>{name}</b> назавжди?\n\n"
+        f"Команда: {preview.team_size} · відправлень: {preview.shipments_total}.\n\n"
+        "Дію <b>не можна скасувати</b>. Буде видалено власника й усіх працівників, "
+        "їхні ФОП і ключі НП; номери та Telegram звільняться.\n"
+        "Невідправлені ТТН (Створено/Підтверджено) скасуються в НП. Якщо є активні "
+        "відправлення — видалення не почнеться, поки менеджер їх не завершить.\n"
+        "Історія (ТТН, склад, підтримка) залишиться знеособленою — автор стане "
+        "«Видалений користувач»."
+    )
+
+
+def client_deleted_text() -> str:
+    return "🗑 Клієнта та його команду видалено. Історію збережено знеособлено."
+
+
+def deletion_blocked_text(blocking: list[BlockingShipment]) -> str:
+    """Экран отказа: перечислить активные ТТН, которые менеджер завершает первыми."""
+    lines = [
+        "⛔ <b>Зараз видалити не можна.</b>",
+        "Спочатку менеджер має завершити активні відправлення:",
+        "",
+    ]
+    for item in blocking[:10]:
+        ttn = html.escape(item.ttn_number or "без ТТН")
+        label = SHIPMENT_STATUS_LABELS.get(item.status, item.status.value)
+        lines.append(f"• <b>{ttn}</b> — {label}")
+    if len(blocking) > 10:
+        lines.append(f"…та ще {len(blocking) - 10}")
+    return "\n".join(lines)
+
+
+def deletion_retry_text() -> str:
+    return "Частину ТТН не вдалося скасувати в НП. Акаунт заморожено — натисніть 🗑 ще раз."
+
+
 def client_error_text(exc: ClientServiceError) -> str:
     """uk-сообщение для доменной ошибки сервиса клиентов."""
     if isinstance(exc, ClientNotFound):
@@ -112,6 +160,8 @@ def client_error_text(exc: ClientServiceError) -> str:
         return "Клієнт уже в цьому статусі."
     if isinstance(exc, TransitionForbidden):
         return "Цю дію не можна виконати з поточного статусу."
+    if isinstance(exc, ClientDeletionRetryable):
+        return deletion_retry_text()
     if isinstance(exc, PermissionDenied):
         return "Недостатньо прав для цієї дії."
     if isinstance(exc, PhoneAlreadyTaken):
