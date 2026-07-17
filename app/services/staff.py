@@ -11,12 +11,11 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings
-from app.db.models.enums import MembershipRole, UserRole, UserStatus
+from app.db.models.enums import ClientAccountStatus, MembershipRole, UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import (
     AuditRepository,
@@ -335,38 +334,52 @@ async def unblock_manager(
 async def delete_manager(
     session: AsyncSession, *, actor: User, manager_id: uuid.UUID, settings: Settings | None = None
 ) -> None:
-    """Удалить менеджера из персонала: снять роль, закрыть доступ, вернуть треды в очередь."""
+    """Физически удалить менеджера: строка `users` исчезает, номер и Telegram ID свободны.
+
+    Раньше это был демоушен `manager → client` + `blocked` + автосоздание клиентского
+    аккаунта. Тот аккаунт нужен был только потому, что человек оставался в базе
+    «клиентом», которым никогда не был: номер занят навсегда, повторный найм
+    невозможен, а `invite_employee` вынужден проверять роль платформы раньше
+    членства — иначе демоутнутый менеджер получал бы лживое «номер пов'язаний з
+    іншим акаунтом». Физическое удаление снимает всю конструкцию разом.
+
+    Данные при этом не теряются: `e5f6a7b8c1d3` перевела `client_id` в ТТН/движениях
+    склада/тредах на `SET NULL`, поэтому история остаётся, а ссылка на человека
+    обнуляется. Ключ НП, наоборот, обязан умереть — `sender_profiles` уходит
+    каскадом вместе со строкой.
+
+    Повторный найм того же номера заведёт **нового** пользователя с новым UUID: ни
+    старых прав, ни дежурства, ни истории доступа он не унаследует.
+    """
     _require_owner(actor, settings)
     users = UserRepository(session)
     manager = await _get_manager(users, manager_id)
     _require_can_manage(actor, manager, settings)
     before_status = manager.status
-    await users.set_duty(manager, on_duty=False, duty_date=manager.duty_date, duty_since=None)
+    # Дежурство снимать не нужно — оно живёт колонками в самой строке `users`.
+    # А вот открытые обращения обязаны вернуться в очередь до удаления: FK
+    # `assigned_manager_id` обнулился бы, но тред остался бы в статусе `open` без
+    # дежурного, то есть невидимым для всех.
     await SupportRepository(session).unassign_open_for_manager(manager.id)
-    if manager.status is not UserStatus.blocked:
-        await users.update_status(manager, UserStatus.blocked)
-    await users.update_role(manager, UserRole.client)
-    await users.set_permissions(manager, {})
-    # Клиент без аккаунта — сломанное состояние: `account_id` во всех клиентских
-    # таблицах NOT NULL, а `resolve_account_scope` без членства вернёт None → любая
-    # запись (ФОП, ТТН, склад) падает NotNullViolation. `users.create` заводит акаунт
-    # только для роли `client`, поэтому у менеджера его нет, и смена роли обязана
-    # его создать. Достижимо через UI: найм по Telegram-ID → снятие роли → разблокировка.
-    accounts = ClientAccountRepository(session)
-    if await accounts.get_membership(user_id=manager.id) is None:
-        # Savepoint: между проверкой и вставкой есть гонка (двойной клик «Зняти роль»
-        # — два параллельных вызова, оба не видят членства). Акаунт создаётся с
-        # `id=manager.id`, поэтому второй падает на уникальности. Проигравший просто
-        # пропускает вставку: победитель уже создал ровно то, что нужно.
-        try:
-            async with session.begin_nested():
-                await accounts.create_for_owner(manager)
-        except IntegrityError:
-            pass
-    await AuditRepository(session).log(
+
+    # Демоутнутый когда-то менеджер мог обзавестись клиентским аккаунтом. Членство
+    # уйдёт каскадом вместе со строкой, а вот сам аккаунт — нет: FK из `users` в
+    # `client_accounts` не существует, связь только через членство. Аккаунт остался
+    # бы живой пустышкой без владельца — гасим, как это делает `_take_over`.
+    membership = await ClientAccountRepository(session).get_membership(user_id=manager.id)
+    if membership is not None and membership.role is MembershipRole.account_owner:
+        membership.account.status = ClientAccountStatus.archived
+
+    audit = AuditRepository(session)
+    await audit.log(
         "manager_deleted",
         user_id=actor.id,
         affected_entity=f"user:{manager.id}",
-        before={"role": UserRole.manager, "status": before_status},
-        after={"role": UserRole.client, "status": UserStatus.blocked},
+        before={"role": UserRole.manager.value, "status": before_status.value},
+        after={"role": None, "status": "deleted"},
     )
+    # До `session.delete`: после него строк с этим `user_id` уже не найти —
+    # FK обнулится, и payload'ы с ПИБ/телефоном осиротеют неочищенными.
+    await audit.scrub_user_pii(manager.id)
+    await session.delete(manager)
+    await session.flush()

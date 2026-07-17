@@ -191,6 +191,20 @@ async def _status_action(
     await callback.answer("Готово")
 
 
+@router.callback_query(F.data.startswith("stf:block:"))
+async def cb_block(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    await _status_action(callback, effective_context, db_session, staff.block_manager)
+
+
+@router.callback_query(F.data.startswith("stf:unblock:"))
+async def cb_unblock(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    await _status_action(callback, effective_context, db_session, staff.unblock_manager)
+
+
 @router.callback_query(F.data.startswith("stf:delete:"))
 async def cb_delete(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession

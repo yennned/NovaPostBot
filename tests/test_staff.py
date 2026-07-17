@@ -8,14 +8,13 @@ from app.bot.types import ClientAccountContext
 from app.db.models.audit import AuditLog
 from app.db.models.enums import (
     ClientAccountStatus,
-    MembershipRole,
     SupportThreadStatus,
     UserRole,
     UserStatus,
 )
 from app.db.repositories import (
+    AuditRepository,
     ClientAccountRepository,
-    SenderProfileRepository,
     SupportRepository,
     UserRepository,
 )
@@ -193,7 +192,14 @@ async def test_block_clears_duty_and_threads_then_unblock(db_session: AsyncSessi
     assert back.status is UserStatus.active
 
 
-async def test_delete_manager_blocks_demotes_and_clears_threads(db_session: AsyncSession):
+async def test_delete_manager_removes_the_row_and_returns_threads_to_queue(
+    db_session: AsyncSession,
+):
+    """Удаление физическое: строки `users` нет, а открытые обращения — в очереди.
+
+    Раньше это был демоушен `manager → client` + `blocked`: человек оставался в базе
+    «клиентом», которым никогда не был, и номер был занят навсегда.
+    """
     owner = await _owner(db_session)
     manager = await _manager(db_session)
     client = await _client(db_session)
@@ -201,17 +207,71 @@ async def test_delete_manager_blocks_demotes_and_clears_threads(db_session: Asyn
     thread = await SupportRepository(db_session).create_thread(
         client_id=client.id, assigned_manager_id=manager.id, status=SupportThreadStatus.open
     )
+    manager_id, phone, telegram_id = manager.id, manager.phone, manager.telegram_id
 
-    await staff.delete_manager(db_session, actor=owner, manager_id=manager.id)
+    await staff.delete_manager(db_session, actor=owner, manager_id=manager_id)
 
-    assert manager.role is UserRole.client
-    assert manager.status is UserStatus.blocked
-    assert manager.on_duty is False
-    assert manager.permissions == {}
+    users = UserRepository(db_session)
+    assert await users.get_by_id(manager_id) is None, "строка менеджера пережила удаление"
+    # Номер и Telegram освободились — повторный найм возможен.
+    assert await users.get_by_phone(phone) is None
+    assert await users.get_by_telegram_id(telegram_id) is None
+
     refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
-    assert refreshed.status is SupportThreadStatus.waiting
+    assert refreshed.status is SupportThreadStatus.waiting, "тред остался бы невидимым для всех"
     assert refreshed.assigned_manager_id is None
     assert "manager_deleted" in await _audit_actions(db_session)
+
+
+async def test_delete_manager_scrubs_pii_but_keeps_the_audit_trail(db_session: AsyncSession):
+    """ПИИ уходят из payload'ов, сам факт действия остаётся.
+
+    `audit_logs.user_id` обнуляет FK, но до JSONB он не добирается — телефон и ПИБ
+    пережили бы человека в `before`/`after`.
+    """
+    owner = await _owner(db_session)
+    manager = await _manager(db_session, telegram_id=778)
+    manager_id, phone = manager.id, manager.phone
+    await AuditRepository(db_session).log(
+        "manager_hired",
+        user_id=owner.id,
+        affected_entity=f"user:{manager_id}",
+        after={"phone": phone, "full_name": "Менеджер 778", "role": "manager"},
+    )
+    await db_session.flush()
+
+    await staff.delete_manager(db_session, actor=owner, manager_id=manager_id)
+
+    rows = list(
+        await db_session.scalars(
+            select(AuditLog).where(AuditLog.affected_entity == f"user:{manager_id}")
+        )
+    )
+    assert rows, "аудит вычистили целиком — должен остаться след действия"
+    hired = next(r for r in rows if r.action == "manager_hired")
+    assert "phone" not in hired.after and "full_name" not in hired.after
+    assert hired.after["role"] == "manager", "непersonальные поля обязаны остаться"
+
+
+async def test_delete_manager_archives_a_leftover_client_account(db_session: AsyncSession):
+    """Аккаунт демоутнутого когда-то менеджера не остаётся живой пустышкой.
+
+    Членство уйдёт каскадом вместе со строкой, а сам аккаунт — нет: FK из `users`
+    в `client_accounts` не существует, связь только через членство.
+    """
+    owner = await _owner(db_session)
+    manager = await _manager(db_session, telegram_id=779)
+    accounts = ClientAccountRepository(db_session)
+    account, _membership = await accounts.create_for_owner(manager)  # как делал демоушен
+    await db_session.flush()
+    account_id = account.id
+
+    await staff.delete_manager(db_session, actor=owner, manager_id=manager.id)
+    db_session.expire_all()
+
+    leftover = await accounts.get_by_id(account_id)
+    assert leftover is not None
+    assert leftover.status is ClientAccountStatus.archived, "аккаунт без владельца остался живым"
 
 
 async def test_add_manager_rejects_client_employee(db_session: AsyncSession):
@@ -245,25 +305,21 @@ async def test_add_manager_rejects_client_employee(db_session: AsyncSession):
     assert membership.account.status is ClientAccountStatus.active
 
 
-async def test_delete_manager_gives_demoted_client_an_account(db_session: AsyncSession):
-    # Регрессия: `users.create` заводит акаунт только роли `client`, поэтому у
-    # менеджера его нет. Снятие роли делало его клиентом БЕЗ акаунта, а `account_id`
-    # во всех клиентских таблицах NOT NULL → первая же запись (ФОП/ТТН/склад) падала
-    # NotNullViolation. Путь достижим: найм по Telegram-ID → снятие роли → разблокировка.
+async def test_delete_manager_does_not_leave_a_client_behind(db_session: AsyncSession):
+    """Удалённый менеджер не превращается в клиента — он исчезает.
+
+    Отменяет прежний инвариант «снятие роли обязано завести аккаунт»: аккаунт был
+    нужен лишь потому, что демоушен оставлял в базе клиента без аккаунта, а
+    `account_id` во всех клиентских таблицах NOT NULL. Нет демоушена — нет и
+    проблемы, а номер освобождается для повторного найма.
+    """
     owner = await _owner(db_session)
     manager = await _manager(db_session, telegram_id=777)
     accounts = ClientAccountRepository(db_session)
     assert await accounts.get_membership(user_id=manager.id) is None
+    manager_id = manager.id
 
-    await staff.delete_manager(db_session, actor=owner, manager_id=manager.id)
+    await staff.delete_manager(db_session, actor=owner, manager_id=manager_id)
 
-    assert manager.role is UserRole.client
-    membership = await accounts.get_membership(user_id=manager.id)
-    assert membership is not None, "клиент без аккаунта — сломанное состояние"
-    assert membership.role is MembershipRole.account_owner
-
-    # И запись клиентских данных теперь проходит, а не падает NotNullViolation.
-    await SenderProfileRepository(db_session).create(
-        client_id=manager.id, name="ФОП", np_api_key="k", is_default=True
-    )
-    await db_session.flush()
+    assert await UserRepository(db_session).get_by_id(manager_id) is None
+    assert await accounts.get_membership(user_id=manager_id) is None, "клиента заводить не должны"
