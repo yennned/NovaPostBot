@@ -20,8 +20,19 @@ class UserRepository(BaseRepository):
         stmt = select(User).where(User.telegram_id == telegram_id)
         return await self.session.scalar(stmt)
 
-    async def get_by_phone(self, phone: str) -> User | None:
+    async def get_by_phone(self, phone: str, *, for_update: bool = False) -> User | None:
+        """Пользователь по телефону. `for_update` — блокировка строки до конца транзакции.
+
+        Блокировка нужна там, где по прочитанному состоянию принимается решение
+        о записи (`account_team.invite_employee`): UNIQUE по `user_id` в членстве
+        ловит только двойную вставку, а два параллельных приглашения одного
+        номера прочитали бы одно и то же членство, оба прошли бы проверки и
+        перезаписали `membership.account` — оба вернули бы успех, а человек
+        остался бы в аккаунте того, кто закоммитил последним.
+        """
         stmt = select(User).where(User.phone == phone)
+        if for_update:
+            stmt = stmt.with_for_update()
         return await self.session.scalar(stmt)
 
     async def create(

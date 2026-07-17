@@ -121,9 +121,7 @@ async def invite_submit(
         await message.answer(str(exc))
         return
     await state.clear()
-    await message.answer(
-        f"✅ Запрошення створено для {member.phone}. Працівник має надіслати власний контакт боту."
-    )
+    await message.answer(texts.invite_result_text(member))
 
 
 async def _mutate(
