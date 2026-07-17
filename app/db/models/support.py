@@ -28,8 +28,10 @@ if TYPE_CHECKING:
 class SupportThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "support_threads"
 
-    client_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    # «Кто обратился», а не скоуп: компанию держит `account_id`. Переживает
+    # физическое удаление человека как NULL — см. `e5f6a7b8c1d3`.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=False
@@ -52,7 +54,7 @@ class SupportThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    client: Mapped[User] = relationship(foreign_keys=[client_id])
+    client: Mapped[User | None] = relationship(foreign_keys=[client_id])
     account: Mapped[ClientAccount] = relationship()
     assigned_manager: Mapped[User | None] = relationship(foreign_keys=[assigned_manager_id])
     shipment: Mapped[Shipment | None] = relationship()

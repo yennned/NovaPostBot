@@ -29,8 +29,10 @@ if TYPE_CHECKING:
 class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "shipments"
 
-    client_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    # «Кто завёл ТТН» (у ТТН работника — сам работник), а не скоуп: компанию держит
+    # `account_id`. Переживает удаление человека как NULL — см. `e5f6a7b8c1d3`.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=False
@@ -83,7 +85,7 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     fee_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     fee_free: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
-    client: Mapped[User] = relationship(foreign_keys=[client_id])
+    client: Mapped[User | None] = relationship(foreign_keys=[client_id])
     account: Mapped[ClientAccount] = relationship()
     created_by_user: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id])
     sender_profile: Mapped[SenderProfile | None] = relationship()
