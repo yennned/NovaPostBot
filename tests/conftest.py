@@ -120,3 +120,25 @@ async def account_of(session: AsyncSession, client):
     membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
     assert membership is not None, f"у клиента {client.id} нет аккаунта — сломанное состояние"
     return membership.account
+
+
+async def employee_of(session: AsyncSession, owner, *, phone: str, telegram_id: int):
+    """Активный работник в аккаунте `owner` — через настоящие сервисные пути.
+
+    Членство не собираем руками: `invite_employee` + `activate_employee_contact` —
+    ровно то, что делает бот, поэтому тест не разъедется с продом.
+    """
+    from app.bot.types import ClientAccountContext
+    from app.db.repositories import ClientAccountRepository, UserRepository
+    from app.services import account_team
+
+    membership = await ClientAccountRepository(session).get_membership(user_id=owner.id)
+    assert membership is not None, f"у владельца {owner.id} нет аккаунта — сломанное состояние"
+    context = ClientAccountContext(user=owner, account=membership.account, membership=membership)
+    invited = await account_team.invite_employee(session, context=context, phone=phone)
+    employee = await UserRepository(session).get_by_id(invited.user_id)
+    assert employee is not None
+    await account_team.activate_employee_contact(
+        session, user=employee, telegram_id=telegram_id, full_name="Працівник"
+    )
+    return employee

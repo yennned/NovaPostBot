@@ -16,18 +16,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db.models.user import User
-from app.db.repositories import SenderProfileRepository
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import PriceQuote
-from app.services.exceptions import SenderProfileNotConfigured
+from app.services.sender_scope import resolve_scoped_profile
 
 
-async def _resolve_key(session: AsyncSession, client: User, sender_profile_id: uuid.UUID) -> str:
-    """Ключ НП явно заданного ФОП клиента (FSM держит его id)."""
-    profile = await SenderProfileRepository(session).get_by_id(sender_profile_id)
-    if profile is None or profile.client_id != client.id:
-        raise SenderProfileNotConfigured("ФОП не знайдено")
+async def _resolve_key(
+    session: AsyncSession,
+    client: User,
+    sender_profile_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+) -> str:
+    """Ключ НП явно заданного ФОП в скоупе актора (FSM держит его id)."""
+    profile = await resolve_scoped_profile(
+        session, client=client, sender_profile_id=sender_profile_id, account_id=account_id
+    )
     return profile.np_api_key  # EncryptedString расшифровывает при чтении
 
 
@@ -41,11 +45,12 @@ async def quote_ttn(
     cost: Decimal,
     np_client: NovaPoshtaClient,
     cod_amount: Decimal | None = None,
+    account_id: uuid.UUID | None = None,
     settings: Settings | None = None,
 ) -> PriceQuote:
     """Стоимость/срок доставки НП (склад-отправитель → відділення получателя)."""
     settings = settings or get_settings()
-    api_key = await _resolve_key(session, client, sender_profile_id)
+    api_key = await _resolve_key(session, client, sender_profile_id, account_id)
     return await methods.get_price(
         np_client,
         api_key=api_key,

@@ -39,13 +39,13 @@ from app.services.exceptions import (
     InsufficientStock,
     SenderDispatchNotConfigured,
     SenderProfileIncomplete,
-    SenderProfileNotConfigured,
     SenderProfileNotValidated,
     ShipmentNotFound,
     TtnCancelFailed,
     TtnCreationFailed,
 )
 from app.services.notifications import Notifier
+from app.services.sender_scope import resolve_scoped_profile
 from app.sheets import StockSource
 from app.utils.phone import normalize_phone
 from app.utils.sla import shipment_sla_deadline
@@ -92,19 +92,9 @@ async def _resolve_sender(
     account_id: uuid.UUID | None = None,
 ) -> SenderProfile:
     """Найти ФОП клиента (явный или дефолтный) и убедиться, что он готов к відправленню."""
-    repo = SenderProfileRepository(session)
-    if sender_profile_id is not None:
-        profile = await repo.get_by_id(sender_profile_id)
-        if profile is None or (
-            profile.account_id != account_id
-            if account_id is not None
-            else profile.client_id != client.id
-        ):
-            raise SenderProfileNotConfigured("ФОП не знайдено")
-    else:
-        profile = await repo.get_default_for_client(client.id, account_id=account_id)
-        if profile is None:
-            raise SenderProfileNotConfigured("ФОП ще не налаштований, зверніться до менеджера")
+    profile = await resolve_scoped_profile(
+        session, client=client, sender_profile_id=sender_profile_id, account_id=account_id
+    )
     ensure_sender_dispatchable(profile, settings)
     return profile
 
