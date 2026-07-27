@@ -1,4 +1,4 @@
-"""store the reason entered by staff when cancelling a shipment."""
+"""Сохранить причину, указанную сотрудником при отмене отправления."""
 
 from collections.abc import Sequence
 

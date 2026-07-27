@@ -96,7 +96,7 @@ class TtnCancelFailed(ClientServiceError):
 
 
 class InvalidCancellationReason(ClientServiceError):
-    """Причина скасування не вкладається у безпечний розмір повідомлень."""
+    """Причина отмены не помещается в безопасный размер сообщений."""
 
     def __init__(self, max_length: int) -> None:
         super().__init__(f"Причина скасування має містити не більше {max_length} символів")

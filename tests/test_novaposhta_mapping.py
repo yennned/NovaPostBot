@@ -99,7 +99,8 @@ def test_save_props_volume_optional():
         _draft(parcel=ParcelSpec(weight=Decimal("1"), volume_general=Decimal("0.004")))
     )
     assert props["VolumeGeneral"] == "0.004"
-    assert props["OptionsSeat"][0]["volumetricVolume"] == "0.004"
+    assert props["OptionsSeat"][0]["volumetricVolume"] == "0.004096"
+    assert props["OptionsSeat"][0]["volumetricLength"] == "16"
 
 
 def test_save_props_rejects_partial_dimensions():
@@ -168,6 +169,7 @@ def test_save_props_always_includes_options_seat():
 def test_save_props_seats_amount():
     props = to_save_props(_draft(parcel=ParcelSpec(weight=Decimal("10"), seats_amount=3)))
     assert props["SeatsAmount"] == "3"
+    assert props["OptionsSeat"][0]["weight"] == "3.333"
 
 
 def test_money_formats_decimal_as_string():

@@ -444,8 +444,8 @@ async def cb_cancel(
     except (ValueError, AttributeError):
         await callback.answer(_STALE, show_alert=True)
         return
-    # Перечитуємо картку до запиту причини: старий callback не повинен відкрити
-    # FSM для вже видаленого/скасованого відправлення.
+    # Перечитываем карточку перед запросом причины: старый callback не должен
+    # открыть FSM для уже удалённого/отменённого отправления.
     try:
         card = await manager_shipments.get_card(
             db_session,

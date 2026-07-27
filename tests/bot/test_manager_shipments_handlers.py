@@ -22,6 +22,7 @@ from app.bot.types import EffectiveContext
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.models.user import User
 from app.services import manager_shipments
+from app.services.exceptions import ClientServiceError
 from app.services.manager_shipments import (
     ManagerShipmentCard,
     ManagerShipmentListItem,
@@ -336,6 +337,45 @@ async def test_receive_cancel_reason_too_long_keeps_waiting_state():
 
     assert state.state == ManagerShipmentState.waiting_for_cancel_reason
     assert "не більше 500 символів" in message.answers[-1]["text"]
+
+
+async def test_receive_cancel_reason_service_error_keeps_waiting_state(monkeypatch):
+    state = FakeState()
+    await state.set_state(ManagerShipmentState.waiting_for_cancel_reason)
+    await state.update_data(manager_cancel_shipment_id=str(uuid4()))
+    message = FakeMessage()
+    message.text = "Статус уже змінився"
+
+    async def fake_cancel(*args, **kwargs):
+        raise ClientServiceError("Відправлення вже скасовано")
+
+    monkeypatch.setattr(
+        "app.bot.handlers.manager_shipments.manager_shipments.cancel_shipment", fake_cancel
+    )
+
+    await receive_cancel_reason(
+        message,
+        _ctx(UserRole.manager),
+        FakeSession(),
+        FakeBot(),
+        object(),
+        state,
+    )
+
+    assert state.state == ManagerShipmentState.waiting_for_cancel_reason
+    assert message.answers[-1]["text"] == "Відправлення вже скасовано"
+
+
+def test_sanitize_cancellation_reason_redacts_contact_identifiers():
+    reason = manager_shipments._sanitize_cancellation_reason(
+        "Зателефонувати +380 67 123 45 67 або написати test@example.com @client"
+    )
+
+    assert "380" not in reason
+    assert "@client" not in reason
+    assert "[телефон скрыт]" in reason
+    assert "[email скрыт]" in reason
+    assert "[контакт скрыт]" in reason
 
 
 async def test_cb_return_opens_inspection(monkeypatch):

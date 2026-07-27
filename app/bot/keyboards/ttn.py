@@ -230,7 +230,7 @@ def build_card_kb(*, is_org: bool) -> InlineKeyboardMarkup:
 
 
 def build_sender_edit_kb(profiles) -> InlineKeyboardMarkup:
-    """Вибір ФОП із картки без скидання кошика та даних ТТН."""
+    """Выбор ФОП из карточки без сброса корзины и данных ТТН."""
     rows = [
         [
             InlineKeyboardButton(

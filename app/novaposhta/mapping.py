@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from typing import Any
 
 from app.novaposhta.schemas import ParcelSpec, TTNDraft
@@ -57,7 +57,7 @@ def _positive_decimal(value: Decimal | int | str, *, field: str) -> Decimal:
 
 
 def _parcel_geometry(parcel: ParcelSpec) -> tuple[tuple[str, str, str], Decimal]:
-    """Повернути габарити місця та узгоджений об'єм для `OptionsSeat`."""
+    """Вернуть габариты места и согласованный объём для `OptionsSeat`."""
     raw_dimensions = (parcel.length_cm, parcel.width_cm, parcel.height_cm)
     supplied = [value is not None for value in raw_dimensions]
     if any(supplied) and not all(supplied):
@@ -77,10 +77,16 @@ def _parcel_geometry(parcel: ParcelSpec) -> tuple[tuple[str, str, str], Decimal]
         else:
             volume = calculated_volume
     elif parcel.volume_general is not None:
-        # Compatibility path для старих caller-ів: фізичні dimensions відсутні,
-        # тому OptionsSeat отримує мінімальні габарити, але зберігає явний об'єм.
-        volume = _positive_decimal(parcel.volume_general, field="об'єм")
-        dimensions = (Decimal("10"), Decimal("10"), Decimal("10"))
+        # Совместимость со старыми вызывающими кодами: из явного объёма строим
+        # кубическое место с округлением стороны вверх до целого сантиметра.
+        explicit_volume = _positive_decimal(parcel.volume_general, field="объём")
+        cubic_centimeters = explicit_volume * Decimal("1000000")
+        side = ((cubic_centimeters.ln() / Decimal("3")).exp()).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+        side = max(side, Decimal("1"))
+        dimensions = (side, side, side)
+        volume = side**3 / Decimal("1000000")
     else:
         dimensions = (Decimal("10"), Decimal("10"), Decimal("10"))
         volume = Decimal("0.001")
@@ -91,17 +97,17 @@ def to_save_props(draft: TTNDraft) -> dict[str, Any]:
     """Собрать `methodProperties` для `InternetDocument.save` из черновика."""
     seats_amount = max(int(draft.parcel.seats_amount), 1)
     (length, width, height), volume = _parcel_geometry(draft.parcel)
-    # InternetDocument.save rejects a request with only SeatsAmount/Weight:
-    # OptionsSeat is required even for one seat. Keep one complete entry per
-    # seat and divide total weight between seats when there are several.
-    seat_weight = Decimal(str(draft.parcel.weight)) / seats_amount
+    # InternetDocument.save отклоняет запрос только с SeatsAmount/Weight:
+    # OptionsSeat обязателен даже для одного места. Для нескольких мест
+    # делим общий вес и ограничиваем точность до 3 знаков после запятой.
+    seat_weight = (Decimal(str(draft.parcel.weight)) / seats_amount).quantize(Decimal("0.001"))
     options_seat = [
         {
             "volumetricVolume": money(volume),
             "volumetricWidth": width,
             "volumetricLength": length,
             "volumetricHeight": height,
-            "weight": weight(seat_weight),
+            "weight": weight(seat_weight.normalize()),
         }
         for _ in range(seats_amount)
     ]

@@ -270,7 +270,7 @@ async def create_shipment(
     except NovaPoshtaError as exc:
         raise TtnCreationFailed(str(exc)) from exc
     except ValueError as exc:
-        # Некоректні/суперечливі габарити не повинні просочуватися як 500.
+        # Некорректные/противоречивые габариты не должны просачиваться как 500.
         raise TtnCreationFailed(str(exc)) from exc
 
     # Успех НП → запись в БД (последний awaited-шаг). status=created → резерв активен.

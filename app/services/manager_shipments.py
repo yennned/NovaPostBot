@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -44,6 +45,16 @@ NONSTANDARD_SOURCE_STATUSES = {
 }
 NONSTANDARD_TARGET_STATUSES = {ShipmentStatus.lost, ShipmentStatus.damaged}
 MAX_CANCELLATION_REASON_LENGTH = 500
+_CANCELLATION_EMAIL_RE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
+_CANCELLATION_PHONE_RE = re.compile(r"(?<!\w)(?:\+?380|0)[\s()-]*\d(?:[\s()-]*\d){8,11}(?!\w)")
+_CANCELLATION_HANDLE_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}(?!\w)")
+
+
+def _sanitize_cancellation_reason(reason: str) -> str:
+    """Удалить из причины очевидные email, телефоны и имена пользователей Telegram."""
+    sanitized = _CANCELLATION_EMAIL_RE.sub("[email скрыт]", reason)
+    sanitized = _CANCELLATION_PHONE_RE.sub("[телефон скрыт]", sanitized)
+    return _CANCELLATION_HANDLE_RE.sub("[контакт скрыт]", sanitized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +236,8 @@ async def cancel_shipment(
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
     reason = (reason or "").strip() or None
+    if reason is not None:
+        reason = _sanitize_cancellation_reason(reason)
     if reason is not None and len(reason) > MAX_CANCELLATION_REASON_LENGTH:
         raise InvalidCancellationReason(MAX_CANCELLATION_REASON_LENGTH)
     before = {"status": shipment.status.value}

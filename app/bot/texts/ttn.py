@@ -132,7 +132,7 @@ def recipient_name_invalid(kind: str = "person") -> str:
 
 
 def recipient_person_name_valid(value: str) -> bool:
-    """ПІБ: літери, пробіли, дефіс і апостроф; цифри заборонені."""
+    """ФИО: буквы, пробелы, дефис и апостроф; цифры запрещены."""
     return bool(re.fullmatch(r"[^\W\d_]+(?:[ '\u2019-]+[^\W\d_]+)*", value.strip(), re.UNICODE))
 
 

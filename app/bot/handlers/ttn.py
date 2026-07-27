@@ -229,8 +229,8 @@ async def _resolve_sender_and_begin(
         )
         profile_name = profile_view.name
     except ClientServiceError:
-        # Гейт уже подтвердил профиль; имя — только UI-метаданные и не должно
-        # блокировать создание ТТН при transient-перечитуванні.
+        # Проверка уже подтвердила профиль; имя — только UI-метаданные и не должно
+        # блокировать создание ТТН при временной ошибке повторного чтения.
         profile_name = "—"
 
     await state.clear()
@@ -1102,7 +1102,7 @@ async def cb_recipient_kind(callback: CallbackQuery, state: FSMContext) -> None:
 async def receive_recipient_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     kind = (await state.get_data()).get("recipient_kind", "person")
-    if not name or (kind == "person" and not texts.recipient_person_name_valid(name)):
+    if not _recipient_name_ok(kind, name):
         await message.answer(texts.recipient_name_invalid(kind))
         return
     await state.update_data(recipient_name=name)
@@ -1582,6 +1582,11 @@ async def cb_recompute(
 _TEXT_EDIT_TOKENS = {"name", "phone", "edrpou", "weight", "insured", "descr"}
 
 
+def _recipient_name_ok(kind: str, value: str) -> bool:
+    """Проверить имя получателя с учётом типа получателя."""
+    return bool(value) and (kind != "person" or texts.recipient_person_name_valid(value))
+
+
 @router.callback_query(CreateTtnState.summary, F.data == "cab:ttn:edit:sender")
 async def cb_edit_sender(
     callback: CallbackQuery,
@@ -1589,7 +1594,7 @@ async def cb_edit_sender(
     db_session: AsyncSession,
     state: FSMContext,
 ) -> None:
-    """Відкрити вибір ФОП прямо з картки-зведення."""
+    """Открыть выбор ФОП прямо из карточки-сводки."""
     if callback.message is None:
         await callback.answer(_STALE, show_alert=True)
         return
@@ -1634,7 +1639,7 @@ async def cb_edit_sender_pick(
     np_client: NovaPoshtaClient,
     state: FSMContext,
 ) -> None:
-    """Застосувати ФОП, не очищаючи поточну картку ТТН."""
+    """Применить ФОП, не очищая текущую карточку ТТН."""
     if callback.message is None:
         await callback.answer(_STALE, show_alert=True)
         return
@@ -1799,7 +1804,7 @@ async def receive_edit(
     updates: dict = {}
     if field == "name":
         kind = (await state.get_data()).get("recipient_kind", "person")
-        if not raw or (kind == "person" and not texts.recipient_person_name_valid(raw)):
+        if not _recipient_name_ok(kind, raw):
             await message.answer(texts.recipient_name_invalid(kind))
             return
         updates["recipient_name"] = raw
