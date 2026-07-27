@@ -436,8 +436,9 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
 
 
 def _price_key(data: dict) -> str:
-    """Хэш влияющих на тариф полей (getDocumentPrice): місто/вага/вартість/COD."""
+    """Хэш влияющих на тариф полей, включая ФОП/API-ключ отправителя."""
     parts = (
+        data.get("sender_profile_id"),
         data.get("recipient_city_ref"),
         data.get("weight"),
         data.get("insured_amount"),

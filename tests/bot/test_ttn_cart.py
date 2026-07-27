@@ -1065,6 +1065,21 @@ async def test_card_price_cached_between_renders(monkeypatch):
     assert counter["n"] == 1
 
 
+async def test_card_price_cache_is_invalidated_when_sender_changes(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state(insured_amount="0")
+    data = state._data
+
+    first = await h._card_price(None, _CLIENT, data, object(), force=False)
+    data["price_cache"] = first
+    data["sender_profile_id"] = str(uuid4())
+    second = await h._card_price(None, _CLIENT, data, object(), force=False)
+
+    assert counter["n"] == 2
+    assert second["key"] != first["key"]
+
+
 async def test_recompute_forces_price(monkeypatch):
     counter: dict = {}
     _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
