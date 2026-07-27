@@ -130,15 +130,20 @@ def shipment_status_text(shipment: Shipment) -> str:
     ]
     if shipment.status is ShipmentStatus.dispatched and shipment.sla_met is not None:
         lines.append("SLA: " + ("вчасно" if shipment.sla_met else "прострочено"))
+    if shipment.status is ShipmentStatus.cancelled and shipment.cancellation_reason:
+        lines.append(f"Причина: {html.escape(shipment.cancellation_reason)}")
     return "\n".join(lines)
 
 
 def shipment_cancelled_text(client: User, shipment: Shipment) -> str:
-    return (
+    text = (
         "❌ <b>Клієнт скасував ТТН</b>\n"
         f"Клієнт: {_client_label(client)}\n"
         f"№ ТТН: <code>{shipment.ttn_number or '—'}</code>"
     )
+    if shipment.cancellation_reason:
+        text += f"\nПричина: {html.escape(shipment.cancellation_reason)}"
+    return text
 
 
 def low_stock_text(client: User, items: list[InventoryItem]) -> str:

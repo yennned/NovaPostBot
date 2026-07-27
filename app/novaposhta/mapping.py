@@ -21,10 +21,10 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.novaposhta.schemas import TTNDraft
+from app.novaposhta.schemas import ParcelSpec, TTNDraft
 
 # Способ оплаты за саму доставку — фиксированный (на функции бота не влияет,
 # меняется одной константой). Не путать с COD (накладений платіж получателя).
@@ -45,15 +45,74 @@ def weight(value: Decimal | int | str) -> str:
     return f"{Decimal(str(value)):f}"
 
 
+def _positive_decimal(value: Decimal | int | str, *, field: str) -> Decimal:
+    """Положительное конечное число для габарита/объёма НП."""
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} має бути числом більше 0") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError(f"{field} має бути числом більше 0")
+    return parsed
+
+
+def _parcel_geometry(parcel: ParcelSpec) -> tuple[tuple[str, str, str], Decimal]:
+    """Повернути габарити місця та узгоджений об'єм для `OptionsSeat`."""
+    raw_dimensions = (parcel.length_cm, parcel.width_cm, parcel.height_cm)
+    supplied = [value is not None for value in raw_dimensions]
+    if any(supplied) and not all(supplied):
+        raise ValueError("довжина, ширина та висота мають бути задані разом")
+
+    if all(supplied):
+        dimensions = tuple(
+            _positive_decimal(value, field=field)
+            for value, field in zip(raw_dimensions, ("довжина", "ширина", "висота"), strict=True)
+        )
+        calculated_volume = dimensions[0] * dimensions[1] * dimensions[2] / Decimal("1000000")
+        if parcel.volume_general is not None:
+            explicit_volume = _positive_decimal(parcel.volume_general, field="об'єм")
+            if explicit_volume != calculated_volume:
+                raise ValueError("volume_general не відповідає габаритам місця")
+            volume = explicit_volume
+        else:
+            volume = calculated_volume
+    elif parcel.volume_general is not None:
+        # Compatibility path для старих caller-ів: фізичні dimensions відсутні,
+        # тому OptionsSeat отримує мінімальні габарити, але зберігає явний об'єм.
+        volume = _positive_decimal(parcel.volume_general, field="об'єм")
+        dimensions = (Decimal("10"), Decimal("10"), Decimal("10"))
+    else:
+        dimensions = (Decimal("10"), Decimal("10"), Decimal("10"))
+        volume = Decimal("0.001")
+    return tuple(f"{value:f}" for value in dimensions), volume
+
+
 def to_save_props(draft: TTNDraft) -> dict[str, Any]:
     """Собрать `methodProperties` для `InternetDocument.save` из черновика."""
+    seats_amount = max(int(draft.parcel.seats_amount), 1)
+    (length, width, height), volume = _parcel_geometry(draft.parcel)
+    # InternetDocument.save rejects a request with only SeatsAmount/Weight:
+    # OptionsSeat is required even for one seat. Keep one complete entry per
+    # seat and divide total weight between seats when there are several.
+    seat_weight = Decimal(str(draft.parcel.weight)) / seats_amount
+    options_seat = [
+        {
+            "volumetricVolume": money(volume),
+            "volumetricWidth": width,
+            "volumetricLength": length,
+            "volumetricHeight": height,
+            "weight": weight(seat_weight),
+        }
+        for _ in range(seats_amount)
+    ]
     props: dict[str, Any] = {
         "PayerType": draft.payer_type,
         "PaymentMethod": PAYMENT_METHOD,
         "CargoType": draft.cargo_type,
         "ServiceType": draft.service_type,
-        "SeatsAmount": str(draft.parcel.seats_amount),
+        "SeatsAmount": str(seats_amount),
         "Weight": weight(draft.parcel.weight),
+        "OptionsSeat": options_seat,
         "Description": draft.description,
         "Cost": money(draft.cost),
         # Отправитель (наш склад, контрагент = ФОП).

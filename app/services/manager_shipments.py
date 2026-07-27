@@ -198,6 +198,7 @@ async def cancel_shipment(
     actor,
     shipment_id: uuid.UUID,
     np_client: NovaPoshtaClient,
+    reason: str | None = None,
 ) -> ManagerShipmentCard:
     permissions.require_staff(actor, settings=None)
     repo = ShipmentRepository(session)
@@ -217,7 +218,9 @@ async def cancel_shipment(
             pass
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
+    reason = (reason or "").strip() or None
     before = {"status": shipment.status.value}
+    shipment.cancellation_reason = reason
     await repo.update_status(shipment, ShipmentStatus.cancelled)
     await StockMovementRepository(session).record_for_items(
         client_id=shipment.client_id,
@@ -227,7 +230,10 @@ async def cancel_shipment(
         items=shipment.items,
         movement_type=StockMovementType.ttn_cancel,
         sign=1,
-        comment=f"Скасування менеджером ТТН {shipment.ttn_number or '—'}",
+        comment=(
+            f"Скасування менеджером ТТН {shipment.ttn_number or '—'}"
+            + (f": {reason}" if reason else "")
+        ),
     )
     await AuditRepository(session).log(
         "shipment_cancelled_by_staff",
@@ -235,7 +241,7 @@ async def cancel_shipment(
         account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
-        after={"status": shipment.status.value},
+        after={"status": shipment.status.value, "cancellation_reason": reason},
     )
     await best_effort_sync(
         session,

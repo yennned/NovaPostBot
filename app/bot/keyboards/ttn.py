@@ -26,6 +26,12 @@ SIZE_PRESETS: dict[str, str] = {
     "l": "Велика (до 30 кг)",
 }
 SIZE_DEFAULT_WEIGHT: dict[str, str] = {"s": "2", "m": "10", "l": "30"}
+# Реальные размеры места (см), отправляемые НП в OptionsSeat.
+SIZE_DIMENSIONS: dict[str, tuple[str, str, str]] = {
+    "s": ("20", "20", "10"),
+    "m": ("30", "30", "20"),
+    "l": ("40", "40", "30"),
+}
 DEFAULT_SIZE_TOKEN = "s"  # noqa: S105 — это пресет коробки, не секрет
 
 
@@ -190,6 +196,7 @@ def build_card_kb(*, is_org: bool) -> InlineKeyboardMarkup:
     «✅ Відправити» добавится в PR 9d."""
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="✅ Відправити ТТН", callback_data="cab:ttn:send")],
+        [InlineKeyboardButton(text="✏️ ФОП-відправник", callback_data="cab:ttn:edit:sender")],
         [
             InlineKeyboardButton(text="✏️ Отримувач", callback_data="cab:ttn:edit:name"),
             InlineKeyboardButton(text="✏️ Телефон", callback_data="cab:ttn:edit:phone"),
@@ -219,6 +226,21 @@ def build_card_kb(*, is_org: bool) -> InlineKeyboardMarkup:
             ],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_sender_edit_kb(profiles) -> InlineKeyboardMarkup:
+    """Вибір ФОП із картки без скидання кошика та даних ТТН."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=("⭐ " if profile.is_default else "") + profile.name,
+                callback_data=f"cab:ttn:sender:{profile.id}",
+            )
+        ]
+        for profile in profiles
+    ]
+    rows.append([InlineKeyboardButton(text="◀ До картки", callback_data="cab:ttn:card")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

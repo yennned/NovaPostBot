@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 from aiogram.dispatcher.event.bases import SkipHandler
 from app.bot.handlers.manager_shipments import (
+    cb_cancel,
     cb_card,
     cb_queue,
     cb_return,
     cb_return_apply,
     open_queue,
+    receive_cancel_reason,
 )
 from app.bot.states import ManagerShipmentState
 from app.bot.types import EffectiveContext
@@ -64,6 +67,22 @@ class FakeCallback:
 
     async def answer(self, text=None, show_alert=False) -> None:
         self.acks.append({"text": text, "show_alert": show_alert})
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.edits: list[dict] = []
+
+    async def edit_message_text(self, **kwargs) -> None:
+        self.edits.append(kwargs)
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.committed = False
+
+    async def commit(self) -> None:
+        self.committed = True
 
 
 def _ctx(role: UserRole) -> EffectiveContext:
@@ -206,6 +225,97 @@ async def test_cb_card_renders_card(monkeypatch):
 
     assert cb.message.edits
     assert "Клієнт" in cb.message.edits[0]["text"]
+
+
+async def test_cb_cancel_rejects_stale_non_cancelable_card(monkeypatch):
+    shipment_id = uuid4()
+    cb = FakeCallback(f"mq:cancel:created:0:{shipment_id}")
+    card = replace(_card(shipment_id), can_cancel=False)
+
+    async def fake_get_card(session, *, actor, shipment_id):
+        return card
+
+    monkeypatch.setattr(
+        "app.bot.handlers.manager_shipments.manager_shipments.get_card",
+        fake_get_card,
+    )
+    state = FakeState()
+
+    await cb_cancel(cb, _ctx(UserRole.manager), object(), FakeBot(), object(), state)
+
+    assert cb.acks[-1]["show_alert"] is True
+    assert state.state is None
+
+
+async def test_receive_cancel_reason_persists_reason_notifies_and_clears(monkeypatch):
+    shipment_id = uuid4()
+    state = FakeState()
+    await state.set_state(ManagerShipmentState.waiting_for_cancel_reason)
+    await state.update_data(
+        manager_cancel_shipment_id=str(shipment_id),
+        manager_cancel_bucket="created",
+        manager_cancel_offset=0,
+        manager_cancel_chat_id=10,
+        manager_cancel_message_id=20,
+    )
+    message = FakeMessage()
+    message.text = "Немає товару на складі"
+    bot = FakeBot()
+    session = FakeSession()
+    captured = {}
+
+    async def fake_cancel(session, *, actor, shipment_id, np_client, reason):
+        captured["reason"] = reason
+        captured["shipment_id"] = shipment_id
+        return _card(shipment_id)
+
+    async def fake_notify(session, notifier, *, shipment_id):
+        captured["notified"] = shipment_id
+
+    monkeypatch.setattr(
+        "app.bot.handlers.manager_shipments.manager_shipments.cancel_shipment",
+        fake_cancel,
+    )
+    monkeypatch.setattr(
+        "app.bot.handlers.manager_shipments.manager_shipments.notify_client_about_status",
+        fake_notify,
+    )
+
+    await receive_cancel_reason(
+        message,
+        _ctx(UserRole.manager),
+        session,
+        bot,
+        object(),
+        state,
+    )
+
+    assert captured["reason"] == "Немає товару на складі"
+    assert captured["shipment_id"] == shipment_id
+    assert captured["notified"] == shipment_id
+    assert session.committed is True
+    assert bot.edits
+    assert state.state is None
+    assert message.answers[-1]["text"] == "✅ Відправлення скасовано."
+
+
+async def test_receive_cancel_reason_blank_keeps_waiting_state():
+    state = FakeState()
+    await state.set_state(ManagerShipmentState.waiting_for_cancel_reason)
+    message = FakeMessage()
+    message.text = "   "
+
+    await receive_cancel_reason(
+        message,
+        _ctx(UserRole.manager),
+        FakeSession(),
+        FakeBot(),
+        object(),
+        state,
+    )
+
+    assert state.state == ManagerShipmentState.waiting_for_cancel_reason
+    assert "Вкажіть причину" in message.answers[-1]["text"]
 
 
 async def test_cb_return_opens_inspection(monkeypatch):

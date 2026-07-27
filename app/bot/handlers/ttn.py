@@ -28,6 +28,7 @@ from app.bot.keyboards.client import build_sender_pick_kb
 from app.bot.keyboards.ttn import (
     DEFAULT_SIZE_TOKEN,
     SIZE_DEFAULT_WEIGHT,
+    SIZE_DIMENSIONS,
     SIZE_PRESETS,
     TTN_PAGE_SIZE,
     build_back_to_card_kb,
@@ -41,6 +42,7 @@ from app.bot.keyboards.ttn import (
     build_payer_edit_kb,
     build_payment_edit_kb,
     build_recipient_kind_kb,
+    build_sender_edit_kb,
     build_size_edit_kb,
     build_stepper_kb,
     build_success_kb,
@@ -218,10 +220,24 @@ async def _resolve_sender_and_begin(
         await target.answer(texts.sender_dispatch_not_configured_text(), parse_mode="HTML")
         return
 
+    try:
+        profile_view = await sender_profile.get_profile(
+            session,
+            actor=client,
+            profile_id=sender_profile_id,
+            account_id=account_id,
+        )
+        profile_name = profile_view.name
+    except ClientServiceError:
+        # Гейт уже подтвердил профиль; имя — только UI-метаданные и не должно
+        # блокировать создание ТТН при transient-перечитуванні.
+        profile_name = "—"
+
     await state.clear()
     await state.set_state(CreateTtnState.picking_items)
     await state.update_data(
         sender_profile_id=str(sender_profile_id),
+        sender_profile_name=profile_name,
         cart={},
         cart_offset=0,
         ttn_query=None,
@@ -1078,11 +1094,11 @@ async def cb_recipient_kind(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(CreateTtnState.entering_recipient_name, F.text, ~F.text.startswith("/"))
 async def receive_recipient_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
-    if not name:
-        await message.answer(texts.recipient_name_invalid())
+    kind = (await state.get_data()).get("recipient_kind", "person")
+    if not name or (kind == "person" and not texts.recipient_person_name_valid(name)):
+        await message.answer(texts.recipient_name_invalid(kind))
         return
     await state.update_data(recipient_name=name)
-    kind = (await state.get_data()).get("recipient_kind")
     if kind == "organization":
         await state.set_state(CreateTtnState.entering_recipient_edrpou)
         await message.answer(
@@ -1559,6 +1575,105 @@ async def cb_recompute(
 _TEXT_EDIT_TOKENS = {"name", "phone", "edrpou", "weight", "insured", "descr"}
 
 
+@router.callback_query(CreateTtnState.summary, F.data == "cab:ttn:edit:sender")
+async def cb_edit_sender(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    state: FSMContext,
+) -> None:
+    """Відкрити вибір ФОП прямо з картки-зведення."""
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("sender_profile_id") or not data.get("cart"):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        profiles = await sender_profile.list_profiles(
+            db_session,
+            actor=client,
+            client_id=client.id,
+            account_id=_account_id(effective_context),
+        )
+    except ClientServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    if not profiles:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    await state.set_state(CreateTtnState.picking_sender)
+    await callback.message.edit_text(
+        texts.pick_sender_text(),
+        reply_markup=build_sender_edit_kb(profiles),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    CreateTtnState.picking_sender,
+    F.data.startswith("cab:ttn:sender:"),
+)
+async def cb_edit_sender_pick(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    """Застосувати ФОП, не очищаючи поточну картку ТТН."""
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    client = _effective_client(effective_context)
+    if client is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("cart"):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        profile_id = uuid.UUID(callback.data.split(":")[3])
+    except (IndexError, ValueError):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        resolved_id = await resolve_sender_id(
+            db_session,
+            client=client,
+            profile_id=profile_id,
+            account_id=_account_id(effective_context),
+        )
+        profile = await sender_profile.get_profile(
+            db_session,
+            actor=client,
+            profile_id=resolved_id,
+            account_id=_account_id(effective_context),
+        )
+    except ClientServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await state.update_data(sender_profile_id=str(resolved_id), sender_profile_name=profile.name)
+    await state.set_state(CreateTtnState.summary)
+    await _show_card(
+        callback.message,
+        state,
+        session=db_session,
+        client=client,
+        np_client=np_client,
+        edit=True,
+        account_id=_account_id(effective_context),
+    )
+    await callback.answer(f"ФОП: {profile.name}")
+
+
 async def _back_to_card(
     callback: CallbackQuery,
     state: FSMContext,
@@ -1676,8 +1791,9 @@ async def receive_edit(
     raw = (message.text or "").strip()
     updates: dict = {}
     if field == "name":
-        if not raw:
-            await message.answer(texts.recipient_name_invalid())
+        kind = (await state.get_data()).get("recipient_kind", "person")
+        if not raw or (kind == "person" and not texts.recipient_person_name_valid(raw)):
+            await message.answer(texts.recipient_name_invalid(kind))
             return
         updates["recipient_name"] = raw
     elif field == "phone":
@@ -1935,6 +2051,7 @@ async def _do_create(
         recipient_warehouse_name=data["recipient_warehouse_name"],
         weight=Decimal(data["weight"]),
         size_preset=SIZE_PRESETS.get(data.get("size_token", "s"), "—"),
+        size_dimensions=SIZE_DIMENSIONS.get(data.get("size_token", "s")),
         description=data["description"],
         insured_amount=Decimal(data["insured_amount"]),
         np_client=np_client,

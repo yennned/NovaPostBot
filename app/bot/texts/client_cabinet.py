@@ -95,6 +95,11 @@ def shipment_card_text(card: ShipmentCard) -> str:
         "📬 <b>Картка відправлення</b>",
         f"ТТН: <b>{card.ttn_number or 'ще не присвоєно'}</b>",
         f"Статус: <b>{_STATUS_LABELS[card.status]}</b>",
+        *(
+            [f"Причина скасування: {html.escape(card.cancellation_reason)}"]
+            if card.cancellation_reason
+            else []
+        ),
         f"Одержувач: {card.recipient_name}",
         f"Телефон: {card.recipient_phone or '—'}",
         f"Місто: {card.recipient_city or '—'}",
