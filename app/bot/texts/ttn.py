@@ -271,7 +271,7 @@ def card_text(data: dict, price: dict) -> str:
     if price.get("unavailable"):
         lines.append("💵 Розрахунок недоступний — вартість підтвердить менеджер")
     else:
-        lines.append(f"💵 Вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
+        lines.append(f"💵 Орієнтовна вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
         if price.get("redelivery"):
             # Орієнтовно: оцінка йде через RedeliveryCalculate, фактичну комісію
             # «Контроль оплати» (NovaPay) підтверджує менеджер при відправленні.

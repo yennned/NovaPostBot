@@ -22,7 +22,12 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.services import notifications, shipments
 from app.services.client_sheet_sync import best_effort_sync
-from app.services.exceptions import ShipmentActionForbidden, ShipmentNotFound, TtnCancelFailed
+from app.services.exceptions import (
+    InvalidCancellationReason,
+    ShipmentActionForbidden,
+    ShipmentNotFound,
+    TtnCancelFailed,
+)
 from app.services.notifications import Notifier
 from app.services.returns import ReturnDecision, receive_returned_shipment
 
@@ -38,6 +43,7 @@ NONSTANDARD_SOURCE_STATUSES = {
     ShipmentStatus.returning,
 }
 NONSTANDARD_TARGET_STATUSES = {ShipmentStatus.lost, ShipmentStatus.damaged}
+MAX_CANCELLATION_REASON_LENGTH = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +225,8 @@ async def cancel_shipment(
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
     reason = (reason or "").strip() or None
+    if reason is not None and len(reason) > MAX_CANCELLATION_REASON_LENGTH:
+        raise InvalidCancellationReason(MAX_CANCELLATION_REASON_LENGTH)
     before = {"status": shipment.status.value}
     shipment.cancellation_reason = reason
     await repo.update_status(shipment, ShipmentStatus.cancelled)

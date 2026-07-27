@@ -95,6 +95,13 @@ class TtnCancelFailed(ClientServiceError):
     """НП отклонила удаление ТТН — статус не меняем, резерв не трогаем."""
 
 
+class InvalidCancellationReason(ClientServiceError):
+    """Причина скасування не вкладається у безпечний розмір повідомлень."""
+
+    def __init__(self, max_length: int) -> None:
+        super().__init__(f"Причина скасування має містити не більше {max_length} символів")
+
+
 class ShipmentActionForbidden(ClientServiceError):
     """Действие с отправлением недопустимо в текущем статусе."""
 

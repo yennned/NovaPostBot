@@ -21,6 +21,7 @@ from app.bot.states import ManagerShipmentState
 from app.bot.types import EffectiveContext
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.models.user import User
+from app.services import manager_shipments
 from app.services.manager_shipments import (
     ManagerShipmentCard,
     ManagerShipmentListItem,
@@ -316,6 +317,25 @@ async def test_receive_cancel_reason_blank_keeps_waiting_state():
 
     assert state.state == ManagerShipmentState.waiting_for_cancel_reason
     assert "Вкажіть причину" in message.answers[-1]["text"]
+
+
+async def test_receive_cancel_reason_too_long_keeps_waiting_state():
+    state = FakeState()
+    await state.set_state(ManagerShipmentState.waiting_for_cancel_reason)
+    message = FakeMessage()
+    message.text = "x" * (manager_shipments.MAX_CANCELLATION_REASON_LENGTH + 1)
+
+    await receive_cancel_reason(
+        message,
+        _ctx(UserRole.manager),
+        FakeSession(),
+        FakeBot(),
+        object(),
+        state,
+    )
+
+    assert state.state == ManagerShipmentState.waiting_for_cancel_reason
+    assert "не більше 500 символів" in message.answers[-1]["text"]
 
 
 async def test_cb_return_opens_inspection(monkeypatch):

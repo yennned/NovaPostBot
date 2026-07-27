@@ -490,6 +490,12 @@ async def receive_cancel_reason(
     if not reason:
         await message.answer(cancel_reason_prompt_text())
         return
+    if len(reason) > manager_shipments.MAX_CANCELLATION_REASON_LENGTH:
+        await message.answer(
+            "❌ Причина скасування має містити не більше "
+            f"{manager_shipments.MAX_CANCELLATION_REASON_LENGTH} символів. Скоротіть її."
+        )
+        return
     data = await state.get_data()
     raw_id = data.get("manager_cancel_shipment_id")
     try:

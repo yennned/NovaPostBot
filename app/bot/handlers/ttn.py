@@ -436,11 +436,17 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
 
 
 def _price_key(data: dict) -> str:
-    """Хэш влияющих на тариф полей, включая ФОП/API-ключ отправителя."""
+    """Хэш влияющих на ориентировочный тариф полей.
+
+    Размер пресета входит в ключ, даже если `getDocumentPrice` принимает только
+    вес: создаваемая ТТН отправляет реальные габариты, поэтому смена пресета
+    должна инвалидировать прежнюю оценку.
+    """
     parts = (
         data.get("sender_profile_id"),
         data.get("recipient_city_ref"),
         data.get("weight"),
+        data.get("size_token"),
         data.get("insured_amount"),
         data.get("cod_amount") or "",
     )
