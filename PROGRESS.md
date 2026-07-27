@@ -15,6 +15,18 @@
 
 ---
 
+## 2026-07-27 · feat/alex-ttn-review-hardening · 4953f03
+- **Сделано:** по актуальному Codex review проверка и санитизация причины
+  скасування перенесены до удаления ТТН в Nova Poshta; невалидная причина больше
+  не может оставить удалённый во внешней системе документ и незакрытый локальный
+  статус.
+- **Проверено:** `ruff check`, `ruff format --check` и targeted-набор
+  `tests/bot/test_manager_shipments_handlers.py tests/test_novaposhta_mapping.py` —
+  29 passed.
+- **Дальше:** обновить PR #117, дождаться нового CI/CodeRabbit gate и выполнить
+  squash-merge в `main`.
+- **Открытые вопросы:** нет.
+
 ## 2026-07-27 · feat/alex-ttn-review-hardening · 4931e40
 - **Сделано:** закрыты подтверждённые CodeRabbit findings: legacy
   `volume_general` теперь получает согласованные кубические габариты,
