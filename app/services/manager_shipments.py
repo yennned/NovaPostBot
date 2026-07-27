@@ -224,6 +224,11 @@ async def cancel_shipment(
         raise ShipmentNotFound(str(shipment_id))
     if shipment.status not in shipments.CANCELABLE_STATUSES:
         raise ShipmentActionForbidden("cancel", shipment.status)
+    reason = (reason or "").strip() or None
+    if reason is not None:
+        reason = _sanitize_cancellation_reason(reason)
+    if reason is not None and len(reason) > MAX_CANCELLATION_REASON_LENGTH:
+        raise InvalidCancellationReason(MAX_CANCELLATION_REASON_LENGTH)
     if shipment.np_ref and shipment.sender_profile is not None:
         try:
             await methods.delete_ttn(
@@ -235,11 +240,6 @@ async def cancel_shipment(
             pass
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
-    reason = (reason or "").strip() or None
-    if reason is not None:
-        reason = _sanitize_cancellation_reason(reason)
-    if reason is not None and len(reason) > MAX_CANCELLATION_REASON_LENGTH:
-        raise InvalidCancellationReason(MAX_CANCELLATION_REASON_LENGTH)
     before = {"status": shipment.status.value}
     shipment.cancellation_reason = reason
     await repo.update_status(shipment, ShipmentStatus.cancelled)
