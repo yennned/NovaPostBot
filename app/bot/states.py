@@ -34,6 +34,7 @@ class SenderProfileCreateState(StatesGroup):
 
 class ManagerShipmentState(StatesGroup):
     waiting_for_search = State()
+    waiting_for_cancel_reason = State()
     inspecting_return = State()
 
 

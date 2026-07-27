@@ -71,6 +71,7 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
         nullable=False,
     )
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status_changed_at: Mapped[datetime] = mapped_column(

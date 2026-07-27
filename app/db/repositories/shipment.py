@@ -109,6 +109,7 @@ class ShipmentRepository(BaseRepository):
         description: str | None = None,
         created_at: datetime | None = None,
         status_changed_at: datetime | None = None,
+        cancellation_reason: str | None = None,
     ) -> Shipment:
         client_id, account_id = await resolve_account_scope(
             self.session, client_id=client_id, account_id=account_id
@@ -132,6 +133,7 @@ class ShipmentRepository(BaseRepository):
             size_preset=size_preset,
             weight=weight,
             status=status,
+            cancellation_reason=cancellation_reason,
             description=description,
         )
         if created_at is not None:

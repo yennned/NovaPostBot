@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from decimal import Decimal
 
 from app.bot.keyboards.ttn import SIZE_PRESETS
@@ -124,8 +125,15 @@ def recipient_name_prompt(kind: str) -> str:
     return "Введіть ПІБ отримувача (напр. Іваненко Іван Іванович):"
 
 
-def recipient_name_invalid() -> str:
-    return "❌ Порожнє значення. Введіть ПІБ або назву організації."
+def recipient_name_invalid(kind: str = "person") -> str:
+    if kind == "organization":
+        return "❌ Порожнє значення. Введіть назву організації."
+    return "❌ ПІБ має містити тільки слова без цифр (напр. Іваненко Іван Іванович)."
+
+
+def recipient_person_name_valid(value: str) -> bool:
+    """ФИО: буквы, пробелы, дефис и апостроф; цифры запрещены."""
+    return bool(re.fullmatch(r"[^\W\d_]+(?:[ '\u2019-]+[^\W\d_]+)*", value.strip(), re.UNICODE))
 
 
 def edrpou_prompt() -> str:
@@ -237,6 +245,7 @@ def card_text(data: dict, price: dict) -> str:
     lines = [
         "📋 <b>Перевірте ТТН перед відправкою</b>",
         "",
+        f"🏢 ФОП-відправник: {html.escape(data.get('sender_profile_name', '—'))}",
         f"📦 Товари: {items}",
         f"👤 Отримувач: {html.escape(data.get('recipient_name', ''))} ({kind})",
     ]
@@ -262,7 +271,7 @@ def card_text(data: dict, price: dict) -> str:
     if price.get("unavailable"):
         lines.append("💵 Розрахунок недоступний — вартість підтвердить менеджер")
     else:
-        lines.append(f"💵 Вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
+        lines.append(f"💵 Орієнтовна вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
         if price.get("redelivery"):
             # Орієнтовно: оцінка йде через RedeliveryCalculate, фактичну комісію
             # «Контроль оплати» (NovaPay) підтверджує менеджер при відправленні.

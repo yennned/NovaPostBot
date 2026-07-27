@@ -83,6 +83,7 @@ class ShipmentCard:
     created_by_user_id: uuid.UUID | None = None
     created_by_name: str | None = None
     account_id: uuid.UUID | None = None
+    cancellation_reason: str | None = None
 
 
 def _require_active_client(client: User) -> None:
@@ -158,6 +159,7 @@ def _to_card(shipment: Shipment) -> ShipmentCard:
         created_by_user_id=shipment.created_by_user_id,
         created_by_name=shipment.created_by_user.full_name if shipment.created_by_user else None,
         account_id=shipment.account_id,
+        cancellation_reason=shipment.cancellation_reason,
     )
 
 

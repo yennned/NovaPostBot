@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import html
 import uuid
+from contextlib import suppress
 
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
@@ -23,6 +25,7 @@ from app.bot.notify import BotNotifier
 from app.bot.states import ManagerShipmentState
 from app.bot.texts.manager_shipments import (
     action_done_text,
+    cancel_reason_prompt_text,
     card_text,
     queue_text,
     return_inspection_text,
@@ -429,15 +432,116 @@ async def cb_cancel(
     db_session: AsyncSession,
     bot: Bot,
     np_client: NovaPoshtaClient,
+    state: FSMContext,
 ) -> None:
-    await _act_on_shipment(
-        callback,
-        effective_context=effective_context,
-        db_session=db_session,
-        bot=bot,
-        action="cancel",
-        np_client=np_client,
+    if callback.message is None:
+        await callback.answer(_STALE, show_alert=True)
+        return
+    try:
+        _, _, bucket, offset_raw, shipment_raw = callback.data.split(":")
+        offset = int(offset_raw)
+        uuid.UUID(shipment_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    # Перечитываем карточку перед запросом причины: старый callback не должен
+    # открыть FSM для уже удалённого/отменённого отправления.
+    try:
+        card = await manager_shipments.get_card(
+            db_session,
+            actor=effective_context.effective_user or effective_context.actor_user,
+            shipment_id=uuid.UUID(shipment_raw),
+        )
+    except ClientServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    if not card.can_cancel:
+        await callback.answer("Відправлення вже не можна скасувати.", show_alert=True)
+        return
+    await state.set_state(ManagerShipmentState.waiting_for_cancel_reason)
+    chat_id = getattr(getattr(callback.message, "chat", None), "id", None)
+    message_id = getattr(callback.message, "message_id", None)
+    await state.update_data(
+        manager_cancel_shipment_id=shipment_raw,
+        manager_cancel_bucket=bucket,
+        manager_cancel_offset=offset,
+        manager_cancel_chat_id=chat_id,
+        manager_cancel_message_id=message_id,
     )
+    await callback.message.answer(cancel_reason_prompt_text())
+    await callback.answer()
+
+
+@router.message(
+    ManagerShipmentState.waiting_for_cancel_reason,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
+async def receive_cancel_reason(
+    message: Message,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    bot: Bot,
+    np_client: NovaPoshtaClient,
+    state: FSMContext,
+) -> None:
+    reason = (message.text or "").strip()
+    if not reason:
+        await message.answer(cancel_reason_prompt_text())
+        return
+    if len(reason) > manager_shipments.MAX_CANCELLATION_REASON_LENGTH:
+        await message.answer(
+            "❌ Причина скасування має містити не більше "
+            f"{manager_shipments.MAX_CANCELLATION_REASON_LENGTH} символів. Скоротіть її."
+        )
+        return
+    data = await state.get_data()
+    raw_id = data.get("manager_cancel_shipment_id")
+    try:
+        shipment_id = uuid.UUID(str(raw_id))
+    except (TypeError, ValueError):
+        await state.set_state(None)
+        await message.answer(_STALE)
+        return
+    actor = effective_context.effective_user or effective_context.actor_user
+    try:
+        card = await manager_shipments.cancel_shipment(
+            db_session,
+            actor=actor,
+            shipment_id=shipment_id,
+            np_client=np_client,
+            reason=reason,
+        )
+        await db_session.commit()
+        await manager_shipments.notify_client_about_status(
+            db_session, BotNotifier(bot), shipment_id=shipment_id
+        )
+    except ClientServiceError as exc:
+        await message.answer(str(exc))
+        return
+    bucket = data.get("manager_cancel_bucket", "created")
+    offset = int(data.get("manager_cancel_offset", 0))
+    chat_id = data.get("manager_cancel_chat_id")
+    message_id = data.get("manager_cancel_message_id")
+    if chat_id is not None and message_id is not None:
+        with suppress(TelegramAPIError):
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=card_text(card),
+                reply_markup=build_card_kb(bucket, offset, card),
+                parse_mode="HTML",
+            )
+    await state.set_state(None)
+    await state.update_data(
+        manager_cancel_shipment_id=None,
+        manager_cancel_bucket=None,
+        manager_cancel_offset=None,
+        manager_cancel_chat_id=None,
+        manager_cancel_message_id=None,
+    )
+    await message.answer(action_done_text("cancel"))
 
 
 @router.callback_query(F.data.startswith("mq:return:"))
@@ -658,6 +762,7 @@ async def _act_on_shipment(
     action: str,
     bot: Bot | None,
     np_client: NovaPoshtaClient | None = None,
+    reason: str | None = None,
 ) -> None:
     if callback.message is None:
         await callback.answer(_STALE, show_alert=True)
@@ -691,6 +796,7 @@ async def _act_on_shipment(
                 actor=actor,
                 shipment_id=shipment_id,
                 np_client=np_client,
+                reason=reason,
             )
             if bot is not None:
                 await db_session.commit()

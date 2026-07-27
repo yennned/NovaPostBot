@@ -193,6 +193,8 @@ async def create_shipment(
     recipient_edrpou: str | None = None,
     sender_profile_id: uuid.UUID | None = None,
     seats_amount: int = 1,
+    size_dimensions: tuple[Decimal | int | str, Decimal | int | str, Decimal | int | str]
+    | None = None,
     notifier: Notifier | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
@@ -233,6 +235,7 @@ async def create_shipment(
             phone=recipient_phone,
             edrpou=recipient_edrpou,
         )
+        dimensions = size_dimensions or (10, 10, 10)
         draft = TTNDraft(
             sender=SenderIdentity(
                 counterparty_ref=profile.np_sender_ref,
@@ -251,7 +254,13 @@ async def create_shipment(
                 contact_ref=contact_ref or "",
                 edrpou=recipient_edrpou,
             ),
-            parcel=ParcelSpec(weight=weight, seats_amount=seats_amount),
+            parcel=ParcelSpec(
+                weight=weight,
+                seats_amount=seats_amount,
+                length_cm=Decimal(str(dimensions[0])),
+                width_cm=Decimal(str(dimensions[1])),
+                height_cm=Decimal(str(dimensions[2])),
+            ),
             description=description,
             cost=insured_amount,
             payer_type=payer_type,
@@ -259,6 +268,9 @@ async def create_shipment(
         )
         result = await methods.save_ttn(np_client, api_key=api_key, draft=draft)
     except NovaPoshtaError as exc:
+        raise TtnCreationFailed(str(exc)) from exc
+    except ValueError as exc:
+        # Некорректные/противоречивые габариты не должны просачиваться как 500.
         raise TtnCreationFailed(str(exc)) from exc
 
     # Успех НП → запись в БД (последний awaited-шаг). status=created → резерв активен.

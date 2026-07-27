@@ -130,6 +130,36 @@ def test_manager_card_shows_expected_actions():
     assert any("mq:damaged:" in item for item in callbacks)
 
 
+def test_cancel_reason_is_visible_in_shipment_card():
+    shipment_id = uuid4()
+    card = ShipmentCard(
+        id=shipment_id,
+        ttn_number="TTN-CANCELLED",
+        recipient_name="Іван",
+        recipient_phone=None,
+        recipient_city=None,
+        recipient_warehouse=None,
+        status=ShipmentStatus.cancelled,
+        created_at=datetime.now(UTC),
+        status_changed_at=datetime.now(UTC),
+        dispatched_at=None,
+        sla_deadline=None,
+        sla_met=None,
+        payment_method=None,
+        payer_type=None,
+        cod_amount=None,
+        insured_amount=None,
+        fee_amount=None,
+        fee_free=False,
+        items=[],
+        can_cancel=False,
+        cancellation_reason="Немає товару на складі",
+    )
+    from app.bot.texts.client_cabinet import shipment_card_text
+
+    assert "Причина скасування: Немає товару на складі" in shipment_card_text(card)
+
+
 def test_return_inspection_text_and_callbacks_fit_limit():
     shipment_id = uuid4()
     card = ManagerShipmentCard(

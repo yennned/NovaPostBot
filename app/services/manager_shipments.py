@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,7 +23,12 @@ from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.services import notifications, shipments
 from app.services.client_sheet_sync import best_effort_sync
-from app.services.exceptions import ShipmentActionForbidden, ShipmentNotFound, TtnCancelFailed
+from app.services.exceptions import (
+    InvalidCancellationReason,
+    ShipmentActionForbidden,
+    ShipmentNotFound,
+    TtnCancelFailed,
+)
 from app.services.notifications import Notifier
 from app.services.returns import ReturnDecision, receive_returned_shipment
 
@@ -38,6 +44,17 @@ NONSTANDARD_SOURCE_STATUSES = {
     ShipmentStatus.returning,
 }
 NONSTANDARD_TARGET_STATUSES = {ShipmentStatus.lost, ShipmentStatus.damaged}
+MAX_CANCELLATION_REASON_LENGTH = 500
+_CANCELLATION_EMAIL_RE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
+_CANCELLATION_PHONE_RE = re.compile(r"(?<!\w)(?:\+?380|0)[\s()-]*\d(?:[\s()-]*\d){8,11}(?!\w)")
+_CANCELLATION_HANDLE_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}(?!\w)")
+
+
+def _sanitize_cancellation_reason(reason: str) -> str:
+    """Удалить из причины очевидные email, телефоны и имена пользователей Telegram."""
+    sanitized = _CANCELLATION_EMAIL_RE.sub("[email скрыт]", reason)
+    sanitized = _CANCELLATION_PHONE_RE.sub("[телефон скрыт]", sanitized)
+    return _CANCELLATION_HANDLE_RE.sub("[контакт скрыт]", sanitized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +215,7 @@ async def cancel_shipment(
     actor,
     shipment_id: uuid.UUID,
     np_client: NovaPoshtaClient,
+    reason: str | None = None,
 ) -> ManagerShipmentCard:
     permissions.require_staff(actor, settings=None)
     repo = ShipmentRepository(session)
@@ -206,6 +224,11 @@ async def cancel_shipment(
         raise ShipmentNotFound(str(shipment_id))
     if shipment.status not in shipments.CANCELABLE_STATUSES:
         raise ShipmentActionForbidden("cancel", shipment.status)
+    reason = (reason or "").strip() or None
+    if reason is not None:
+        reason = _sanitize_cancellation_reason(reason)
+    if reason is not None and len(reason) > MAX_CANCELLATION_REASON_LENGTH:
+        raise InvalidCancellationReason(MAX_CANCELLATION_REASON_LENGTH)
     if shipment.np_ref and shipment.sender_profile is not None:
         try:
             await methods.delete_ttn(
@@ -218,6 +241,7 @@ async def cancel_shipment(
         except NovaPoshtaError as exc:
             raise TtnCancelFailed(str(exc)) from exc
     before = {"status": shipment.status.value}
+    shipment.cancellation_reason = reason
     await repo.update_status(shipment, ShipmentStatus.cancelled)
     await StockMovementRepository(session).record_for_items(
         client_id=shipment.client_id,
@@ -227,7 +251,10 @@ async def cancel_shipment(
         items=shipment.items,
         movement_type=StockMovementType.ttn_cancel,
         sign=1,
-        comment=f"Скасування менеджером ТТН {shipment.ttn_number or '—'}",
+        comment=(
+            f"Скасування менеджером ТТН {shipment.ttn_number or '—'}"
+            + (f": {reason}" if reason else "")
+        ),
     )
     await AuditRepository(session).log(
         "shipment_cancelled_by_staff",
@@ -235,7 +262,7 @@ async def cancel_shipment(
         account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
-        after={"status": shipment.status.value},
+        after={"status": shipment.status.value, "cancellation_reason": reason},
     )
     await best_effort_sync(
         session,

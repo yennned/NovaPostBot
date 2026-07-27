@@ -352,6 +352,55 @@ async def test_cb_pick_sender_begins_cart(db_session: AsyncSession, monkeypatch)
     assert cb.message.edits  # кошик отрисован
 
 
+async def test_edit_sender_requires_existing_cart(monkeypatch):
+    state = FakeState(sender_profile_id=str(uuid4()), cart={})
+    await state.set_state(CreateTtnState.summary)
+    cb = FakeCallback("cab:ttn:edit:sender")
+
+    await h.cb_edit_sender(cb, _ctx(_CLIENT), object(), state)
+
+    assert cb.acks[-1]["show_alert"] is True
+    assert state.state == CreateTtnState.summary
+
+
+async def test_edit_sender_pick_preserves_cart_and_updates_profile(monkeypatch):
+    profile_id = uuid4()
+    profile = SimpleNamespace(id=profile_id, name="ФОП B")
+    state = FakeState(
+        cart={"SKU1": {"name": "Товар", "qty": 1, "price": "10"}},
+        sender_profile_id=str(uuid4()),
+    )
+    await state.set_state(CreateTtnState.picking_sender)
+    shown = {}
+
+    async def fake_resolve_sender_id(*args, **kwargs):
+        return profile_id
+
+    async def fake_get_profile(*args, **kwargs):
+        return profile
+
+    async def fake_show_card(*args, **kwargs):
+        shown["called"] = True
+
+    monkeypatch.setattr(h, "resolve_sender_id", fake_resolve_sender_id)
+    monkeypatch.setattr(h.sender_profile, "get_profile", fake_get_profile)
+    monkeypatch.setattr(h, "_show_card", fake_show_card)
+
+    await h.cb_edit_sender_pick(
+        FakeCallback(f"cab:ttn:sender:{profile_id}"),
+        _ctx(_CLIENT),
+        object(),
+        object(),
+        state,
+    )
+
+    assert state.state == CreateTtnState.summary
+    assert state._data["sender_profile_id"] == str(profile_id)
+    assert state._data["sender_profile_name"] == "ФОП B"
+    assert state._data["cart"]["SKU1"]["qty"] == 1
+    assert shown["called"] is True
+
+
 # ----------------------------------------------------------------- кошик (чистые)
 
 
@@ -670,6 +719,13 @@ def test_valid_edrpou():
     assert h._valid_edrpou("abcdefgh") is False
 
 
+def test_recipient_person_name_rejects_digits_and_accepts_words():
+    assert ttn_texts.recipient_person_name_valid("Петренко Іван") is True
+    assert ttn_texts.recipient_person_name_valid("Петренко Іванович") is True
+    assert ttn_texts.recipient_person_name_valid("5514") is False
+    assert ttn_texts.recipient_person_name_valid("Петренко 5514") is False
+
+
 async def test_recipient_kind_forwards_to_name():
     state = FakeState(weight="1.0")
     cb = FakeCallback("cab:ttn:rk:o")
@@ -701,6 +757,14 @@ async def test_receive_name_empty_rejected():
     await state.set_state(CreateTtnState.entering_recipient_name)
     msg = FakeMessage(text="   ")
     await h.receive_recipient_name(msg, state)
+    assert "recipient_name" not in state._data
+    assert state.state == CreateTtnState.entering_recipient_name
+
+
+async def test_receive_name_with_digits_rejected():
+    state = FakeState(recipient_kind="person")
+    await state.set_state(CreateTtnState.entering_recipient_name)
+    await h.receive_recipient_name(FakeMessage(text="5514"), state)
     assert "recipient_name" not in state._data
     assert state.state == CreateTtnState.entering_recipient_name
 
@@ -999,6 +1063,36 @@ async def test_card_price_cached_between_renders(monkeypatch):
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)  # те же поля → кэш
     assert counter["n"] == 1
+
+
+async def test_card_price_cache_is_invalidated_when_sender_changes(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state(insured_amount="0")
+    data = state._data
+
+    first = await h._card_price(None, _CLIENT, data, object(), force=False)
+    data["price_cache"] = first
+    data["sender_profile_id"] = str(uuid4())
+    second = await h._card_price(None, _CLIENT, data, object(), force=False)
+
+    assert counter["n"] == 2
+    assert second["key"] != first["key"]
+
+
+async def test_card_price_cache_is_invalidated_when_size_changes(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state(insured_amount="0", size_token="s")
+    data = state._data
+
+    first = await h._card_price(None, _CLIENT, data, object(), force=False)
+    data["price_cache"] = first
+    data["size_token"] = "l"
+    second = await h._card_price(None, _CLIENT, data, object(), force=False)
+
+    assert counter["n"] == 2
+    assert second["key"] != first["key"]
 
 
 async def test_recompute_forces_price(monkeypatch):

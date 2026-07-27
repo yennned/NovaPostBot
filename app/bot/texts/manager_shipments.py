@@ -67,6 +67,10 @@ def search_prompt_text() -> str:
     return "Введіть № ТТН, ПІБ клієнта, телефон або одержувача для пошуку."
 
 
+def cancel_reason_prompt_text() -> str:
+    return "Вкажіть причину скасування відправлення одним повідомленням:"
+
+
 def action_done_text(action: str) -> str:
     labels = {
         "confirm": "✅ Відправлення підтверджено.",
