@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+from aiogram.exceptions import TelegramBadRequest
 from app.bot.handlers.client_cabinet import (
     cb_calendar_day,
     cb_cancel_shipment,
+    cb_product_noop,
+    cb_products,
     cb_settings_toggle,
     cb_shipment_card,
     cb_stats,
@@ -189,6 +193,43 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
 
     assert msg.answers
     assert "Товари" in msg.answers[0]["text"]
+
+
+async def test_products_pagination_acks_even_when_not_modified(
+    db_session: AsyncSession, monkeypatch
+):
+    """Регрессия: `edit_text` бросал «message is not modified», исключение уносило
+    хендлер мимо `callback.answer()`, и Telegram оставлял спиннер на кнопке —
+    для пользователя кнопка выглядела нерабочей, «оживая» лишь спустя минуты.
+    """
+    client = await _active_client(db_session, 741)
+
+    async def fake_list_inventory(session, *, client, **kwargs):
+        return InventoryPage(items=[], total=0, limit=6, offset=0, categories=[])
+
+    monkeypatch.setattr("app.bot.handlers.client_cabinet.list_inventory", fake_list_inventory)
+
+    cb = FakeCallback("cab:products:0")
+
+    async def raise_not_modified(*args, **kwargs):
+        raise TelegramBadRequest(
+            method=SimpleNamespace(), message="Bad Request: message is not modified"
+        )
+
+    cb.message.edit_text = raise_not_modified
+
+    await cb_products(cb, await _ctx(db_session, client), db_session, FakeState())
+
+    assert cb.acks, "callback остался без ответа → висящий спиннер на кнопке"
+
+
+async def test_product_row_tap_is_noop_and_acked():
+    """Строка товара — витрина: мгновенный ack, ноль чтений склада."""
+    cb = FakeCallback("cab:pnoop")
+
+    await cb_product_noop(cb)
+
+    assert cb.acks == [{"text": None, "show_alert": False}]
 
 
 async def test_open_shipments_renders_list(db_session: AsyncSession, monkeypatch):

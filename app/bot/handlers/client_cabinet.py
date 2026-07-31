@@ -7,6 +7,7 @@ import uuid
 from datetime import date
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.types.base import TelegramObject
@@ -22,6 +23,7 @@ from app.bot.keyboards.calendar import (
 )
 from app.bot.keyboards.client import (
     NOTIFICATION_CALLBACK_TOKENS,
+    PRODUCT_NOOP,
     PRODUCTS_PAGE_SIZE,
     SENDER_PROFILE_FIELD_TOKENS,
     SHIPMENTS_PAGE_SIZE,
@@ -207,12 +209,20 @@ async def _edit_inventory(
         account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
-    await message.edit_text(
-        products_text(page, sheet_url=stock_view_book_url(_account(context))),
-        reply_markup=build_inventory_kb(page, active_category=category, query=query),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
+    try:
+        await message.edit_text(
+            products_text(page, sheet_url=stock_view_book_url(_account(context))),
+            reply_markup=build_inventory_kb(page, active_category=category, query=query),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as exc:
+        # Дабл-тап/no-op-редактирование: экран уже в нужном состоянии. Глушим ЗДЕСЬ,
+        # а не глобальным errors-роутером: тот срабатывает уже после того, как
+        # исключение вынесло нас из хендлера мимо `callback.answer()`, и Telegram
+        # остаётся с висящим спиннером на кнопке. Прочие BadRequest — наверх.
+        if "message is not modified" not in str(exc):
+            raise
     await remember_screen(state, message)
 
 
@@ -541,6 +551,12 @@ async def cb_products(
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
+    await callback.answer()
+
+
+@router.callback_query(F.data == PRODUCT_NOOP)
+async def cb_product_noop(callback: CallbackQuery) -> None:
+    """Строка товара — витрина, не действие: гасим спиннер и ничего не делаем."""
     await callback.answer()
 
 
