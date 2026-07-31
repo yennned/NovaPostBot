@@ -1,7 +1,7 @@
 """Errors-router на НАСТОЯЩЕМ диспетчере, а не вызовом хендлера напрямую.
 
 Проверяем то, что юнит-вызовом проверить нельзя: aiogram матчит error-хендлеры в
-порядке регистрации, поэтому catch-all обязан стоять последним и не должен
+порядке регистрации, поэтому обработчик без фильтра обязан стоять последним и не должен
 перехватывать то, что уже обработано точечными хендлерами. Ошибка в порядке —
 это либо молчащий бот (как было), либо, наоборот, съеденные штатные ветки.
 
@@ -98,14 +98,15 @@ async def test_unexpected_exception_is_answered_not_silent(dispatcher: Dispatche
 
 async def test_message_not_modified_stays_silent_after_catchall(dispatcher: Dispatcher):
     """Дабл-тап по-прежнему глушится: точечный хендлер зарегистрирован раньше
-    catch-all, иначе пользователь получал бы «сталася помилка» на пустом месте."""
+    обработчика без фильтра, иначе пользователь получал бы «сталася помилка» на
+    пустом месте."""
     bot = _RecordingBot()
     await dispatcher.feed_update(bot, _callback_update("boom:notmod"))
     assert _UNEXPECTED_TEXT not in bot.texts
 
 
 async def test_successful_handler_is_untouched(dispatcher: Dispatcher):
-    """Catch-all не должен вмешиваться в штатный путь."""
+    """Обработчик без фильтра не должен вмешиваться в штатный путь."""
     _handled.clear()
     bot = _RecordingBot()
     await dispatcher.feed_update(bot, _callback_update("ok"))

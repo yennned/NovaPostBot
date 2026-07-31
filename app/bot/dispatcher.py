@@ -71,5 +71,7 @@ def build_dispatcher(
     dp.include_router(account_team_router)
     dp.include_router(client_cabinet_router)
     dp.include_router(ttn_router)
-    dp.include_router(errors_router)  # backstop: ключ ФОП (FERNET_KEY) + «message is not modified»
+    # Строго последним: внутри — обработчик без фильтра, который отвечает на любое
+    # неожиданное исключение. Роутер, добавленный после него, остался бы без него же.
+    dp.include_router(errors_router)
     return dp

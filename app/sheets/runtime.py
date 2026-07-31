@@ -30,7 +30,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.sheets.client import SheetsClient
 from app.sheets.source import StockSourceUnavailable
 
@@ -41,12 +41,18 @@ _shared_sheets_client: SheetsClient | None = None
 _client_lock = threading.Lock()
 
 
-def shared_sheets_client(settings: Settings | None = None) -> SheetsClient:
-    """Единственный на процесс авторизованный `SheetsClient`."""
+def shared_sheets_client() -> SheetsClient:
+    """Единственный на процесс авторизованный `SheetsClient` (всегда `get_settings()`).
+
+    Параметра `settings` здесь намеренно НЕТ: клиент создаётся один раз, поэтому
+    настройки второго и последующих вызовов молча игнорировались бы — и вызывающий
+    думал бы, что подменил конфигурацию. Кому нужна своя конфигурация (воркер,
+    тесты), тот заводит собственный `SheetsClient` — см. `build_stock_source`.
+    """
     global _shared_sheets_client
     with _client_lock:
         if _shared_sheets_client is None:
-            _shared_sheets_client = SheetsClient(settings or get_settings())
+            _shared_sheets_client = SheetsClient(get_settings())
         return _shared_sheets_client
 
 

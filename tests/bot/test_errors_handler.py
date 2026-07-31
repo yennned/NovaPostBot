@@ -83,7 +83,8 @@ async def test_stock_unavailable_answers_callback_with_alert():
 
 
 async def test_unhandled_exception_backstop_replies():
-    """Без backstop'а любое неожиданное исключение не отвечало пользователю НИЧЕГО."""
+    """Без последнего рубежа любое неожиданное исключение не отвечало пользователю
+    НИЧЕГО."""
     msg = _FakeMessage()
     await on_unhandled_error(_event(ValueError("бум"), message=msg))
     assert msg.answers == [_UNEXPECTED_TEXT]

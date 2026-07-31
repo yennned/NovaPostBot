@@ -97,6 +97,10 @@ async def sync_client_sheets(
     rename_ok, book_id = await run_on_sheets_executor(
         _sync_client_sheets_sync,
         cfg,
+        # Явные `settings` → свой клиент, как в `build_stock_source`: расшаренный
+        # создаётся один раз под `get_settings()`, и подмена конфигурации на нём
+        # молча не сработала бы.
+        settings is not None,
         source_key,
         source_key if source_key != target_key else None,
         target_key,
@@ -145,6 +149,7 @@ async def best_effort_sync(
 
 def _sync_client_sheets_sync(
     settings: Settings,
+    own_client: bool,
     source_key: str,
     previous_sheet_key: str | None,
     target_key: str,
@@ -152,7 +157,7 @@ def _sync_client_sheets_sync(
     rows: list[ViewRow],
 ) -> tuple[bool, str | None]:
     # Один воркер executor'а → вызовы сериализованы, общий клиент безопасен.
-    client = shared_sheets_client(settings)
+    client = SheetsClient(settings) if own_client else shared_sheets_client()
     gc = client._authorize()  # кэшируется на инстансе → OAuth-handshake только раз
     rename_ok = _rename_main_worksheets(gc, settings, previous_sheet_key or source_key, target_key)
     # Зеркалим резерв (из снапшота PG) в колонку «Резерв» актуального листа «Склад».
