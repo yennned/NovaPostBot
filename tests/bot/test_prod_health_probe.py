@@ -24,10 +24,23 @@ _ALIVE, _DOWN, _UNKNOWN = 0, 1, 2
 
 
 class _FakeAsyncClient:
-    """Заглушка httpx: отдаёт getMe/getWebhookInfo и заданный ответ на getUpdates."""
+    """Заглушка httpx: отдаёт getMe/getWebhookInfo и заданный ответ на getUpdates.
 
-    def __init__(self, updates_response: httpx.Response) -> None:
+    Запоминает посещённые методы — по ним проверяем не только вердикт, но и то,
+    что пробник не полез в `getUpdates` там, где не должен.
+    """
+
+    def __init__(
+        self,
+        updates_response: httpx.Response | Exception,
+        *,
+        webhook_url: str = "",
+        me_response: httpx.Response | Exception | None = None,
+    ) -> None:
         self._updates = updates_response
+        self._webhook_url = webhook_url
+        self._me = me_response
+        self.calls: list[str] = []
 
     async def __aenter__(self) -> _FakeAsyncClient:
         return self
@@ -36,26 +49,51 @@ class _FakeAsyncClient:
         return None
 
     async def get(self, url: str, params: dict | None = None) -> httpx.Response:
+        method = url.rsplit("/", 1)[-1]
+        self.calls.append(method)
         request = httpx.Request("GET", url)
-        if url.endswith("/getMe"):
+        if method == "getMe":
+            if isinstance(self._me, Exception):
+                raise self._me
+            if self._me is not None:
+                return self._me
             return httpx.Response(
                 200, json={"ok": True, "result": {"username": "bot"}}, request=request
             )
-        if url.endswith("/getWebhookInfo"):
+        if method == "getWebhookInfo":
             return httpx.Response(
-                200, json={"ok": True, "result": {"pending_update_count": 0}}, request=request
+                200,
+                json={
+                    "ok": True,
+                    "result": {"pending_update_count": 0, "url": self._webhook_url},
+                },
+                request=request,
             )
+        if isinstance(self._updates, Exception):
+            raise self._updates
         return self._updates
 
 
 @pytest.fixture
 def _patch_client(monkeypatch: pytest.MonkeyPatch):
-    def _install(updates_response: httpx.Response) -> None:
-        monkeypatch.setattr(
-            prod_health.httpx,
-            "AsyncClient",
-            lambda **_kw: _FakeAsyncClient(updates_response),
-        )
+    """Ставит заглушку и возвращает её — чтобы тест мог заглянуть в `calls`."""
+    installed: list[_FakeAsyncClient] = []
+
+    def _install(
+        updates_response: httpx.Response | Exception,
+        *,
+        webhook_url: str = "",
+        me_response: httpx.Response | Exception | None = None,
+    ) -> list[_FakeAsyncClient]:
+        def _factory(**_kw: object) -> _FakeAsyncClient:
+            client = _FakeAsyncClient(
+                updates_response, webhook_url=webhook_url, me_response=me_response
+            )
+            installed.append(client)
+            return client
+
+        monkeypatch.setattr(prod_health.httpx, "AsyncClient", _factory)
+        return installed
 
     return _install
 
@@ -78,6 +116,57 @@ async def test_unexpected_status_is_not_reported_as_verdict(_patch_client) -> No
     """Отвал сети/лимит — это «не знаю», а не «прод лежит»: иначе пробник
     поднимет ложную тревогу на своей же ошибке."""
     _patch_client(httpx.Response(429, json={"ok": False, "description": "Too Many Requests"}))
+
+    assert await prod_health._probe("t") == _UNKNOWN
+
+
+async def test_webhook_mode_is_unknown_not_alive(_patch_client) -> None:
+    """С включённым вебхуком `409` перестаёт что-либо доказывать.
+
+    Telegram отвечает `409` и на «getUpdates при активном вебхуке» — такой ответ
+    придёт даже от погашенного контейнера. Признак живости неприменим, поэтому
+    вердикт «не знаю», а сам длинный поллинг не запускается вовсе.
+    """
+    installed = _patch_client(
+        httpx.Response(409, json={"ok": False, "description": "Conflict: webhook is active"}),
+        webhook_url="https://example.test/hook",
+    )
+
+    assert await prod_health._probe("t") == _UNKNOWN
+    assert "getUpdates" not in installed[0].calls
+
+
+async def test_probe_own_network_failure_is_unknown(_patch_client) -> None:
+    """Отвал сети у пробника не должен читаться как «прод лежит».
+
+    До правки исключение улетало из `_probe` наружу, интерпретатор завершался
+    кодом 1 — ровно тем, которым обозначено «бот не работает».
+    """
+    _patch_client(
+        httpx.Response(200, json={"ok": True, "result": []}),
+        me_response=httpx.ConnectError("сеть недоступна"),
+    )
+
+    assert await prod_health._probe("t") == _UNKNOWN
+
+
+async def test_timeout_on_the_long_poll_is_unknown(_patch_client) -> None:
+    """Таймаут длинного поллинга — тоже отказ пробника, а не диагноз."""
+    _patch_client(httpx.ReadTimeout("истекло ожидание"))
+
+    assert await prod_health._probe("t") == _UNKNOWN
+
+
+async def test_malformed_payload_is_unknown(_patch_client) -> None:
+    """Ответ без `result` — повод сказать «не знаю», а не упасть трейсбеком."""
+    _patch_client(
+        httpx.Response(200, json={"ok": True, "result": []}),
+        # `request` обязателен: без него `raise_for_status` бросает RuntimeError
+        # самого httpx, и тест проверял бы поведение заглушки, а не пробника.
+        me_response=httpx.Response(
+            200, json={"ok": False}, request=httpx.Request("GET", "https://t/getMe")
+        ),
+    )
 
     assert await prod_health._probe("t") == _UNKNOWN
 

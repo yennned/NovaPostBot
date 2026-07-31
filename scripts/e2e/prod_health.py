@@ -36,38 +36,63 @@ from scripts.e2e.env import load_stand_env
 _POLL_TIMEOUT_SECONDS = 40
 _HTTP_TIMEOUT_SECONDS = float(_POLL_TIMEOUT_SECONDS + 20)
 
+#: Коды возврата. Отделять «не знаю» от «лежит» здесь принципиально: пробник
+#: обязан молчать о том, чего не проверил, иначе собственный сбой сети выглядит
+#: как авария прода и провоцирует чинить работающее.
+_ALIVE, _DOWN, _UNKNOWN = 0, 1, 2
+
 
 async def _probe(token: str) -> int:
     base = f"https://api.telegram.org/bot{token}"
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as http:
-        me = await http.get(f"{base}/getMe")
-        me.raise_for_status()
-        username = me.json()["result"]["username"]
-        print(f"getMe: @{username}")
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as http:
+            me = await http.get(f"{base}/getMe")
+            me.raise_for_status()
+            username = me.json()["result"]["username"]
+            print(f"getMe: @{username}")
 
-        hook = await http.get(f"{base}/getWebhookInfo")
-        hook.raise_for_status()
-        info = hook.json()["result"]
-        pending = info.get("pending_update_count", 0)
-        print(f"webhook: {info.get('url') or '(нет, режим polling)'}, у черзі {pending}")
+            hook = await http.get(f"{base}/getWebhookInfo")
+            hook.raise_for_status()
+            info = hook.json()["result"]
+            webhook_url = info.get("url") or ""
+            pending = info.get("pending_update_count", 0)
+            print(f"webhook: {webhook_url or '(нет, режим polling)'}, в очереди {pending}")
 
-        print(f"тримаємо getUpdates {_POLL_TIMEOUT_SECONDS}с — чекаємо витіснення...")
-        updates = await http.get(
-            f"{base}/getUpdates", params={"timeout": _POLL_TIMEOUT_SECONDS, "limit": 1}
-        )
+            # 409 у Telegram означает не только «занят другим поллером», но и
+            # «включён вебхук — getUpdates недоступен». В режиме вебхука бот вообще
+            # не поллит, и наш признак живости неприменим: 409 пришёл бы и на
+            # погашенном контейнере, дав ложное «жив». Поэтому не гадаем, а
+            # честно отвечаем «не знаю» — направление ошибки здесь важнее охвата.
+            if webhook_url:
+                print("бот переведён на вебхук — проверка поллингом неприменима ?")
+                return _UNKNOWN
+
+            print(f"держим getUpdates {_POLL_TIMEOUT_SECONDS}с — ждём вытеснения...")
+            updates = await http.get(
+                f"{base}/getUpdates", params={"timeout": _POLL_TIMEOUT_SECONDS, "limit": 1}
+            )
+    except httpx.HTTPError as exc:
+        # Сбой связи/таймаут — это отказ ПРОБНИКА, а не приговор проду. Без этой
+        # ветки исключение вылетало наружу, интерпретатор завершался кодом 1 — тем
+        # самым, которым мы обозначаем «бот не работает».
+        print(f"пробник не смог доспросить Telegram ({type(exc).__name__}: {exc}) ?")
+        return _UNKNOWN
+    except (KeyError, ValueError) as exc:
+        print(f"неожиданный формат ответа Telegram ({type(exc).__name__}: {exc}) ?")
+        return _UNKNOWN
 
     if updates.status_code == 409:
-        print("409 Conflict — нас витіснив інший поллер: боєвий процес ЖИВИЙ ✔")
+        print("409 Conflict — нас вытеснил другой поллер: боевой процесс ЖИВ ✔")
         if pending > 5:
             print(f"  ⚠ в очереди {pending} апдейтов — бот поллит, но может отставать")
-        return 0
+        return _ALIVE
 
     if updates.is_success:
-        print("довгий поллінг відпрацював без конфлікту — поллити нікому, бот НЕ працює ✘")
-        return 1
+        print("длинный поллинг отработал без конфликта — поллить некому, бот НЕ работает ✘")
+        return _DOWN
 
-    print(f"getUpdates: неожиданный ответ {updates.status_code} — {updates.text[:200]}")
-    return 2
+    print(f"getUpdates: неожиданный ответ {updates.status_code} — {updates.text[:200]} ?")
+    return _UNKNOWN
 
 
 def main() -> int:
@@ -75,7 +100,7 @@ def main() -> int:
     token = os.environ.get("BOT_TOKEN", "").strip()
     if not token:
         print("BOT_TOKEN пуст — нечего проверять (см. .env.prod)")
-        return 2
+        return _UNKNOWN
     return asyncio.run(_probe(token))
 
 
