@@ -20,7 +20,7 @@ import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.types.base import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,7 +67,12 @@ from app.services.exceptions import (
     SenderProfileNotValidated,
     TtnCreationFailed,
 )
-from app.services.inventory import InventoryItem, list_inventory
+from app.services.inventory import (
+    InventoryItem,
+    InventoryPage,
+    find_inventory_item,
+    list_inventory,
+)
 from app.services.shipment import create_shipment, resolve_sender_id
 from app.utils.phone import normalize_phone as _normalize_phone
 
@@ -297,6 +302,45 @@ async def cb_pick_sender(
 # --------------------------------------------------------------------- рендеры
 
 
+async def _prepare_picker(
+    state: FSMContext, page: InventoryPage
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Запомнить идентичность отрисованной страницы и собрать текст+клавиатуру.
+
+    `picker_skus` — SKU строк ИМЕННО этой страницы: кнопка `cab:ttn:pick:{idx}`
+    резолвится через него, а не повторным чтением склада. Индекс осмыслен только
+    против того снапшота, который эту клавиатуру и нарисовал: стоит фильтру или
+    offset разойтись (а `cb_pick` перечитывал список без активной категории) —
+    и в корзину молча уезжает другой товар. Плюс это закрывает случай, который
+    синхронизацией аргументов не закрыть в принципе: лист изменился между рендером
+    и тапом, `items.sort()` пересортировал, и тот же индекс указывает на чужой SKU.
+
+    Токен поколения в callback_data не нужен: `answer_latest_screen` снимает
+    разметку со старого экрана, а `_show_picker`/`_show_stepper` редактируют то же
+    сообщение — устаревшая клавиатура пикера в чате не остаётся.
+
+    Единственная точка записи `picker_skus`/`cart_offset`/`ttn_categories`:
+    рендеров пикера два (`_show_picker` и `receive_item_search`), и раньше каждый
+    вёл это состояние сам — пропустить ключ в одном из них было слишком легко.
+    """
+    await state.update_data(
+        cart_offset=page.offset,
+        ttn_categories=page.categories,
+        picker_skus=[item.sku for item in page.items],
+    )
+    data = await state.get_data()
+    cart_count = len(data.get("cart", {}))
+    category = data.get("ttn_category")
+    # «🧹 Скинути» показываем, когда есть что сбрасывать — иначе повторный рендер
+    # идентичен и Telegram отклоняет edit, кнопка выглядит битой.
+    has_reset = cart_count > 0 or bool(data.get("ttn_query")) or bool(category)
+    text = texts.cart_picker_text(page, cart_count=cart_count)
+    kb = build_cart_picker_kb(
+        page, cart_count=cart_count, active_category=category, has_reset=has_reset
+    )
+    return text, kb
+
+
 async def _show_picker(
     target: Message | TelegramObject,
     session: AsyncSession,
@@ -309,26 +353,17 @@ async def _show_picker(
     account=None,
 ) -> None:
     data = await state.get_data()
-    query = data.get("ttn_query")
-    category = data.get("ttn_category")
     page = await list_inventory(
         session,
         client=client,
-        query=query,
-        category=category,
+        query=data.get("ttn_query"),
+        category=data.get("ttn_category"),
         limit=TTN_PAGE_SIZE,
         offset=offset,
         account_id=account_id,
         account=account,
     )
-    await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
-    data = await state.get_data()
-    cart_count = len(data.get("cart", {}))
-    text = texts.cart_picker_text(page, cart_count=cart_count)
-    has_reset = cart_count > 0 or bool(query) or bool(category)
-    kb = build_cart_picker_kb(
-        page, cart_count=cart_count, active_category=category, has_reset=has_reset
-    )
+    text, kb = await _prepare_picker(state, page)
     if edit:
         await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -674,23 +709,8 @@ async def receive_item_search(
         account_id=_account_id(effective_context),
         account=_account(effective_context),
     )
-    await state.update_data(cart_offset=page.offset, ttn_categories=page.categories)
-    data = await state.get_data()
-    cart_count = len(data.get("cart", {}))
-    category = data.get("ttn_category")
-    # Как в `_show_picker`: «🧹 Скинути» показываем, когда есть что сбрасывать
-    # (после поиска `query` активен → кнопка нужна, чтобы очистить фильтр/корзину).
-    has_reset = cart_count > 0 or bool(query) or bool(category)
-    await answer_latest_screen(
-        bot,
-        message,
-        state,
-        texts.cart_picker_text(page, cart_count=cart_count),
-        reply_markup=build_cart_picker_kb(
-            page, cart_count=cart_count, active_category=category, has_reset=has_reset
-        ),
-        parse_mode="HTML",
-    )
+    text, kb = await _prepare_picker(state, page)
+    await answer_latest_screen(bot, message, state, text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("cab:ttn:pick:"))
@@ -712,20 +732,38 @@ async def cb_pick(
     if client is None:
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
-    offset = (await state.get_data()).get("cart_offset", 0)
-    page = await list_inventory(
+    # Товар берём из `picker_skus` — списка SKU той страницы, которую и нарисовали.
+    # Раньше здесь шло повторное чтение склада БЕЗ активной категории, и индекс
+    # отфильтрованной страницы резолвился против нефильтрованной: тап по товару в
+    # наличии отвечал «немає на залишку» про совсем другой товар (или, что хуже,
+    # молча клал в корзину не тот SKU).
+    skus = (await state.get_data()).get("picker_skus", [])
+    if idx < 0 or idx >= len(skus):
+        await callback.answer(_STALE, show_alert=True)
+        return
+    item = await find_inventory_item(
         db_session,
         client=client,
-        query=(await state.get_data()).get("ttn_query"),
-        limit=TTN_PAGE_SIZE,
-        offset=offset,
+        sku=skus[idx],
         account_id=_account_id(effective_context),
         account=_account(effective_context),
     )
-    if idx < 0 or idx >= len(page.items):
-        await callback.answer(_STALE, show_alert=True)
+    if item is None:
+        # Позиция исчезла со склада между рендером и тапом. Молчать нельзя:
+        # перерисовываем пикер, чтобы кнопки снова совпадали со складом.
+        await state.set_state(CreateTtnState.picking_items)
+        await _show_picker(
+            callback.message,
+            db_session,
+            client,
+            state,
+            offset=(await state.get_data()).get("cart_offset", 0),
+            edit=True,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
+        )
+        await callback.answer("Товар більше не доступний — список оновлено.", show_alert=True)
         return
-    item = page.items[idx]
     if item.available <= 0:
         await callback.answer(f"«{item.name}» немає на залишку.", show_alert=True)
         return
@@ -954,16 +992,16 @@ async def cb_cart_edit(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     # Остаток для редактирования берём актуальный (а не сохранённый в корзине).
-    page = await list_inventory(
+    # Именно точным поиском по SKU: `list_inventory(query=sku)` матчит подстроку и
+    # ограничен страницей — при общем префиксе нужная позиция в выдачу не попадала,
+    # и `available` тихо откатывался к количеству из корзины (устаревший максимум).
+    match = await find_inventory_item(
         db_session,
         client=client,
-        query=sku,
-        limit=TTN_PAGE_SIZE,
-        offset=0,
+        sku=sku,
         account_id=_account_id(effective_context),
         account=_account(effective_context),
     )
-    match = next((it for it in page.items if it.sku == sku), None)
     available = match.available if match else entry["qty"]
     await state.update_data(
         pending={
