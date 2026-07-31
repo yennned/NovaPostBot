@@ -22,6 +22,9 @@ from app.services.shipments import ShipmentPage
 PRODUCTS_PAGE_SIZE = 6
 SHIPMENTS_PAGE_SIZE = 6
 
+# Неинтерактивная строка товара на экране «📦 Товари» (см. `build_inventory_kb`).
+PRODUCT_NOOP = "cab:pnoop"
+
 # Короткие токены вместо полных ключей: callback_data у Telegram — максимум 64 байта.
 # ИНВАРИАНТ: здесь обязан быть ключ на КАЖДУЮ запись `DEFAULT_NOTIFICATION_SETTINGS` —
 # `build_settings_kb` идёт по списку из `_settings_view`, и пропущенный ключ роняет
@@ -82,11 +85,16 @@ def build_inventory_kb(
         price = f"{item.price:.2f} ₴" if item.price is not None else "—"
         name = item.name[:18]
         category = f"{item.category[:10]} · " if item.category else ""
+        # Строка товара — витрина, а не действие: всё, что о нём известно на этом
+        # экране, уже написано на самой кнопке. Раньше сюда шёл `cab:products:{offset}`,
+        # то есть перерисовка ТОЙ ЖЕ страницы: Telegram отклонял её как «message is
+        # not modified», исключение уносило хендлер мимо `callback.answer()`, и на
+        # кнопке оставался висеть спиннер — она выглядела сломанной.
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"{category}{name} · {price} · {item.available} шт",
-                    callback_data=f"cab:products:{page.offset}",
+                    callback_data=PRODUCT_NOOP,
                 )
             ]
         )

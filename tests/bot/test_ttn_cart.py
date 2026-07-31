@@ -85,11 +85,17 @@ class FakeCallback:
         self.acks.append({"text": text, "show_alert": show_alert})
 
 
-def _item(sku: str, name: str, available: int, price: str | None = "100") -> InventoryItem:
+def _item(
+    sku: str,
+    name: str,
+    available: int,
+    price: str | None = "100",
+    category: str | None = None,
+) -> InventoryItem:
     return InventoryItem(
         sku=sku,
         name=name,
-        category=None,
+        category=category,
         stock=available,
         reserved=0,
         available=available,
@@ -123,7 +129,60 @@ def _patch_inventory(monkeypatch, page: InventoryPage) -> None:
     ):
         return page
 
+    async def fake_find_inventory_item(session, *, client, sku, **kwargs):
+        return next((item for item in page.items if item.sku == sku), None)
+
     monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+    monkeypatch.setattr(h, "find_inventory_item", fake_find_inventory_item)
+
+
+def _patch_inventory_from_items(monkeypatch, items: list[InventoryItem]) -> None:
+    """Фейк склада, ЧЕСТНО применяющий `query`/`category`/`offset`.
+
+    `_patch_inventory` отдаёт одну и ту же страницу на любые аргументы, поэтому
+    структурно не способен поймать рассинхрон «клавиатуру нарисовали с фильтром, а
+    тап резолвили без него» — тесты `cb_pick` были зелёными на сломанном коде.
+    Фильтрация повторяет `app.services.inventory.list_inventory`; сам сервис здесь
+    не переиспользуем, потому что он тянет `reserved` из БД, а эти тесты чистые.
+    """
+
+    async def fake_list_inventory(
+        session,
+        *,
+        client,
+        query=None,
+        category=None,
+        limit=h.TTN_PAGE_SIZE,
+        offset=0,
+        reader=None,
+        **kwargs,
+    ):
+        rows = list(items)
+        categories = sorted({item.category for item in rows if item.category})
+        if query:
+            needle = query.strip().lower()
+            rows = [
+                item
+                for item in rows
+                if needle in item.sku.lower()
+                or needle in item.name.lower()
+                or needle in (item.category or "").lower()
+            ]
+        if category:
+            rows = [item for item in rows if (item.category or "").lower() == category.lower()]
+        return InventoryPage(
+            items=rows[offset : offset + limit],
+            total=len(rows),
+            limit=limit,
+            offset=offset,
+            categories=categories,
+        )
+
+    async def fake_find_inventory_item(session, *, client, sku, **kwargs):
+        return next((item for item in items if item.sku == sku), None)
+
+    monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+    monkeypatch.setattr(h, "find_inventory_item", fake_find_inventory_item)
 
 
 def _ctx(client):
@@ -405,8 +464,9 @@ async def test_edit_sender_pick_preserves_cart_and_updates_profile(monkeypatch):
 
 
 async def test_pick_opens_stepper(monkeypatch):
+    # `picker_skus` — идентичность отрисованной страницы; её пишет рендер пикера.
     _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 24)]))
-    state = FakeState(cart_offset=0, cart={})
+    state = FakeState(cart_offset=0, cart={}, picker_skus=["SKU1"])
     cb = FakeCallback("cab:ttn:pick:0")
     await h.cb_pick(cb, _ctx(_CLIENT), None, state)
     assert state._data["pending"]["sku"] == "SKU1"
@@ -416,11 +476,118 @@ async def test_pick_opens_stepper(monkeypatch):
 
 async def test_pick_zero_available_blocked(monkeypatch):
     _patch_inventory(monkeypatch, _page([_item("SKU0", "Немає", 0)]))
-    state = FakeState(cart_offset=0, cart={})
+    state = FakeState(cart_offset=0, cart={}, picker_skus=["SKU0"])
     cb = FakeCallback("cab:ttn:pick:0")
     await h.cb_pick(cb, _ctx(_CLIENT), None, state)
     assert "pending" not in state._data
     assert cb.acks[-1]["show_alert"] is True
+
+
+def _catalog() -> list[InventoryItem]:
+    """Склад «как на видео»: нулевая «Дріп кава» впереди, Lavazza в наличии — дальше."""
+    return [
+        _item("DRIP-BRA", "Дріп кава Бразилія 7 шт", 0, category="Дріп кава"),
+        _item("DRIP-ETH", "Дріп кава Ефіопія 7 шт", 0, category="Дріп кава"),
+        _item("LAV-BEAN", "Кава в зернах Lavazza", 7, category="Кава Lavazza"),
+        _item("LAV-GRND", "Кава мелена Lavazza", 9, category="Кава Lavazza"),
+    ]
+
+
+async def test_pick_resolves_item_from_rendered_page(monkeypatch):
+    """Регрессия: после смены категории тап брал товар из НЕфильтрованного списка.
+
+    На видео владельца это выглядит так: активна «Кава Lavazza», все видимые позиции
+    в наличии (7/9 шт), а тап отвечает «Дріп кава ... немає на залишку» — про товар,
+    которого на экране нет. Индекс кнопки резолвился против другого снапшота.
+    """
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, ttn_category="Кава Lavazza")
+    await h._show_picker(FakeMessage(), None, _CLIENT, state, offset=0, edit=False)
+
+    cb = FakeCallback("cab:ttn:pick:0")
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert state._data.get("pending", {}).get("sku") == "LAV-BEAN"
+    assert [ack for ack in cb.acks if ack["show_alert"]] == []
+
+
+async def test_pick_category_then_pick(monkeypatch):
+    """Сквозной путь как у пользователя: чип категории → тап по товару."""
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={})
+    await h._show_picker(FakeMessage(), None, _CLIENT, state, offset=0, edit=False)
+    # «Кава Lavazza» — индекс 1 в отсортированном списке категорий страницы.
+    idx = state._data["ttn_categories"].index("Кава Lavazza")
+
+    await h.cb_pick_category(FakeCallback(f"cab:ttn:pcat:{idx}"), _ctx(_CLIENT), None, state)
+    cb = FakeCallback("cab:ttn:pick:1")
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert state._data["ttn_category"] == "Кава Lavazza"
+    assert state._data["pending"]["sku"] == "LAV-GRND"
+
+
+async def test_show_picker_stores_page_skus(monkeypatch):
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, ttn_category="Кава Lavazza")
+
+    await h._show_picker(FakeMessage(), None, _CLIENT, state, offset=0, edit=False)
+
+    assert state._data["picker_skus"] == ["LAV-BEAN", "LAV-GRND"]
+
+
+async def test_receive_item_search_stores_page_skus(monkeypatch):
+    """Второй рендер пикера обязан вести ту же идентичность, что и `_show_picker`."""
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={})
+
+    await h.receive_item_search(FakeMessage(text="мелена"), FakeBot(), state, _ctx(_CLIENT), None)
+
+    assert state._data["picker_skus"] == ["LAV-GRND"]
+
+
+async def test_pick_item_gone_from_stock(monkeypatch):
+    """Позиция исчезла со склада между рендером и тапом → явный алерт, не молчание."""
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, picker_skus=["GONE-SKU"], cart_offset=0)
+    cb = FakeCallback("cab:ttn:pick:0")
+
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert "pending" not in state._data
+    assert cb.acks[-1]["show_alert"] is True
+    assert cb.message.edits  # пикер перерисован, кнопки снова совпадают со складом
+
+
+async def test_pick_index_out_of_range(monkeypatch):
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, picker_skus=["LAV-BEAN"])
+    cb = FakeCallback("cab:ttn:pick:5")
+
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert "pending" not in state._data
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_cart_edit_resolves_sku_beyond_first_page(monkeypatch):
+    """Регрессия: `cb_cart_edit` искал остаток через `query=sku` с лимитом страницы.
+
+    Подстрочный матч по общему префиксу выдаёт больше позиций, чем помещается на
+    странице, и нужная в неё не попадала → `available` тихо падал на количество из
+    корзины, и степпер показывал устаревший максимум.
+    """
+    # «SKU-1» — подстрока каждого из SKU-10…SKU-19, поэтому подстрочный поиск
+    # выдаёт 11 позиций, а нужная в первую страницу (6) не попадает.
+    items = [_item(f"SKU-1{i}", f"Кава 1{i}", 1) for i in range(10)]
+    items.append(_item("SKU-1", "Кава одна", 12))
+    _patch_inventory_from_items(monkeypatch, items)
+    state = FakeState(cart={"SKU-1": {"qty": 2, "name": "Кава одна", "price": "100"}})
+    cb = FakeCallback("cab:ttn:cedit:0")
+
+    await h.cb_cart_edit(cb, _ctx(_CLIENT), None, state)
+
+    assert state._data["pending"]["available"] == 12
 
 
 async def test_qty_delta_clamps_to_available():

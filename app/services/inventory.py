@@ -154,6 +154,28 @@ async def list_inventory(
     )
 
 
+async def find_inventory_item(
+    session: AsyncSession,
+    *,
+    client: User,
+    sku: str,
+    account_id=None,
+    account: ClientAccount | None = None,
+    reader: StockSource | None = None,
+) -> InventoryItem | None:
+    """Позиция склада по ТОЧНОМУ `sku` из свежего снапшота (`None` — позиции нет).
+
+    Для случая «кнопка уже знает sku, нужен только актуальный остаток».
+    `list_inventory(query=sku)` для этого не годится: `query` — подстрочный матч по
+    sku/name/category, и нужная позиция может не попасть в первую страницу выдачи —
+    вызывающий тихо получил бы «товара нет» вместо остатка.
+    """
+    items = await get_inventory_snapshot(
+        session, client=client, account_id=account_id, account=account, reader=reader
+    )
+    return next((item for item in items if item.sku == sku), None)
+
+
 @dataclass(frozen=True, slots=True)
 class StockTotals:
     """Краткая сводка по листу склада клиента: позиции и единицы."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from app.bot.keyboards.client import (
@@ -20,7 +21,7 @@ from app.services.client_settings import (
     ClientSettingsView,
     NotificationSettingView,
 )
-from app.services.inventory import InventoryPage
+from app.services.inventory import InventoryItem, InventoryPage
 from app.services.sender_profile import SenderProfileView
 from app.services.shipments import ShipmentPage
 
@@ -130,6 +131,36 @@ def test_inventory_reset_button_only_with_active_filter():
         "cab:pclear" in cb
         for cb in _all_callbacks(build_inventory_kb(_inventory_page(), active_category="Одяг"))
     )
+
+
+def test_inventory_product_rows_are_noop():
+    """Регрессия: строки товаров вели на `cab:products:{offset}` — перерисовку той же
+    страницы. Telegram отклонял её как «message is not modified», исключение уносило
+    хендлер мимо `callback.answer()`, и на кнопке оставался висеть спиннер.
+    """
+    page = InventoryPage(
+        items=[
+            InventoryItem(
+                sku="SKU1",
+                name="Кава",
+                category="Напої",
+                stock=5,
+                reserved=0,
+                available=5,
+                price=Decimal("100"),
+            )
+        ],
+        total=20,  # больше лимита → в клавиатуре появится ряд пагинации
+        limit=1,
+        offset=0,
+        categories=["Напої"],
+    )
+    kb = build_inventory_kb(page)
+    product_rows = [row for row in kb.inline_keyboard if row[0].text.startswith("Напої")]
+
+    assert [b.callback_data for row in product_rows for b in row] == ["cab:pnoop"]
+    # Пагинация остаётся живой — она действительно меняет содержимое экрана.
+    assert "cab:products:1" in _all_callbacks(kb)
 
 
 def test_inventory_no_sheet_link_button_in_keyboard():
