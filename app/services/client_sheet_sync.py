@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -19,6 +16,7 @@ from app.db.models.user import User
 from app.services.inventory import get_inventory_snapshot
 from app.sheets import GoogleSheetsStockSource, StockSource
 from app.sheets.client import SheetsClient
+from app.sheets.runtime import run_on_sheets_executor, shared_sheets_client
 from app.sheets.source import StockSheetNotFound
 
 logger = structlog.get_logger(__name__)
@@ -30,26 +28,10 @@ logger = structlog.get_logger(__name__)
 _VIEW_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна", "Резерв", "Доступно"]
 _VIEW_TAB = "Товари"
 
-# Один авторизованный SheetsClient на процесс: пересоздание клиента на каждый синк —
-# лишний OAuth-handshake service-account. gspread-сессия не рассчитана на параллельные
-# потоки (см. inventory.stock_summary), поэтому синк идёт через выделенный executor из
-# ОДНОГО воркера — это сериализует доступ к общему клиенту без глобального лока и, в
-# отличие от `asyncio.to_thread`, не занимает воркеров общего пула (иначе медленные
-# записи в Sheets головой блокировали бы чтения/записи склада).
-_sheets_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheets-sync")
-_shared_sheets_client: SheetsClient | None = None
-
-
-async def run_on_sheets_executor(fn, /, *args):
-    """Выполнить блокирующий вызов Sheets на выделенном single-worker executor.
-
-    Сериализует ВСЕ обращения к Sheets (клиентский синк + записи склада
-    `apply_deltas`): один воркер исключает гонку read-modify-write по одному листу
-    и конкуренцию за общий gspread-клиент. В отличие от `asyncio.to_thread` (общий
-    пул) не позволяет медленной записи в Sheets занять воркеров склада.
-    """
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_sheets_executor, functools.partial(fn, *args))
+# Общий клиент и single-worker executor переехали в `app/sheets/runtime.py` — ими
+# пользуется и чтение склада (`services/inventory`), а держать их здесь означало бы
+# цикл импортов. `run_on_sheets_executor` реэкспортируем: на него ссылаются
+# `services/tracking` и `services/returns`.
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,17 +94,14 @@ async def sync_client_sheets(
         )
         for item in snapshot
     ]
-    rename_ok, book_id = await asyncio.get_running_loop().run_in_executor(
-        _sheets_executor,
-        functools.partial(
-            _sync_client_sheets_sync,
-            cfg,
-            source_key,
-            source_key if source_key != target_key else None,
-            target_key,
-            view_book_id,
-            rows,
-        ),
+    rename_ok, book_id = await run_on_sheets_executor(
+        _sync_client_sheets_sync,
+        cfg,
+        source_key,
+        source_key if source_key != target_key else None,
+        target_key,
+        view_book_id,
+        rows,
     )
     # Продвигаем ключ только при подтверждённом переименовании вкладок: иначе PG
     # указывал бы на лист с новым именем, которого в «Складі» нет → пустой остаток.
@@ -172,11 +151,8 @@ def _sync_client_sheets_sync(
     stock_view_book_id: str | None,
     rows: list[ViewRow],
 ) -> tuple[bool, str | None]:
-    # Один воркер `_sheets_executor` → вызовы сериализованы, общий клиент безопасен.
-    global _shared_sheets_client
-    if _shared_sheets_client is None:
-        _shared_sheets_client = SheetsClient(settings)
-    client = _shared_sheets_client
+    # Один воркер executor'а → вызовы сериализованы, общий клиент безопасен.
+    client = shared_sheets_client(settings)
     gc = client._authorize()  # кэшируется на инстансе → OAuth-handshake только раз
     rename_ok = _rename_main_worksheets(gc, settings, previous_sheet_key or source_key, target_key)
     # Зеркалим резерв (из снапшота PG) в колонку «Резерв» актуального листа «Склад».

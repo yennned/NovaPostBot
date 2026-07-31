@@ -53,12 +53,16 @@ def _clear_settings_cache():
 @pytest.fixture(autouse=True)
 def _reset_shared_sheets_client():
     """Сбрасываем процесс-глобальный кэш `SheetsClient` — иначе первый тест с
-    включёнными Sheets закэшировал бы клиент со своими settings на всю сессию."""
-    from app.services import client_sheet_sync
+    включёнными Sheets закэшировал бы клиент со своими settings на всю сессию.
 
-    client_sheet_sync._shared_sheets_client = None
+    Живёт в `app/sheets/runtime.py` (переехал туда из `services/client_sheet_sync`,
+    чтобы им пользовалось и чтение склада).
+    """
+    from app.sheets.runtime import reset_sheets_runtime
+
+    reset_sheets_runtime()
     yield
-    client_sheet_sync._shared_sheets_client = None
+    reset_sheets_runtime()
 
 
 def _assert_safe_test_database(url: str) -> None:

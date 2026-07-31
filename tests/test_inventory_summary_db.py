@@ -64,7 +64,7 @@ async def test_employee_does_not_get_a_phantom_warehouse_row(db_session: AsyncSe
     # Зовём НАСТОЯЩИЙ билдер экрана, а не копию его запроса: иначе откат хендлера
     # на выборку по `User` тест бы не заметил. Фейкается только адаптер Sheets.
     source = _KeyedSource()
-    monkeypatch.setattr(inventory, "build_stock_source", lambda *a, **kw: source)
+    monkeypatch.setattr(inventory, "current_stock_source", lambda *a, **kw: source)
     text = await _warehouse_text(db_session)
 
     assert "Магазин — 1 поз. / 7 од." in text
