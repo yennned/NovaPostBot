@@ -1,6 +1,8 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    # Держим в паре с ruff из requirements-dev (CI ставит свежий): старый пин
+    # форматировал иначе и ломал `ruff format --check` в CI.
+    rev: v0.15.22
     hooks:
       - id: ruff
         args: [--fix]
