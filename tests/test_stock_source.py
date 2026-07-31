@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.sheets import (
     CrmStockSource,
     GoogleSheetsStockSource,
+    TtlStockSource,
     build_stock_source,
     shared_sheets_client,
 )
@@ -34,11 +35,40 @@ def test_crm_stock_source_is_explicit_stub(monkeypatch):
         source.read_stock("client-1")
 
 
+def _google_source(source):
+    """Развернуть цепочку обёрток до самого `GoogleSheetsStockSource`."""
+    while not isinstance(source, GoogleSheetsStockSource):
+        source = source._source
+    return source
+
+
 def test_default_source_reuses_one_client_per_process():
     """Раньше каждый вызов создавал новый `SheetsClient` = новый OAuth-handshake
     перед каждым чтением склада."""
-    assert build_stock_source().client is build_stock_source().client
-    assert build_stock_source().client is shared_sheets_client()
+    assert (
+        _google_source(build_stock_source()).client is _google_source(build_stock_source()).client
+    )
+    assert _google_source(build_stock_source()).client is shared_sheets_client()
+
+
+def test_default_source_is_shared_cache_across_updates():
+    """Кэш чтений обязан быть ОДИН на процесс.
+
+    `ServicesMiddleware` собирает источник на каждый апдейт; кэш, созданный там
+    же, не пережил бы и одного экрана — то есть не решал бы задачу, ради которой
+    заводится (8 чтений листа на один сценарий ТТН при квоте 60/мин на весь бот).
+    """
+    first = build_stock_source()
+    assert isinstance(first, TtlStockSource)
+    assert build_stock_source() is first
+
+
+def test_zero_ttl_disables_cache(monkeypatch):
+    """`STOCK_CACHE_TTL_SECONDS=0` возвращает поведение до правки — без обёртки."""
+    monkeypatch.setenv("STOCK_CACHE_TTL_SECONDS", "0")
+    get_settings.cache_clear()
+    reset_sheets_runtime()
+    assert isinstance(build_stock_source(), GoogleSheetsStockSource)
 
 
 def test_explicit_settings_get_their_own_client():

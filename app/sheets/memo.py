@@ -40,5 +40,16 @@ class PerUpdateStockSource:
         Инвалидируем ДО записи: упади она на полпути, часть строк всё равно могла
         измениться, и отдавать старый снапшот было бы хуже, чем перечитать.
         """
-        self._rows.pop(client_key, None)
+        self.invalidate(client_key)
         self._source.apply_deltas(client_key, deltas)
+
+    def invalidate(self, client_key: str | None = None) -> None:
+        """Забыть мемо по ключу (или всё) — следующее чтение пойдёт в источник.
+
+        Нужно гейту от oversell: он обязан сверять корзину со свежим листом, а не
+        с тем снапшотом, по которому пользователь минуту назад рисовал экран.
+        """
+        if client_key is None:
+            self._rows.clear()
+        else:
+            self._rows.pop(client_key, None)
