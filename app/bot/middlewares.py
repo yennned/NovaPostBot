@@ -20,6 +20,12 @@ from app.bot.services import (
 )
 from app.bot.types import ClientAccountContext
 from app.db.repositories import AuditRepository, ClientAccountRepository, UserRepository
+from app.sheets import (
+    PerUpdateStockSource,
+    build_stock_source,
+    reset_stock_source,
+    use_stock_source,
+)
 
 if TYPE_CHECKING:
     from app.novaposhta.cache import NPReferenceCache
@@ -59,13 +65,22 @@ class ServicesMiddleware(BaseMiddleware):
             data["services"] = services
             data["np_client"] = self.np_client
             data["np_cache"] = self.np_cache
+            # Свежий на каждый апдейт, как и `db_session`: мемоизирует чтение листа
+            # «Склад» в пределах одной операции (рендер экрана + следующий за ним
+            # синк читали один и тот же лист дважды). Не кэш — пережить хендлер
+            # физически не может, поэтому «остаток всегда свежий» не нарушается.
+            stock_reader = PerUpdateStockSource(build_stock_source())
+            data["stock_reader"] = stock_reader
             data["start_service"] = StartService(services.user_store)
             data["dev_service"] = DevService(services)
+            token = use_stock_source(stock_reader)
             try:
                 result = await handler(event, data)
             except Exception:
                 await session.rollback()
                 raise
+            finally:
+                reset_stock_source(token)
             await session.commit()
             return result
 

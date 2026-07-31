@@ -21,6 +21,22 @@ class StockSheetNotFound(Exception):
         self.client_key = client_key
 
 
+class StockSourceUnavailable(Exception):
+    """Источник остатков временно недоступен: квота (429), 5xx, сеть.
+
+    Отдельно от `StockSheetNotFound`, и это принципиально: «листа нет» верхний слой
+    трактует как пустой остаток, а для недоступности такая трактовка — ложь. Она
+    рисует экран, где у ВСЕХ товаров «0 шт» и `🚫`, то есть выглядит как настоящий
+    склад. Пользователь при этом видит правдоподобную неправду и принимает по ней
+    решения. Поэтому недоступность пробрасывается наверх и показывается явно.
+    """
+
+    def __init__(self, client_key: str | None = None, status: int | None = None) -> None:
+        super().__init__(f"источник остатков недоступен (key={client_key}, status={status})")
+        self.client_key = client_key
+        self.status = status
+
+
 @dataclass(frozen=True, slots=True)
 class StockRow:
     sku: str

@@ -94,6 +94,13 @@ class Settings(BaseSettings):
     google_sa_json: str = Field(default="", alias="GOOGLE_SA_JSON")
     sheets_stock_book_id: str = Field(default="", alias="SHEETS_STOCK_BOOK_ID")
     sheets_intake_book_id: str = Field(default="", alias="SHEETS_INTAKE_BOOK_ID")
+    # Ретраи ЧТЕНИЯ Sheets на временную недоступность (квота 429, 5xx). Квота
+    # Google — 60 read/min на service-account, то есть на весь бот, поэтому упереться
+    # в неё реально. Записи (`apply_deltas`) не ретраим: они могли примениться
+    # частично, и повтор удвоил бы дельту остатка.
+    sheets_retry_attempts: int = Field(default=3, alias="SHEETS_RETRY_ATTEMPTS")
+    sheets_retry_backoff: float = Field(default=0.5, alias="SHEETS_RETRY_BACKOFF")
+
     inventory_source: Literal["sheets", "crm"] = Field(
         default="sheets",
         alias="INVENTORY_SOURCE",

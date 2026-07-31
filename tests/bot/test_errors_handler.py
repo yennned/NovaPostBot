@@ -1,7 +1,8 @@
-"""Тест глобального errors-router'а: непрочитанный ключ ФОП (DecryptionError).
+"""Тесты глобального errors-router'а.
 
-Хендлер дёргаем напрямую с дак-типизированным `ErrorEvent` (как в остальных
-bot-тестах — без реального aiogram-апдейта и без БД)."""
+Хендлеры дёргаем напрямую с дак-типизированным `ErrorEvent` (как в остальных
+bot-тестах — без реального aiogram-апдейта и без БД).
+"""
 
 from __future__ import annotations
 
@@ -11,9 +12,14 @@ from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.exceptions import TelegramBadRequest
 from app.bot.handlers.errors import (
     _KEY_UNREADABLE_TEXT,
+    _STOCK_UNAVAILABLE_TEXT,
+    _UNEXPECTED_TEXT,
     on_key_decryption_error,
     on_message_not_modified,
+    on_stock_source_unavailable,
+    on_unhandled_error,
 )
+from app.sheets import StockSourceUnavailable
 from app.utils.crypto import DecryptionError
 
 
@@ -25,29 +31,69 @@ class _FakeMessage:
         self.answers.append(text)
 
 
-def _event(*, message=None, callback_message=None) -> SimpleNamespace:
-    callback = SimpleNamespace(message=callback_message) if callback_message is not None else None
+class _FakeCallback:
+    def __init__(self, message=None, data: str | None = None) -> None:
+        self.message = message
+        self.data = data
+        self.acks: list[dict] = []
+
+    async def answer(self, text=None, show_alert=False) -> None:
+        self.acks.append({"text": text, "show_alert": show_alert})
+
+
+def _event(exc: Exception, *, message=None, callback=None) -> SimpleNamespace:
     return SimpleNamespace(
-        update=SimpleNamespace(message=message, callback_query=callback),
-        exception=DecryptionError("сменён FERNET_KEY"),
+        update=SimpleNamespace(
+            update_id=1,
+            message=message,
+            callback_query=callback,
+            event_from_user=SimpleNamespace(id=42),
+        ),
+        exception=exc,
     )
+
+
+_DECRYPT = DecryptionError("сменён FERNET_KEY")
 
 
 async def test_decrypt_error_replies_to_message():
     msg = _FakeMessage()
-    await on_key_decryption_error(_event(message=msg))
+    await on_key_decryption_error(_event(_DECRYPT, message=msg))
     assert msg.answers == [_KEY_UNREADABLE_TEXT]
 
 
-async def test_decrypt_error_replies_via_callback_message():
-    cb_msg = _FakeMessage()
-    await on_key_decryption_error(_event(callback_message=cb_msg))
-    assert cb_msg.answers == [_KEY_UNREADABLE_TEXT]
+async def test_decrypt_error_answers_the_callback():
+    """Регрессия: раньше писали в `callback.message`, но сам callback не отвечали —
+    Telegram оставлял на кнопке крутящийся спиннер, и она выглядела сломанной."""
+    cb = _FakeCallback(message=_FakeMessage())
+    await on_key_decryption_error(_event(_DECRYPT, callback=cb))
+    assert cb.acks == [{"text": _KEY_UNREADABLE_TEXT, "show_alert": True}]
+    assert cb.message.answers == []  # ack вместо дубля текстом
 
 
 async def test_decrypt_error_without_target_does_not_crash():
     # нет ни message, ни callback (напр. inline-callback без сообщения) — просто лог
-    await on_key_decryption_error(_event())
+    await on_key_decryption_error(_event(_DECRYPT))
+
+
+async def test_stock_unavailable_answers_callback_with_alert():
+    cb = _FakeCallback(message=_FakeMessage(), data="cab:products:0")
+    await on_stock_source_unavailable(_event(StockSourceUnavailable("Магазин", 429), callback=cb))
+    assert cb.acks == [{"text": _STOCK_UNAVAILABLE_TEXT, "show_alert": True}]
+
+
+async def test_unhandled_exception_backstop_replies():
+    """Без последнего рубежа любое неожиданное исключение не отвечало пользователю
+    НИЧЕГО."""
+    msg = _FakeMessage()
+    await on_unhandled_error(_event(ValueError("бум"), message=msg))
+    assert msg.answers == [_UNEXPECTED_TEXT]
+
+
+async def test_unhandled_backstop_acks_callback():
+    cb = _FakeCallback(message=_FakeMessage(), data="cab:ttn:pick:0")
+    await on_unhandled_error(_event(RuntimeError("бум"), callback=cb))
+    assert cb.acks == [{"text": _UNEXPECTED_TEXT, "show_alert": True}]
 
 
 def _bad_request_event(message: str) -> SimpleNamespace:

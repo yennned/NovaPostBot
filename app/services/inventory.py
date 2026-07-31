@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -13,7 +13,13 @@ from app.db.models.client_account import ClientAccount
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services import shipments
-from app.sheets import StockRow, StockSheetNotFound, StockSource, build_stock_source
+from app.sheets import (
+    StockRow,
+    StockSheetNotFound,
+    StockSource,
+    current_stock_source,
+    run_sheets_read,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -93,14 +99,29 @@ async def get_inventory_snapshot(
 ) -> list[InventoryItem]:
     account = shipments.require_client_account(client, account)
     key = stock_sheet_key(account)
+    source = reader or current_stock_source()
+    started = time.monotonic()
     try:
-        rows = await asyncio.to_thread((reader or build_stock_source()).read_stock, key)
+        # Через выделенный single-worker executor, а не `asyncio.to_thread`: клиент
+        # gspread теперь один на процесс, и общий пул потоков означал бы гонку по
+        # непотокобезопасной сессии. Заодно чтения не конкурируют с записями склада.
+        # `StockSourceUnavailable` НЕ глотаем — см. комментарий у самого исключения.
+        rows = await run_sheets_read(source.read_stock, key)
     except StockSheetNotFound:
         # Лист склада ещё не заведён/переименован — это пустой остаток, а не сбой:
         # клиент видит «склад порожній», а не падение хендлера створення ТТН.
         # Manager-сводка (`stock_totals`) проглатывает это отдельно → None.
         logger.warning("inventory.sheet_missing", client_id=str(client.id), key=key)
         rows = []
+    logger.info(
+        "inventory.sheet_read",
+        key=key,
+        rows=len(rows),
+        duration_ms=round((time.monotonic() - started) * 1000),
+        # Сколько РЕАЛЬНЫХ обращений к Sheets сделал источник этого апдейта: по нему
+        # видно, что рендер+синк укладываются в одно чтение, и считается расход квоты.
+        source_reads=getattr(source, "reads", None),
+    )
     reserved = (
         await ShipmentRepository(session).reserved_by_sku(client.id)
         if account_id is None
@@ -198,9 +219,9 @@ async def stock_totals(
     Ошибку одного аккаунта (нет листа, блип НП/Sheets) глотаем — сводка по
     остальным не должна падать целиком.
     """
-    source = reader or build_stock_source()
+    source = reader or current_stock_source()
     try:
-        rows = await asyncio.to_thread(source.read_stock, stock_sheet_key(account))
+        rows = await run_sheets_read(source.read_stock, stock_sheet_key(account))
     except Exception:
         # Устойчивость сводки важнее: лист одного аккаунта может отсутствовать или
         # Sheets/НП блипнуть — это не должно валить сводку по остальным.
@@ -219,5 +240,5 @@ async def stock_summary(
     аккаунтов сильно вырастет — заводить отдельный источник на поток + ограничитель
     конкуренции, а не делить одну сессию.
     """
-    source = reader or build_stock_source()
+    source = reader or current_stock_source()
     return [(account, await stock_totals(account, reader=source)) for account in accounts]
