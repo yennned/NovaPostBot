@@ -65,15 +65,19 @@ class Settings(BaseSettings):
     # Версия сборки (git sha от CI, «dev» локально) — для логов старта и /version.
     app_version: str = Field(default="dev", alias="APP_VERSION")
 
-    # Среда исполнения — чтобы в логах/`/version` было видно, куда подключён процесс,
-    # и случайно не спутать локальный тест-бот с продом. На поведение кода не влияет
-    # (разделение сред идёт через .env: токен/URL), только на трассировку.
-    environment: Literal["local", "staging", "production"] = Field(
+    # Среда исполнения — чтобы в логах/`/version` было видно, куда подключён процесс.
+    # На поведение кода не влияет (разделение идёт через .env: токен/URL), только на
+    # трассировку. `staging` убран вместе со staging-стендом (2026-07-31): у проекта
+    # один бот, а незанятое значение в Literal читается как «стенд есть» и приглашает
+    # поднять второй поллер на боевом токене.
+    environment: Literal["local", "production"] = Field(
         default="local",
         alias="ENVIRONMENT",
     )
 
-    # Telegram
+    # Telegram. Один бот на проект: токен живёт только в .env на боевом сервере.
+    # Локально пусто — `app/main.py` тогда не поднимает поллинг, и машина
+    # разработчика физически не может перехватить трафик реальных клиентов.
     bot_token: str = Field(default="", alias="BOT_TOKEN")
 
     # PostgreSQL (Neon): pooled — для приложения, direct — для Alembic
