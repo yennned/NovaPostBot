@@ -34,6 +34,7 @@ from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
+from app.novaposhta.tracking import is_deleted_in_np
 from app.services import inventory, notifications, shipments
 from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
@@ -48,7 +49,7 @@ from app.services.exceptions import (
 )
 from app.services.notifications import Notifier
 from app.services.sender_scope import resolve_scoped_profile
-from app.sheets import StockSource
+from app.sheets import StockSource, invalidate_stock_cache
 from app.utils.phone import normalize_phone
 from app.utils.sla import shipment_sla_deadline
 
@@ -144,7 +145,16 @@ async def _resolve_items(
     account_id: uuid.UUID | None = None,
     account: ClientAccount | None = None,
 ) -> list[ShipmentItemDraft]:
-    """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой."""
+    """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой.
+
+    Читаем лист **принудительно свежим**: экраны выбора товара обслуживаются кэшем
+    с TTL (`app/sheets/cache.py`, иначе один сценарий ТТН съедал ~8 чтений из
+    60/мин квоты на весь бот), но решение «хватает ли остатка» по кэшу принимать
+    нельзя — это и была бы выдача разрешения продать чужое. Инвалидация идёт по
+    всей цепочке источников, включая мемо текущего апдейта.
+    """
+    scoped_account = shipments.require_client_account(client, account)
+    invalidate_stock_cache(inventory.stock_sheet_key(scoped_account), reader)
     snapshot = await inventory.get_inventory_snapshot(
         session, client=client, account_id=account_id, account=account, reader=reader
     )
@@ -351,6 +361,36 @@ async def _cancel_api_key(session: AsyncSession, shipment) -> str:
     return profile.np_api_key  # EncryptedString расшифровывает при чтении
 
 
+async def _is_deleted_in_np(np_client: NovaPoshtaClient, *, api_key: str, shipment) -> bool:
+    """Спросить у НП, не удалён ли документ уже (`StatusCode=2`, «Видалено»).
+
+    Зачем отдельный запрос. На удаление уже удалённого документа НП отвечает не
+    «не знайдено», а `Error getting payment info …; No document changed
+    DeletionMark`. Разбирать это по тексту нельзя: под ту же формулировку попадает
+    и «удалить нельзя», и тогда мы пометили бы отменённой ЖИВУЮ накладную и сняли
+    резерв — посылка всё равно уехала бы, а склад «вернул» бы товар.
+
+    Без этой проверки отправление становилось неотменяемым навсегда: каждая
+    попытка падала в `TtnCancelFailed`, статус оставался `confirmed`, а резерв
+    висел вечно. Найдено E2E-прогоном на боевом стенде.
+
+    Любой сбой самой проверки трактуем как «не удалён» — отмена честно
+    провалится, и её можно повторить, а вот ложный успех необратим.
+    """
+    if not shipment.ttn_number:
+        return False
+    try:
+        statuses = await methods.get_status_documents(
+            np_client, api_key=api_key, numbers=[shipment.ttn_number]
+        )
+    except Exception:
+        logger.warning(
+            "ttn_delete_status_probe_failed", shipment_id=str(shipment.id), exc_info=True
+        )
+        return False
+    return any(is_deleted_in_np(status) for status in statuses)
+
+
 async def cancel_shipment_np_first(
     session: AsyncSession,
     *,
@@ -384,7 +424,13 @@ async def cancel_shipment_np_first(
         except NovaPoshtaNotFound:
             logger.info("ttn_already_deleted_in_np", shipment_id=str(shipment.id))
         except NovaPoshtaError as exc:
-            raise TtnCancelFailed(str(exc)) from exc
+            if not await _is_deleted_in_np(np_client, api_key=api_key, shipment=shipment):
+                raise TtnCancelFailed(str(exc)) from exc
+            logger.info(
+                "ttn_delete_errored_but_document_is_deleted",
+                shipment_id=str(shipment.id),
+                error=str(exc),
+            )
     card = await shipments.apply_cancel(
         session,
         shipment=shipment,

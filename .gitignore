@@ -1,6 +1,7 @@
 # --- Секреты / окружение (НИКОГДА не коммитим) ---
 .env
 *.env
+.env.*
 !.env.example
 
 # Google service-account / любые credentials
@@ -54,3 +55,6 @@ docker-compose.override.yml
 
 # --- Дубликаты файл-синка (iCloud/Dropbox: "dispatcher 2.py") ---
 * [0-9].*
+
+# --- E2E-харнесс: логи прогонов и срезы боевой БД (данные клиентов, не в git) ---
+scripts/e2e/artifacts/

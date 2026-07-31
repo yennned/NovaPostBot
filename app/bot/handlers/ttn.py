@@ -19,12 +19,14 @@ from decimal import Decimal, InvalidOperation
 import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.types.base import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.client import build_sender_pick_kb
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.keyboards.ttn import (
     DEFAULT_SIZE_TOKEN,
     SIZE_DEFAULT_WEIGHT,
@@ -684,7 +686,19 @@ async def cb_pick_category(
     await callback.answer()
 
 
-@router.message(CreateTtnState.entering_item_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    # Экран пикера прямо предлагает «Шукайте за SKU/назвою/категорією», но раньше
+    # текст принимался ТОЛЬКО после кнопки «🔎 Пошук» (`entering_item_search`).
+    # Человек, набравший артикул на самом экране выбора, не получал ничего: ни
+    # результатов, ни отказа — экран обещал то, чего не делал. Найдено E2E-прогоном
+    # (13 случаев «текст → тишина» у всех ролей).
+    StateFilter(CreateTtnState.entering_item_search, CreateTtnState.picking_items),
+    F.text,
+    ~F.text.startswith("/"),
+    # Кнопка нижней панели — не поисковый запрос. `menu_escape` чистит состояние, но
+    # `raw_state` для фильтров уже вычислен, поэтому исключаем явно (паттерн `802022a`).
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_item_search(
     message: Message,
     bot: Bot,

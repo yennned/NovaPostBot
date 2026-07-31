@@ -239,3 +239,34 @@ def test_price_props_with_cod_adds_redelivery():
         cod_amount=Decimal("250"),
     )
     assert props["RedeliveryCalculate"] == {"CargoType": "Money", "Amount": "250"}
+
+
+def test_status_code_two_is_deleted_not_confirmed():
+    """Код 2 у НП — «Видалено», а не «створено».
+
+    Раньше он вёл в `confirmed`: накладная, удалённая в кабинете НП, навсегда
+    оставалась «підтверджена» — висела в очереди менеджера и держала резерв
+    склада под посылку, которой уже нет.
+    """
+    from app.db.models.enums import ShipmentStatus
+    from app.novaposhta.schemas import TrackingStatus
+    from app.novaposhta.tracking import is_deleted_in_np, map_tracking_status
+
+    status = TrackingStatus(number="20451500870149", status="Видалено", status_code="2", raw={})
+
+    assert is_deleted_in_np(status) is True
+    assert map_tracking_status(status) is ShipmentStatus.cancelled
+
+
+def test_status_code_one_is_not_deleted():
+    from app.novaposhta.schemas import TrackingStatus
+    from app.novaposhta.tracking import is_deleted_in_np
+
+    status = TrackingStatus(
+        number="20451500871350",
+        status="Відправник самостійно створив цю накладну",
+        status_code="1",
+        raw={},
+    )
+
+    assert is_deleted_in_np(status) is False

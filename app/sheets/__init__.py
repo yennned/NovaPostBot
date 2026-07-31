@@ -3,6 +3,7 @@
 from contextvars import ContextVar, Token
 
 from app.config import Settings, get_settings
+from app.sheets.cache import TtlStockSource
 from app.sheets.client import SheetsClient
 from app.sheets.inventory import (
     CrmStockSource,
@@ -16,6 +17,7 @@ from app.sheets.runtime import (
     run_on_sheets_executor,
     run_sheets_read,
     shared_sheets_client,
+    shared_stock_cache,
 )
 from app.sheets.source import (
     StockDelta,
@@ -52,16 +54,45 @@ def current_stock_source(settings: Settings | None = None) -> StockSource:
 def build_stock_source(settings: Settings | None = None) -> StockSource:
     """Собрать источник остатков согласно `INVENTORY_SOURCE`.
 
-    Без явных `settings` переиспользуем процесс-глобальный `SheetsClient`: раньше
-    здесь на каждый вызов создавался новый, а значит новый OAuth-handshake перед
-    каждым чтением склада. С явными `settings` — отдельный клиент: расшаренный
-    закэширован под `get_settings()`, и подмена конфигурации молча не сработала бы.
+    Без явных `settings` переиспользуем процесс-глобальный `SheetsClient` и общий
+    кэш чтений (`TtlStockSource`): раньше здесь на каждый вызов создавался новый
+    клиент, а значит новый OAuth-handshake перед каждым чтением склада. С явными
+    `settings` — отдельный клиент и БЕЗ общего кэша: расшаренные завязаны на
+    `get_settings()`, и подмена конфигурации молча не сработала бы.
     """
     cfg = settings or get_settings()
     if cfg.inventory_source == "crm":
         return CrmStockSource()
-    client = SheetsClient(settings=cfg) if settings is not None else shared_sheets_client()
-    return GoogleSheetsStockSource(client=client)
+    if settings is not None:
+        return GoogleSheetsStockSource(client=SheetsClient(settings=cfg))
+
+    ttl = cfg.stock_cache_ttl_seconds
+    if ttl <= 0:
+        return GoogleSheetsStockSource(client=shared_sheets_client())
+    return shared_stock_cache(
+        lambda: TtlStockSource(
+            GoogleSheetsStockSource(client=shared_sheets_client()), ttl_seconds=ttl
+        )
+    )
+
+
+def invalidate_stock_cache(client_key: str, source: StockSource | None = None) -> None:
+    """Заставить следующее чтение склада пойти в Google, минуя все кэши.
+
+    Нужна ровно одному месту — гейту от oversell в `create_shipment`: решение
+    «хватает ли остатка» обязано приниматься по свежему листу, иначе кэш экранов
+    превратился бы в разрешение продать чужое. Идёт по всей цепочке обёрток
+    (`PerUpdateStockSource` → `TtlStockSource`), потому что мемо апдейта тоже
+    держит снапшот.
+    """
+    current = source or _current_source.get()
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        invalidate = getattr(current, "invalidate", None)
+        if callable(invalidate):
+            invalidate(client_key)
+        current = getattr(current, "_source", None)
 
 
 __all__ = [
@@ -76,12 +107,15 @@ __all__ = [
     "StockSheetNotFound",
     "StockSource",
     "StockSourceUnavailable",
+    "TtlStockSource",
     "build_stock_source",
     "current_stock_source",
+    "invalidate_stock_cache",
     "reset_sheets_runtime",
     "reset_stock_source",
     "run_on_sheets_executor",
     "run_sheets_read",
     "shared_sheets_client",
+    "shared_stock_cache",
     "use_stock_source",
 ]

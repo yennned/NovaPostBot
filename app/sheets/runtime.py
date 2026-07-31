@@ -36,9 +36,14 @@ from app.sheets.source import StockSourceUnavailable
 
 _sheets_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheets")
 _shared_sheets_client: SheetsClient | None = None
+_shared_stock_cache: object | None = None
 # Ленивая инициализация зовётся и из лупа, и из потока executor'а — под локом, чтобы
 # два первых обращения не создали два клиента (и два OAuth-handshake).
 _client_lock = threading.Lock()
+# ОТДЕЛЬНЫЙ лок для кэша склада, а не общий с клиентом: фабрика кэша внутри себя
+# зовёт `shared_sheets_client()`, и на одном нереентрантном `Lock` это был бы
+# самодедлок — процесс вставал намертво на первом же чтении склада.
+_cache_lock = threading.Lock()
 
 
 def shared_sheets_client() -> SheetsClient:
@@ -54,6 +59,23 @@ def shared_sheets_client() -> SheetsClient:
         if _shared_sheets_client is None:
             _shared_sheets_client = SheetsClient(get_settings())
         return _shared_sheets_client
+
+
+def shared_stock_cache(factory):
+    """Единственный на процесс кэш чтений склада (`TtlStockSource`).
+
+    Обязан быть процессным, а не пер-апдейтным: `ServicesMiddleware` собирает
+    источник на КАЖДЫЙ апдейт, и кэш, созданный там же, не пережил бы и одного
+    экрана — ровно та проблема, ради которой он и заводится.
+
+    `factory` вызывается лениво и только один раз, чтобы `app/sheets/runtime.py`
+    не импортировал `cache.py` (и не будил цикл импортов).
+    """
+    global _shared_stock_cache
+    with _cache_lock:
+        if _shared_stock_cache is None:
+            _shared_stock_cache = factory()
+        return _shared_stock_cache
 
 
 async def run_on_sheets_executor(fn, /, *args):
@@ -96,7 +118,9 @@ async def run_sheets_read(fn, /, *args):
 
 
 def reset_sheets_runtime() -> None:
-    """Сбросить процесс-глобальный клиент (тесты; смена конфигурации)."""
-    global _shared_sheets_client
+    """Сбросить процесс-глобальный клиент и кэш склада (тесты; смена конфигурации)."""
+    global _shared_sheets_client, _shared_stock_cache
     with _client_lock:
         _shared_sheets_client = None
+    with _cache_lock:
+        _shared_stock_cache = None
