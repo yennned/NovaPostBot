@@ -1,7 +1,7 @@
 # Runtime-зависимости NovaPostBot (Python 3.12)
 aiogram>=3.29.1,<4
 SQLAlchemy[asyncio]>=2.0.51,<2.1
-asyncpg>=0.29
+asyncpg>=0.31.0
 alembic>=1.13
 redis>=5.0
 pydantic>=2.13.4
