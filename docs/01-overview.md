@@ -15,7 +15,7 @@ Telegram-бот личного кабинета фулфилмента Ново�
 | Тема | Решение |
 |------|---------|
 | Рабочая папка | Только `/Users/yenin/Desktop/NovaPostBot`, с нуля |
-| Стек | Python 3.12 · aiogram 3 · **PostgreSQL** (SQLAlchemy async + Alembic) — вся БД · **Google Sheets** — учёт склада · Redis (FSM/кэш) · Docker |
+| Стек | Python 3.14 · aiogram 3 · **PostgreSQL** (SQLAlchemy async + Alembic) — вся БД · **Google Sheets** — учёт склада · Redis (FSM/кэш) · Docker |
 | Хранилище | **Postgres** — вся база (клиенты, ФОП, ТТН, поддержка, уведомления, аудит/логи). **Google Sheets** — **только учёт склада** (остатки «Склад» лист на клиента + приёмка). CRM/WMS для склада — позже |
 | Интерфейс | MVP — классические inline/reply-кнопки; Mini App (WebApp) заложен как эскейп для формы ТТН/каталога/аналитики; бэкенд API-first |
 | Язык бота | Только украинский (uk). Тонкий слой строк, без переключателя языка |

@@ -36,7 +36,7 @@ Telegram-бот личного кабинета фулфилмента Ново�
 
 ## Стек
 
-Python 3.12 · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
+Python 3.14 · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
 Google Sheets API (service-account) · Nova Poshta API · Docker.
 
 ## Структура

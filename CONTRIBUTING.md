@@ -137,7 +137,7 @@ pytest -q
 а не на моках). Локально:
 
 ```bash
-docker compose --profile dev up -d postgres   # postgres:16 на localhost:5432
+docker compose --profile dev up -d postgres   # postgres:18 на localhost:5432
 cp .env.example .env                           # выставить DATABASE_URL(_DIRECT)
                                                # на localhost и FERNET_KEY
 pytest -q
