@@ -1224,10 +1224,86 @@ async def test_card_computes_defaults(monkeypatch):
     state = _card_state()
     cb = FakeCallback("cab:ttn:wh:0")
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
-    assert state._data["insured_amount"] == "0"
+    # Оголошена вартість = сумма корзины (2 × 150), а не молчаливый ноль.
+    assert state._data["insured_amount"] == "300"
+    assert state._data["insured_amount_source"] == "cart"
     assert state._data["description"] == "Кава"
     assert state._data["payment_method"] == "prepay"
     assert state._data["payer_type"] == "Recipient"
+
+
+async def test_card_insured_shown_with_source(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    card = cb.message.edits[-1]["text"]
+    assert "Оголошена вартість: 300 ₴ (сума з кошика)" in card
+
+
+async def test_card_insured_unset_when_cart_has_no_prices(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(cart={"SKU1": {"qty": 2, "name": "Кава", "price": None}})
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data.get("insured_amount") is None
+    assert state._data.get("insured_amount_source") is None
+    card = cb.message.edits[-1]["text"]
+    assert "не вказана" in card
+    # Цена доставки при этом обязана считаться: иначе клиент вместо понятного
+    # «вкажіть вартість» увидит «розрахунок недоступний».
+    assert "Розрахунок недоступний" not in card
+
+
+async def test_card_insured_partial_prices_warns(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(
+        cart={
+            "SKU1": {"qty": 2, "name": "Кава", "price": "150"},
+            "SKU2": {"qty": 1, "name": "Чай", "price": None},
+        }
+    )
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "300"  # только позиции с ценой
+    assert "Частина товарів без ціни" in cb.message.edits[-1]["text"]
+
+
+async def test_card_insured_zero_warns_uninsured(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(insured_amount="0.00", insured_amount_source="custom")
+    cb = FakeCallback("cab:ttn:wh:0")
+    await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "0.00"  # свою сумму корзина не трогает
+    assert "відшкодує 0 ₴" in cb.message.edits[-1]["text"]
+
+
+async def test_card_insured_follows_cart(monkeypatch):
+    """Товар, добавленный после первого показа карточки, обязан поднять сумму."""
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    await h.cb_wh(FakeCallback("cab:ttn:wh:0"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "300"
+
+    cart = dict(state._data["cart"])
+    cart["SKU2"] = {"qty": 1, "name": "Чай", "price": "80"}
+    await state.update_data(cart=cart)
+    await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "380"
+
+
+async def test_card_insured_custom_survives_cart_change(monkeypatch):
+    """Заниженная вручную сумма — осознанный выбор клиента, корзина её не перетирает."""
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(insured_amount="50", insured_amount_source="custom")
+    await h.cb_wh(FakeCallback("cab:ttn:wh:0"), _ctx(_CLIENT), None, object(), state)
+
+    cart = dict(state._data["cart"])
+    cart["SKU2"] = {"qty": 1, "name": "Чай", "price": "80"}
+    await state.update_data(cart=cart)
+    await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "50"
+    assert state._data["insured_amount_source"] == "custom"
 
 
 async def test_card_price_graceful_on_np_error(monkeypatch):
@@ -1405,6 +1481,28 @@ async def test_receive_edit_insured_sets_value(monkeypatch):
     msg = FakeMessage(text="500")
     await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
     assert state._data["insured_amount"] == "500"
+    # Источник переключился на custom, иначе следующий рендер вернул бы сумму
+    # корзины и правка была бы бессмысленной.
+    assert state._data["insured_amount_source"] == "custom"
+
+
+async def test_receive_edit_insured_lower_than_cart_survives_render(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="insured")
+    await h.receive_edit(FakeMessage(text="120"), object(), state, _ctx(_CLIENT), None, object())
+    await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "120"
+
+
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "1e999", "-1", "abc"])
+def test_parse_money_rejects_broken_input(raw):
+    """`nan` роняло хендлер (сигнальное сравнение), `inf`/`1e999` уходили в НП."""
+    assert h._parse_money(raw) is None
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("0", "0"), ("1200", "1200"), ("1,5", "1.5")])
+def test_parse_money_accepts(raw, expected):
+    assert h._parse_money(raw) == expected
 
 
 async def test_receive_edit_insured_invalid_rejected(monkeypatch):
@@ -1467,11 +1565,38 @@ async def test_set_payment_cod_uses_cart_total(monkeypatch):
 
 async def test_set_payment_cod_not_linked_to_insured(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
-    state = _card_state(insured_amount="450")
+    # Своя страховая сумма: COD её не трогает и не подменяет корзиной.
+    state = _card_state(insured_amount="450", insured_amount_source="custom")
     cb = FakeCallback("cab:ttn:cod:cart")
     await h.cb_set_cod_from_cart(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["cod_amount"] == "300"
     assert state._data["payment_method"] == "cod"
+    assert state._data["insured_amount"] == "450"
+
+
+async def test_cod_from_cart_follows_cart(monkeypatch):
+    """Регресс: выведенный из корзины COD обязан идти за корзиной.
+
+    До правки сумма считалась один раз и застывала — с получателя взяли бы деньги
+    по прежнему составу заказа.
+    """
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(payment_method="cod", cod_amount="300", cod_amount_source="cart")
+    cart = dict(state._data["cart"])
+    cart["SKU2"] = {"qty": 1, "name": "Чай", "price": "80"}
+    await state.update_data(cart=cart)
+    await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["cod_amount"] == "380"
+
+
+async def test_cod_custom_survives_cart_change(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(payment_method="cod", cod_amount="999", cod_amount_source="custom")
+    cart = dict(state._data["cart"])
+    cart["SKU2"] = {"qty": 1, "name": "Чай", "price": "80"}
+    await state.update_data(cart=cart)
+    await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["cod_amount"] == "999"
 
 
 async def test_set_payment_cod_custom_amount(monkeypatch):
@@ -1527,10 +1652,12 @@ def _ready_state(**over):
     return _card_state(**base)
 
 
-def _patch_create(monkeypatch, *, ttn="59000123", raise_exc=None, calls=None):
+def _patch_create(monkeypatch, *, ttn="59000123", raise_exc=None, calls=None, seen=None):
     async def fake(session, **kw):
         if calls is not None:
             calls["n"] = calls.get("n", 0) + 1
+        if seen is not None:
+            seen.update(kw)
         if raise_exc is not None:
             raise raise_exc
         return SimpleNamespace(ttn_number=ttn)
@@ -1547,6 +1674,38 @@ async def test_submit_success(monkeypatch):
     assert state.cleared is True
     assert "59000999" in cb.message.edits[-1]["text"]
     assert _CLIENT.telegram_id not in h._SUBMITTING  # флаг снят
+
+
+async def test_submit_blocked_without_insured(monkeypatch):
+    """Корзина без цен → сумму вывести неоткуда, ТТН не уходит с нулевой страховкой."""
+    h._SUBMITTING.discard(_CLIENT.telegram_id)
+    calls: dict = {}
+    _patch_create(monkeypatch, calls=calls)
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _ready_state(
+        cart={"SKU1": {"qty": 2, "name": "Кава", "price": None}},
+        insured_amount=None,
+        insured_amount_source=None,
+    )
+    cb = FakeCallback("cab:ttn:send")
+    await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert calls.get("n", 0) == 0
+    assert cb.acks[-1]["show_alert"] is True
+    assert "Вкажіть оголошену вартість" in cb.acks[-1]["text"]
+    assert state.cleared is False
+
+
+async def test_submit_resyncs_insured_to_cart(monkeypatch):
+    """Корзину можно менять после отрисовки карточки — ТТН обязана уйти по факту."""
+    h._SUBMITTING.discard(_CLIENT.telegram_id)
+    seen: dict = {}
+    _patch_create(monkeypatch, seen=seen)
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _ready_state()
+    state._data["cart"]["SKU2"] = {"qty": 1, "name": "Чай", "price": "80"}
+    cb = FakeCallback("cab:ttn:send")
+    await h.cb_submit(cb, _ctx(_CLIENT), None, object(), object(), state)
+    assert seen["insured_amount"] == Decimal("380")
 
 
 async def test_submit_single_flight(monkeypatch):

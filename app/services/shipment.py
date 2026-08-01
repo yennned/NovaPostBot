@@ -227,6 +227,12 @@ async def create_shipment(
         session, client, items, reader, account_id=account_id, account=account
     )
 
+    if insured_amount < 0 or not insured_amount.is_finite():
+        # Оголошена вартість — база страхового возмещения НП. Бот выводит её из
+        # корзины и не даёт отправить ТТН без неё, но слой сервиса не должен
+        # полагаться на дисциплину UI: у него свои вызовы (харнесс, будущий API).
+        raise TtnCreationFailed("оголошена вартість має бути числом 0 або більше")
+
     is_cod = payment_method == "cod"
     if is_cod and (cod_amount is None or cod_amount <= 0):
         # Защита от «тихого» сброса COD: ТТН с payment_method=cod без суммы создала

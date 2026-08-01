@@ -87,6 +87,9 @@ _SUBMITTING: set[int] = set()
 
 _STALE = "Кнопка застаріла, почніть створення ТТН заново."
 _MAX_WEIGHT = Decimal("1000")
+# Потолок денежной суммы (оголошена вартість, накладений платіж). Нужен не ради
+# бизнес-правила, а чтобы `1e999` не уходил в НП числом на тысячу цифр.
+_MAX_MONEY = Decimal("1000000")
 _RECIPIENT_KINDS = {"p": "person", "o": "organization"}
 
 
@@ -144,12 +147,18 @@ def _parse_weight(raw: str) -> str | None:
 
 
 def _parse_money(raw: str, *, positive: bool = False) -> str | None:
-    """Сумма в гривнах (≥0, либо >0 при positive); строкой; иначе None."""
+    """Сумма в гривнах (0 ≤ s ≤ макс, либо > 0 при positive); строкой; иначе None."""
     try:
         value = Decimal(raw.strip().replace(",", "."))
     except InvalidOperation:
         return None
-    if value < 0 or (positive and value <= 0):
+    # `is_finite()` обязателен первым: `Decimal("nan") < 0` не False, а сигнальное
+    # сравнение — поднимает InvalidOperation уже вне `try`, и хендлер падает молча
+    # (пользователь видит «кнопка не реагирует»). `inf` же прошёл бы обе границы и
+    # ушёл в НП строкой "Infinity".
+    if not value.is_finite() or value < 0 or value > _MAX_MONEY:
+        return None
+    if positive and value <= 0:
         return None
     return f"{value:f}"
 
@@ -442,13 +451,50 @@ def _cart_total(cart: dict) -> Decimal:
     return total
 
 
+def _cart_has_unpriced(cart: dict) -> bool:
+    """Есть ли в корзине позиции без цены.
+
+    Цена в «Складі» необязательна, и `_cart_total` такие позиции молча пропускает.
+    Для накладного платежа это не критично, а для оголошеної вартості — да: сумма
+    выйдет заниженной, а занижение здесь означает непокрытую посылку.
+    """
+    return any(entry["price"] is None for entry in cart.values())
+
+
+def _apply_insured_defaults(data: dict, cart: dict, updates: dict) -> None:
+    """Оголошена вартість = стоимость корзины, пока клиент не задал её сам.
+
+    Ручной ввод пинит источник в `custom` — дальше корзина значение не перетирает
+    (клиент вправе занизить сумму осознанно). Пустой итог (в «Складі» нет цен)
+    оставляет сумму незаданной: молчаливый ноль — это и есть тот дефект, который
+    чиним, поэтому лучше потребовать явного решения, чем подставить 0.
+    """
+    if data.get("insured_amount_source") == "custom":
+        return
+    total = _cart_total(cart)
+    amount = f"{total:f}" if total > 0 else None
+    source = "cart" if amount is not None else None
+    # Пишем только при фактическом изменении: иначе каждый рендер карточки зря
+    # дёргает FSM-хранилище.
+    if data.get("insured_amount") != amount:
+        updates["insured_amount"] = amount
+    if data.get("insured_amount_source") != source:
+        updates["insured_amount_source"] = source
+
+
 async def _ensure_card_defaults(state: FSMContext) -> dict:
-    """Молчаливые дефолты карточки (страховка/опис/оплата/платник) — один раз."""
+    """Дефолты карточки (страховка/опис/оплата/платник).
+
+    Оголошена вартість, в отличие от остальных, пересчитывается на каждом показе
+    карточки, пока клиент не задал её сам: НП компенсирует ущерб **в пределах
+    оголошеної вартості**, поэтому добавленный после первого показа товар обязан её
+    поднять. Раньше здесь стоял молчаливый `"0"` — посылка уходила незастрахованной,
+    а страховой сбор не попадал в оценку, из-за чего цена в боте была ниже реальной.
+    """
     data = await state.get_data()
     updates: dict = {}
     cart = data.get("cart", {})
-    if data.get("insured_amount") is None:
-        updates["insured_amount"] = "0"
+    _apply_insured_defaults(data, cart, updates)
     if data.get("description") is None:
         names = list(dict.fromkeys(e["name"] for e in cart.values()))
         updates["description"] = (", ".join(names)[:100]) or "Товари"
@@ -458,7 +504,11 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
         updates["payer_type"] = "Recipient"
     if data.get("payment_method") == "cod":
         total = _cart_total(cart)
-        if data.get("cod_amount") is None:
+        # `== "cart"` в условии — тот же дефект, что чинится выше для страховки:
+        # выведенная из корзины сумма обязана следовать за корзиной, иначе с
+        # получателя возьмут деньги по устаревшему составу заказа. Своя сумма
+        # (`custom`) не трогается.
+        if data.get("cod_amount") is None or data.get("cod_amount_source") == "cart":
             if total > 0:
                 updates["cod_amount"] = f"{total:f}"
                 updates["cod_amount_source"] = "cart"
@@ -486,7 +536,7 @@ def _price_key(data: dict) -> str:
         data.get("recipient_city_ref"),
         data.get("weight"),
         data.get("size_token"),
-        data.get("insured_amount"),
+        data.get("insured_amount") or "",
         data.get("cod_amount") or "",
     )
     return "|".join(str(p) for p in parts)
@@ -509,7 +559,10 @@ async def _card_price(
     result: dict = {"key": key}
     # Защита от устаревшей кнопки (напр. recompute на сброшенном FSM): без обязательных
     # полей не дёргаем НП и не падаем KeyError — показываем «розрахунок недоступний».
-    if not (data.get("recipient_city_ref") and data.get("weight") and data.get("insured_amount")):
+    # Оголошеної вартості в этом списке нет намеренно: когда её вывести неоткуда
+    # (в «Складі» нет цен), клиент всё равно должен видеть стоимость доставки —
+    # иначе вместо понятного «вкажіть вартість» он получит «розрахунок недоступний».
+    if not (data.get("recipient_city_ref") and data.get("weight")):
         result["unavailable"] = True
         return result
     cod = data.get("cod_amount")
@@ -521,9 +574,12 @@ async def _card_price(
             account_id=account_id,
             city_recipient_ref=data["recipient_city_ref"],
             weight=Decimal(data["weight"]),
-            cost=Decimal(data["insured_amount"]),
+            cost=Decimal(data.get("insured_amount") or "0"),
             cod_amount=Decimal(cod) if cod else None,
-            dimensions_cm=SIZE_DIMENSIONS.get(data.get("size_token", "")),
+            # Дефолт `"s"` тот же, что и на пути создания ТТН (`_do_create`): при
+            # пустом токене оценка ушла бы без габаритов, объёмный вес не поднял бы
+            # тариф, и она занизила бы цену относительно фактически созданной ТТН.
+            dimensions_cm=SIZE_DIMENSIONS.get(data.get("size_token") or DEFAULT_SIZE_TOKEN),
             np_client=np_client,
         )
         result["cost"] = f"{quote.cost:f}"
@@ -1885,11 +1941,14 @@ async def receive_edit(
             return
         updates["weight"] = weight
     elif field == "insured":
+        # Без `positive=True`: 0 остаётся вводимым — это осознанный отказ от
+        # страховки, в отличие от молчаливого дефолта, который мы убрали.
         amount = _parse_money(raw)
         if amount is None:
             await message.answer(texts.insured_invalid())
             return
         updates["insured_amount"] = amount
+        updates["insured_amount_source"] = "custom"
     elif field == "descr":
         if not raw:
             await message.answer(texts.description_invalid())
@@ -2121,8 +2180,8 @@ async def _do_create(
         recipient_warehouse_ref=data["recipient_warehouse_ref"],
         recipient_warehouse_name=data["recipient_warehouse_name"],
         weight=Decimal(data["weight"]),
-        size_preset=SIZE_PRESETS.get(data.get("size_token", "s"), "—"),
-        size_dimensions=SIZE_DIMENSIONS.get(data.get("size_token", "s")),
+        size_preset=SIZE_PRESETS.get(data.get("size_token") or DEFAULT_SIZE_TOKEN, "—"),
+        size_dimensions=SIZE_DIMENSIONS.get(data.get("size_token") or DEFAULT_SIZE_TOKEN),
         description=data["description"],
         insured_amount=Decimal(data["insured_amount"]),
         np_client=np_client,
@@ -2157,6 +2216,14 @@ async def cb_submit(
     data = await state.get_data()
     if not (data.get("recipient_warehouse_ref") and data.get("cart")):
         await callback.answer(_STALE, show_alert=True)
+        return
+    # Пересинк перед созданием: `_do_create` берёт позиции из живой корзины, а суммы
+    # — из FSM. Корзину можно менять и после отрисовки карточки (кнопки «◀ Назад» и
+    # устаревшие клавиатуры не привязаны к состоянию), и тогда без пересинка ТТН
+    # ушла бы с суммой по прежнему составу заказа.
+    data = await _ensure_card_defaults(state)
+    if data.get("insured_amount") is None:
+        await callback.answer(texts.insured_required_alert(), show_alert=True)
         return
     uid = client.telegram_id
     if uid in _SUBMITTING:  # single-flight: check+add без await между ними
