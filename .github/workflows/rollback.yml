@@ -43,8 +43,12 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: IMAGE_TAG
-          script_stop: true
           script: |
+            # `set -eu`, а не `script_stop`: такого входа у ssh-action@v1 нет —
+            # GitHub его молча игнорировал, и откат НЕ падал на ошибке. Провал
+            # `docker compose up -d` завершался кодом следующей команды
+            # (`image prune`), то есть шаг зеленел, а прод оставался старым.
+            set -eu
             cd ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}
             prev_line="$(grep -E '^APP_IMAGE=' .env | head -n1)"
             image_base="$(printf '%s' "$prev_line" | sed -E 's/^APP_IMAGE=([^:]+):.*/\1/')"
