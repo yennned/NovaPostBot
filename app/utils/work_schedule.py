@@ -17,6 +17,28 @@ from datetime import datetime, time, timedelta
 
 WorkingSchedule = dict[int, tuple[str, str]]
 
+WEEKDAY_NAMES = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
+
+
+def schedule_summary(schedule: WorkingSchedule) -> dict[str, object]:
+    """Сводка расписания для лога старта бота и воркера.
+
+    От расписания молча зависят сразу две вещи: гейт воркера (`_should_run_daytime`
+    — вне окна нет ни трекинга, ни low-stock) и дедлайн SLA (`add_working_minutes`
+    пропускает нерабочие часы и выходные). Ни одна из них не сообщает о себе наружу,
+    поэтому забытый день выглядит как «всё работает» ровно до разбора недополученных
+    денег. Тот же приём, что и `check_server_version` в `app/db/base.py`: не падать,
+    а сделать фактическое значение видимым в логе.
+    """
+    if not schedule:
+        # `_should_run_daytime` трактует пустое расписание как «гейт выключен».
+        return {"gate": "disabled", "windows": {}, "days_off": list(WEEKDAY_NAMES)}
+    windows = {
+        WEEKDAY_NAMES[day]: f"{start}-{end}" for day, (start, end) in sorted(schedule.items())
+    }
+    days_off = [name for day, name in enumerate(WEEKDAY_NAMES) if day not in schedule]
+    return {"gate": "enabled", "windows": windows, "days_off": days_off}
+
 
 def window_for_day(value: datetime, schedule: WorkingSchedule) -> tuple[datetime, datetime] | None:
     """Рабочее окно `(start, end)` для дня `value` или `None`, если день выходной."""

@@ -15,7 +15,7 @@ from app.jobs import clear_expired_duty_job, low_stock_job, poll_tracking_job
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
 from app.sheets import build_stock_source
-from app.utils.work_schedule import is_open, is_open_or_recently_closed
+from app.utils.work_schedule import is_open, is_open_or_recently_closed, schedule_summary
 
 _log = get_logger("worker")
 
@@ -86,6 +86,9 @@ async def main() -> None:
         environment=settings.environment,
         timezone=settings.timezone,
     )
+    # Для воркера это критичнее, чем для бота: день, отсутствующий в расписании, —
+    # это день без трекинга и без low-stock, и снаружи он выглядит как тишина.
+    log.info("work_schedule.effective", **schedule_summary(settings.work_schedule))
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     np_client = NovaPoshtaClient(settings=settings)
     mutator = build_stock_source(settings)

@@ -28,9 +28,21 @@ def parse_work_schedule(value: str | None) -> dict[int, tuple[str, str]]:
 
     Ключи — `weekday()` Python: 0=понедельник, 6=воскресенье.
     Значение `null`/пусто для дня означает «выходной».
+
+    Дефолт — **все семь дней 08:00–20:00**: склад и Нова Пошта работают без
+    выходных. Раньше здесь стоял `range(0, 5)` (Пн–Пт), и поскольку `WORK_SCHEDULE`
+    в прод-`.env` не задан, прод жил по нему — с двумя последствиями, которые
+    ничем не проявлялись наружу. Первое: `_should_run_daytime` гасил трекинг и
+    low-stock два дня из семи. Второе: `add_working_minutes` перепрыгивал субботу и
+    воскресенье, поэтому ТТН, созданная в субботу, получала дедлайн SLA в
+    понедельник — то есть на ~2/7 объёма SLA не значил ничего, а комиссия бралась
+    полная.
+
+    Безопасная деградация в `_should_run_daytime` («пустое расписание = поллим
+    всегда») от этого не спасала: расписание было непустым, просто неверным.
     """
     if not value:
-        return dict.fromkeys(range(0, 5), ("08:00", "20:00"))
+        return dict.fromkeys(range(0, 7), ("08:00", "20:00"))
 
     payload = json.loads(value)
     if not isinstance(payload, dict):
@@ -39,6 +51,11 @@ def parse_work_schedule(value: str | None) -> dict[int, tuple[str, str]]:
     schedule: dict[int, tuple[str, str]] = {}
     for raw_day, raw_window in payload.items():
         day = int(raw_day)
+        # Ключ вне 0..6 не соответствует ни одному `weekday()`, поэтому раньше он
+        # молча оседал в словаре и не влиял ни на что: опечатка `"7"` вместо `"0"`
+        # читалась как «понедельник выходной» без единого сообщения.
+        if not 0 <= day <= 6:
+            raise ValueError(f"WORK_SCHEDULE has weekday {day}, expected 0..6 (0=Mon, 6=Sun)")
         if raw_window in (None, "", []):
             continue
         if (

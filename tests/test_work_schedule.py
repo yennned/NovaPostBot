@@ -11,6 +11,7 @@ from app.utils.work_schedule import (
     is_open,
     is_open_or_recently_closed,
     next_window_start,
+    schedule_summary,
     window_for_day,
 )
 
@@ -84,3 +85,28 @@ def test_recently_closed_false_past_grace():
 def test_recently_closed_false_before_open_and_on_day_off():
     assert is_open_or_recently_closed(_at(22, 7), SCHEDULE, GRACE) is False
     assert is_open_or_recently_closed(_at(28, 12), SCHEDULE, GRACE) is False
+
+
+def test_schedule_summary_names_days_off():
+    """Забытый день обязан быть видно в логе старта, а не выводиться из его отсутствия.
+
+    Это тот же приём, что `check_server_version`: не падать, а сделать фактическое
+    значение наблюдаемым. Дефект «прод считает субботу выходной» прожил незамеченным
+    именно потому, что расписание нигде не печаталось.
+    """
+    summary = schedule_summary(SCHEDULE)
+    assert summary["gate"] == "enabled"
+    assert summary["windows"] == {"пн": "08:00-20:00", "вт": "08:00-20:00"}
+    assert summary["days_off"] == ["ср", "чт", "пт", "сб", "нд"]
+
+
+def test_schedule_summary_full_week_has_no_days_off():
+    summary = schedule_summary(dict.fromkeys(range(7), ("08:00", "20:00")))
+    assert summary["days_off"] == []
+    assert len(summary["windows"]) == 7
+
+
+def test_schedule_summary_reports_disabled_gate_on_empty():
+    # Пустое расписание `_should_run_daytime` трактует как «поллим всегда» —
+    # это другое поведение, и в логе оно должно отличаться от «все дни рабочие».
+    assert schedule_summary({})["gate"] == "disabled"
