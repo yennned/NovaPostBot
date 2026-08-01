@@ -235,7 +235,9 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script_stop: true
+          # Fail-fast держит `set -eu` первой строкой скрипта, а НЕ `script_stop`:
+          # такого входа у ssh-action@v1 нет, GitHub его игнорирует и пишет
+          # аннотацию «Unexpected input(s)» на каждый деплой.
           # APP_IMAGE (ghcr…:latest) задан в .env на сервере; порядок migrate→bot→worker
           # держит depends_on. --no-build: используем подтянутый образ, не собираем на VPS.
           script: |
