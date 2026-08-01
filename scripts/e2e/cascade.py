@@ -160,7 +160,52 @@ async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
         if n < items - 1 and not p.screen.find_data("cab:ttn:pick:"):
             await p.tap_data("cab:ttn:page:")  # «➕ Додати ще товар»
         await h.pause()
+    if added:
+        # Безусловно: это регрессионный контроль, а не «человеческая» вариативность.
+        # За `h.maybe()` он бы срабатывал через раз — ровно то, из-за чего дефект
+        # правки и не был замечен.
+        await _check_cart_edit(p)
     return added
+
+
+_CART_TOTAL_RX = re.compile(r"сума товарів:\s*([\d.]+)")
+
+
+def _cart_total(text: str) -> str | None:
+    """Ориентировочная сумма товаров с экрана корзины — «денежная» подпись правки.
+
+    None — в корзине есть позиции без цены (сумма рисуется как «—»), сравнивать нечего.
+    """
+    match = _CART_TOTAL_RX.search(re.sub(r"<[^>]+>", "", text))
+    return match.group(1) if match else None
+
+
+async def _check_cart_edit(p: Persona) -> None:
+    """Зайти в правку позиции и подтвердить её, ничего не меняя.
+
+    Правка обязана ЗАМЕНЯТЬ количество. Пока этого не было, «✏️» работала как
+    «добавить»: подтверждение без единого изменения удваивало позицию, а вместе с
+    ней объявленную стоимость и наложенный платёж. Ни один пробник сюда не заходил —
+    поэтому дефект и дожил до прода.
+    """
+    if not await p.tap_data("cab:ttn:cart"):
+        return
+    before = _cart_total(p.screen.text)
+    if not await p.tap_data("cab:ttn:cedit:"):
+        return
+    if not await p.tap_data("cab:ttn:qok"):
+        return
+    if not p.screen.find_data("cab:ttn:cedit:"):
+        await p.tap_data("cab:ttn:cart")
+    after = _cart_total(p.screen.text)
+    if before is not None and after is not None and before != after:
+        p.defects.append(
+            {
+                "kind": "cart_edit_changed_total",
+                "target": "cab:ttn:cedit → cab:ttn:qok",
+                "detail": f"сумма товаров {before} → {after} без изменения количества",
+            }
+        )
 
 
 GARBAGE_QTY_POOL = ["-3", "0", "мільйон"]

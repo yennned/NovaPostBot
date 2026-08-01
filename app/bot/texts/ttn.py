@@ -69,12 +69,15 @@ def cart_picker_text(page: InventoryPage, *, cart_count: int) -> str:
     return "\n".join(parts)
 
 
-def stepper_text(item: InventoryItem, qty: int) -> str:
+def stepper_text(item: InventoryItem, qty: int, *, edit: bool = False) -> str:
     # Назва/sku — из Sheets (могут содержать < & ") → экранируем для parse_mode=HTML.
+    # `edit` — правка позиции из кошика: количество заменяется, а не прибавляется,
+    # и подпись обязана это проговаривать (иначе «2 шт» читается как «ещё 2 шт»).
+    label = "Нова кількість" if edit else "Кількість у кошик"
     return (
         f"📦 <b>{html.escape(item.name)}</b> ({html.escape(item.sku)})\n"
         f"На залишку: <b>{item.available}</b> шт · ціна: {_money(item.price)}\n\n"
-        f"Кількість у кошик: <b>{qty}</b> шт"
+        f"{label}: <b>{qty}</b> шт"
     )
 
 

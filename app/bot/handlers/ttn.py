@@ -396,8 +396,9 @@ async def _show_stepper(message: Message, state: FSMContext, *, edit: bool) -> N
         available=pending["available"],
         price=Decimal(pending["price"]) if pending["price"] is not None else None,
     )
-    text = texts.stepper_text(item, pending["qty"])
-    kb = build_stepper_kb(qty=pending["qty"], available=pending["available"])
+    editing = pending.get("mode") == "edit"
+    text = texts.stepper_text(item, pending["qty"], edit=editing)
+    kb = build_stepper_kb(qty=pending["qty"], available=pending["available"], edit=editing)
     if edit:
         await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -951,12 +952,17 @@ async def receive_qty(message: Message, bot: Bot, state: FSMContext) -> None:
         available=pending["available"],
         price=Decimal(pending["price"]) if pending["price"] is not None else None,
     )
+    # Режим правки переживает ввод числа: иначе после «Ввести число» степпер снова
+    # предлагал бы «✓ Додати» и количество прибавилось бы к тому, что уже в кошику.
+    editing = pending.get("mode") == "edit"
     await answer_latest_screen(
         bot,
         message,
         state,
-        texts.stepper_text(item, pending["qty"]),
-        reply_markup=build_stepper_kb(qty=pending["qty"], available=pending["available"]),
+        texts.stepper_text(item, pending["qty"], edit=editing),
+        reply_markup=build_stepper_kb(
+            qty=pending["qty"], available=pending["available"], edit=editing
+        ),
         parse_mode="HTML",
     )
 
@@ -979,14 +985,26 @@ async def cb_qty_ok(
     cart = dict(data.get("cart", {}))
     sku = pending["sku"]
     prev = cart.get(sku, {}).get("qty", 0)
+    # Правка позиции ЗАМЕНЯЕТ количество, добор из пикера — прибавляет. Без этого
+    # различия «✏️» работала как «додати»: правка 2 шт при уже лежащих 2 давала 4,
+    # а вместе с ней завышались оголошена вартість и накладений платіж — обе суммы
+    # считаются из `_cart_total`. Старые `pending` из Redis ключа `mode` не имеют →
+    # прежнее поведение «додати», незавершённые сессии не ломаются.
+    editing = pending.get("mode") == "edit"
     # Сумма в корзине не должна превышать остаток (пред-проверка; create_shipment
     # всё равно валидирует InsufficientStock на отправке).
-    total = min(prev + pending["qty"], pending["available"])
+    total = min(pending["qty"] if editing else prev + pending["qty"], pending["available"])
     cart[sku] = {"qty": total, "name": pending["name"], "price": pending["price"]}
     await state.update_data(cart=cart, pending=None)
     # Возвращаем состояние в picking_items: если пользователь до этого жал «Ввести
     # число» (entering_qty), без сброса последующий текст ушёл бы в receive_qty.
     await state.set_state(CreateTtnState.picking_items)
+    if editing:
+        # Правку затевают из кошика — туда и возвращаемся: результат правки виден
+        # сразу, а не после отдельного тапа по «🧺 Кошик».
+        await _show_cart(callback.message, state)
+        await callback.answer(f"Оновлено: {pending['name']} ×{total}")
+        return
     client = _effective_client(effective_context)
     if client is None:
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
@@ -1079,14 +1097,31 @@ async def cb_cart_edit(
         account_id=_account_id(effective_context),
         account=_account(effective_context),
     )
-    available = match.available if match else entry["qty"]
+    if match is None or match.available <= 0:
+        # Позиция исчезла со склада или кончилась, пока лежала в кошику. Редактировать
+        # нечего: степпер с максимумом 0 нерабочий (шаг «−1» не опускается ниже 1), а
+        # `None` раньше подставлял в остаток количество из корзины — правка «успешно»
+        # подтверждала недоступный товар, и ошибка вылезала только на создании
+        # отправления. Как и `cb_pick`, не молчим: перерисовываем кошик и говорим,
+        # что делать.
+        await _show_cart(callback.message, state)
+        await callback.answer(
+            f"«{entry['name']}» більше немає на залишку — приберіть позицію з кошика.",
+            show_alert=True,
+        )
+        return
+    # Потолок — фактический остаток. Раньше здесь стоял `max(available, entry["qty"])`:
+    # он был нужен аддитивной семантике, но при замене не даёт опустить позицию до
+    # реального наличия.
+    available = match.available
     await state.update_data(
         pending={
             "sku": sku,
             "name": entry["name"],
-            "available": max(available, entry["qty"]),
+            "available": available,
             "price": entry["price"],
-            "qty": min(entry["qty"], max(available, entry["qty"])),
+            "qty": max(1, min(entry["qty"], available)),
+            "mode": "edit",
         }
     )
     await state.set_state(CreateTtnState.picking_items)

@@ -591,6 +591,101 @@ async def test_cart_edit_resolves_sku_beyond_first_page(monkeypatch):
     assert state._data["pending"]["available"] == 12
 
 
+async def test_cart_edit_replaces_quantity(monkeypatch):
+    """«✏️» правит позицию, а не добирает.
+
+    Регрессия: `cb_qty_ok` безусловно складывал `prev + pending`, и подтверждение
+    правки без единого изменения удваивало позицию (2 шт → 4). Вместе с ней
+    завышались оголошена вартість и накладений платіж — обе из `_cart_total`.
+    """
+    _patch_inventory_from_items(monkeypatch, [_item("SKU1", "Кава", 10)])
+    state = FakeState(cart_offset=0, cart={"SKU1": {"qty": 2, "name": "Кава", "price": "100"}})
+
+    await h.cb_cart_edit(FakeCallback("cab:ttn:cedit:0"), _ctx(_CLIENT), None, state)
+    assert state._data["pending"]["qty"] == 2  # степпер открыт на текущем количестве
+    ok = FakeCallback("cab:ttn:qok")
+    await h.cb_qty_ok(ok, _ctx(_CLIENT), None, state)
+
+    assert state._data["cart"]["SKU1"]["qty"] == 2
+    assert "Оновлено" in ok.acks[-1]["text"]
+
+
+async def test_cart_edit_lowers_quantity(monkeypatch):
+    """Правка вниз обязана уменьшать: раньше «−1» от 5 давала 5+4=9."""
+    _patch_inventory_from_items(monkeypatch, [_item("SKU1", "Кава", 10)])
+    state = FakeState(cart_offset=0, cart={"SKU1": {"qty": 5, "name": "Кава", "price": "100"}})
+
+    await h.cb_cart_edit(FakeCallback("cab:ttn:cedit:0"), _ctx(_CLIENT), None, state)
+    await h.cb_qty_delta(FakeCallback("cab:ttn:qd:-1"), state)
+    await h.cb_qty_ok(FakeCallback("cab:ttn:qok"), _ctx(_CLIENT), None, state)
+
+    assert state._data["cart"]["SKU1"]["qty"] == 4
+
+
+async def test_cart_edit_clamps_to_dropped_stock(monkeypatch):
+    """Остаток упал ниже лежащего в кошику — степпер показывает реальный максимум."""
+    _patch_inventory_from_items(monkeypatch, [_item("SKU1", "Кава", 3)])
+    state = FakeState(cart={"SKU1": {"qty": 8, "name": "Кава", "price": "100"}})
+
+    await h.cb_cart_edit(FakeCallback("cab:ttn:cedit:0"), _ctx(_CLIENT), None, state)
+
+    assert state._data["pending"]["available"] == 3
+    assert state._data["pending"]["qty"] == 3
+
+
+@pytest.mark.parametrize(
+    "stock",
+    [
+        pytest.param([_item("SKU1", "Кава", 0)], id="остаток обнулился"),
+        pytest.param([], id="позиция исчезла со склада"),
+    ],
+)
+async def test_cart_edit_unavailable_alerts(monkeypatch, stock):
+    """Править нечего: степпер с максимумом 0 нерабочий, а исчезнувшую позицию
+    правка «подтверждала» бы, отложив ошибку до создания отправления."""
+    _patch_inventory_from_items(monkeypatch, stock)
+    state = FakeState(cart={"SKU1": {"qty": 2, "name": "Кава", "price": "100"}})
+    cb = FakeCallback("cab:ttn:cedit:0")
+
+    await h.cb_cart_edit(cb, _ctx(_CLIENT), None, state)
+
+    assert "pending" not in state._data
+    assert cb.acks[-1]["show_alert"] is True
+    assert cb.message.edits  # кошик перерисован, позиция на месте — её можно убрать
+
+
+async def test_cart_edit_returns_to_cart_after_save(monkeypatch):
+    """Правку затевают из кошика — туда и возвращаемся, результат виден сразу."""
+    _patch_inventory_from_items(monkeypatch, [_item("SKU1", "Кава", 10)])
+    state = FakeState(cart_offset=0, cart={"SKU1": {"qty": 2, "name": "Кава", "price": "100"}})
+
+    await h.cb_cart_edit(FakeCallback("cab:ttn:cedit:0"), _ctx(_CLIENT), None, state)
+    ok = FakeCallback("cab:ttn:qok")
+    await h.cb_qty_ok(ok, _ctx(_CLIENT), None, state)
+
+    assert "Кошик" in ok.message.edits[-1]["text"]
+
+
+def test_stepper_kb_edit_labels():
+    """В режиме правки кнопка — «Зберегти», а «Назад» ведёт в кошик, не в пикер."""
+    from app.bot.keyboards.ttn import build_stepper_kb
+
+    def _back(kb) -> str:
+        return next(
+            b.callback_data for row in kb.inline_keyboard for b in row if b.text == "◀ Назад"
+        )
+
+    def _labels(kb) -> list[str]:
+        return [b.text for row in kb.inline_keyboard for b in row]
+
+    add = build_stepper_kb(qty=2, available=5)
+    edit = build_stepper_kb(qty=2, available=5, edit=True)
+    assert "✓ Додати" in _labels(add)
+    assert "✓ Зберегти" in _labels(edit)
+    assert _back(add) == "cab:ttn:page:0"
+    assert _back(edit) == "cab:ttn:cart"
+
+
 async def test_qty_delta_clamps_to_available():
     state = FakeState(pending={"sku": "S", "name": "X", "available": 3, "price": "100", "qty": 1})
     cb = FakeCallback("cab:ttn:qd:10")
@@ -1290,6 +1385,25 @@ async def test_card_insured_follows_cart(monkeypatch):
     await state.update_data(cart=cart)
     await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
     assert state._data["insured_amount"] == "380"
+
+
+async def test_cart_edit_does_not_inflate_insured(monkeypatch):
+    """Правка позиции без изменений не двигает оголошену вартість.
+
+    Ради этого инварианта всё и затевалось: `cb_qty_ok` удваивал количество, а
+    `_ensure_card_defaults` честно пересчитывал сумму из раздутого кошика.
+    """
+    _patch_pricing(monkeypatch, quote=_quote())
+    _patch_inventory_from_items(monkeypatch, [_item("SKU1", "Кава", 10, price="150")])
+    state = _card_state()
+    await h.cb_wh(FakeCallback("cab:ttn:wh:0"), _ctx(_CLIENT), None, object(), state)
+    assert state._data["insured_amount"] == "300"  # 2 × 150
+
+    await h.cb_cart_edit(FakeCallback("cab:ttn:cedit:0"), _ctx(_CLIENT), None, state)
+    await h.cb_qty_ok(FakeCallback("cab:ttn:qok"), _ctx(_CLIENT), None, state)
+    await h.cb_card(FakeCallback("cab:ttn:card"), _ctx(_CLIENT), None, object(), state)
+
+    assert state._data["insured_amount"] == "300"
 
 
 async def test_card_insured_custom_survives_cart_change(monkeypatch):
