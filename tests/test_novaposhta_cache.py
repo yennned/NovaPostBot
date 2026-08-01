@@ -1,8 +1,11 @@
-"""Тесты cache-aside кэша справочников НП (PR3) — на fakeredis, без реального Redis."""
+"""Тесты cache-aside кэша справочников НП (PR3).
+
+Redis приходит фикстурой `redis_client`: в CI это настоящий `redis:8-alpine`
+(как в проде), локально без `REDIS_URL` — прежний fakeredis.
+"""
 
 from __future__ import annotations
 
-import fakeredis.aioredis
 import pytest
 from app.config import Settings
 from app.novaposhta.cache import NPReferenceCache
@@ -11,11 +14,11 @@ from app.novaposhta.schemas import City, Warehouse
 from redis.exceptions import RedisError
 
 
-def _cache(**over) -> NPReferenceCache:
+def _cache(redis, **over) -> NPReferenceCache:
     settings = Settings(_env_file=None)
     for key, value in over.items():
         setattr(settings, key, value)
-    return NPReferenceCache(fakeredis.aioredis.FakeRedis(), settings=settings)
+    return NPReferenceCache(redis, settings=settings)
 
 
 def _counting_loader(items):
@@ -28,8 +31,8 @@ def _counting_loader(items):
     return loader, calls
 
 
-async def test_cities_miss_then_hit_calls_loader_once():
-    cache = _cache()
+async def test_cities_miss_then_hit_calls_loader_once(redis_client):
+    cache = _cache(redis_client)
     loader, calls = _counting_loader([City(ref="c1", name="Київ", area="Київська")])
 
     first = await cache.cities("Київ", loader=loader)
@@ -39,8 +42,8 @@ async def test_cities_miss_then_hit_calls_loader_once():
     assert calls["n"] == 1  # второй вызов — из кэша, loader не дёргается
 
 
-async def test_cities_key_normalized_by_case_and_spaces():
-    cache = _cache()
+async def test_cities_key_normalized_by_case_and_spaces(redis_client):
+    cache = _cache(redis_client)
     loader, calls = _counting_loader([City(ref="c1", name="Київ")])
 
     await cache.cities("Київ", loader=loader)
@@ -49,8 +52,8 @@ async def test_cities_key_normalized_by_case_and_spaces():
     assert calls["n"] == 1
 
 
-async def test_cities_different_query_is_separate_entry():
-    cache = _cache()
+async def test_cities_different_query_is_separate_entry(redis_client):
+    cache = _cache(redis_client)
     loader, calls = _counting_loader([City(ref="c1", name="Київ")])
 
     await cache.cities("Київ", loader=loader)
@@ -59,8 +62,8 @@ async def test_cities_different_query_is_separate_entry():
     assert calls["n"] == 2
 
 
-async def test_warehouses_miss_then_hit_per_city_and_query():
-    cache = _cache()
+async def test_warehouses_miss_then_hit_per_city_and_query(redis_client):
+    cache = _cache(redis_client)
     loader, calls = _counting_loader(
         [Warehouse(ref="w1", number="5", description="Відділення №5", city_ref="c1")]
     )
@@ -75,8 +78,8 @@ async def test_warehouses_miss_then_hit_per_city_and_query():
     assert calls["n"] == 2
 
 
-async def test_warehouses_default_query_distinct_from_specific():
-    cache = _cache()
+async def test_warehouses_default_query_distinct_from_specific(redis_client):
+    cache = _cache(redis_client)
     loader, calls = _counting_loader([Warehouse(ref="w1", number="1", description="№1")])
 
     await cache.warehouses("c1", loader=loader)  # query=None → пустой
@@ -85,8 +88,8 @@ async def test_warehouses_default_query_distinct_from_specific():
     assert calls["n"] == 2
 
 
-async def test_ttl_is_applied_from_settings():
-    cache = _cache(np_cities_ttl_seconds=123)
+async def test_ttl_is_applied_from_settings(redis_client):
+    cache = _cache(redis_client, np_cities_ttl_seconds=123)
     redis = cache._redis
     loader, _ = _counting_loader([City(ref="c1", name="Київ")])
 
@@ -95,8 +98,8 @@ async def test_ttl_is_applied_from_settings():
     assert 0 < ttl <= 123
 
 
-async def test_empty_result_is_not_cached():
-    cache = _cache()
+async def test_empty_result_is_not_cached(redis_client):
+    cache = _cache(redis_client)
     loader, calls = _counting_loader([])  # НП отдала «нічого не знайдено»
 
     assert await cache.cities("Невідоме", loader=loader) == []
@@ -105,8 +108,8 @@ async def test_empty_result_is_not_cached():
     assert await cache._redis.get("np:cities:невідоме") is None
 
 
-async def test_non_positive_ttl_disables_caching_without_error():
-    cache = _cache(np_cities_ttl_seconds=0)  # «выключить кэш» через конфиг
+async def test_non_positive_ttl_disables_caching_without_error(redis_client):
+    cache = _cache(redis_client, np_cities_ttl_seconds=0)  # «выключить кэш» через конфиг
     loader, calls = _counting_loader([City(ref="c1", name="Київ")])
 
     # не падаем на set(ex=0); данные отдаём, но не кэшируем
@@ -116,8 +119,8 @@ async def test_non_positive_ttl_disables_caching_without_error():
     assert await cache._redis.get("np:cities:київ") is None
 
 
-async def test_loader_error_propagates_and_nothing_cached():
-    cache = _cache()
+async def test_loader_error_propagates_and_nothing_cached(redis_client):
+    cache = _cache(redis_client)
 
     async def boom():
         raise RuntimeError("NP down")
@@ -183,9 +186,9 @@ async def _failing_loader():
     raise NovaPoshtaUnavailable("довідник тимчасово недоступний")
 
 
-async def test_warehouses_stale_fallback_filters_cached_full_list():
+async def test_warehouses_stale_fallback_filters_cached_full_list(redis_client):
     """НП лёг на поиске відділення → отдаём отфильтрованный кэш полного списка."""
-    cache = _cache()
+    cache = _cache(redis_client)
     full = [
         Warehouse(ref="w1", number="1", description="Відділення №1: вул. Центральна, 104"),
         Warehouse(ref="w2", number="2", description="Відділення №2: вул. Інша, 5"),
@@ -198,16 +201,16 @@ async def test_warehouses_stale_fallback_filters_cached_full_list():
     assert [w.ref for w in result] == ["w1"]  # отфильтровано по номеру «1»
 
 
-async def test_warehouses_reraises_when_no_cached_full_list():
+async def test_warehouses_reraises_when_no_cached_full_list(redis_client):
     """Полного списка в кэше нет → транзиентную ошибку пробрасываем как есть."""
-    cache = _cache()
+    cache = _cache(redis_client)
     with pytest.raises(NovaPoshtaUnavailable):
         await cache.warehouses("kyiv", loader=_failing_loader, query="1")
 
 
-async def test_warehouses_stale_fallback_returns_empty_on_no_match():
+async def test_warehouses_stale_fallback_returns_empty_on_no_match(redis_client):
     """Нет совпадений в кэше → пустой результат, а НЕ весь список города."""
-    cache = _cache()
+    cache = _cache(redis_client)
     full = [Warehouse(ref="w2", number="2", description="Відділення №2: вул. Інша, 5")]
     loader_full, _ = _counting_loader(full)
     await cache.warehouses("kyiv", loader=loader_full)

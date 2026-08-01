@@ -1,10 +1,12 @@
-"""Тесты address-search сервиса (Фаза 4, PR 7) — Postgres + fakeredis + фейковый NP."""
+"""Тесты address-search сервиса (Фаза 4, PR 7) — Postgres + Redis + фейковый NP.
+
+Redis — фикстура `redis_client`: настоящий в CI, fakeredis локально.
+"""
 
 from __future__ import annotations
 
 import json
 
-import fakeredis.aioredis
 import httpx
 import pytest
 from app.config import Settings
@@ -35,8 +37,8 @@ def _np_client(routes: dict[tuple[str, str], object], calls: dict | None = None)
     return NovaPoshtaClient(settings=settings, transport=httpx.MockTransport(handler))
 
 
-def _cache() -> NPReferenceCache:
-    return NPReferenceCache(fakeredis.aioredis.FakeRedis(), settings=Settings(_env_file=None))
+def _cache(redis) -> NPReferenceCache:
+    return NPReferenceCache(redis, settings=Settings(_env_file=None))
 
 
 async def _client_with_profile(session: AsyncSession, telegram_id: int = 600):
@@ -59,13 +61,13 @@ async def _owner_with_profile(session: AsyncSession, *, telegram_id: int, phone:
     return owner, profile
 
 
-async def test_search_cities_returns_and_caches(db_session: AsyncSession):
+async def test_search_cities_returns_and_caches(redis_client, db_session: AsyncSession):
     client = await _client_with_profile(db_session)
     calls: dict = {}
     np_client = _np_client(
         {("Address", "getCities"): [{"Ref": "c1", "Description": "Київ"}]}, calls
     )
-    cache = _cache()
+    cache = _cache(redis_client)
 
     first = await address.search_cities(
         db_session, client=client, query="Київ", np_client=np_client, cache=cache
@@ -79,7 +81,7 @@ async def test_search_cities_returns_and_caches(db_session: AsyncSession):
     assert calls["n"] == 1  # второй вызов — из кэша
 
 
-async def test_search_cities_cache_hit_skips_profile_lookup(db_session: AsyncSession):
+async def test_search_cities_cache_hit_skips_profile_lookup(redis_client, db_session: AsyncSession):
     """Cache-first: попадание в кэш не резолвит ключ ФОП (нет запроса в БД).
 
     Прогреваем кэш клиентом с профилем, затем ищем тем же запросом клиентом БЕЗ
@@ -87,7 +89,7 @@ async def test_search_cities_cache_hit_skips_profile_lookup(db_session: AsyncSes
     ключ не резолвится, и данные отдаются из кэша.
     """
     warm = await _client_with_profile(db_session, telegram_id=610)
-    cache = _cache()
+    cache = _cache(redis_client)
     np_client = _np_client({("Address", "getCities"): [{"Ref": "c1", "Description": "Київ"}]})
     await address.search_cities(
         db_session, client=warm, query="Київ", np_client=np_client, cache=cache
@@ -102,7 +104,7 @@ async def test_search_cities_cache_hit_skips_profile_lookup(db_session: AsyncSes
     assert [c.ref for c in result] == ["c1"]  # из кэша, без SenderProfileNotConfigured
 
 
-async def test_search_warehouses_returns(db_session: AsyncSession):
+async def test_search_warehouses_returns(redis_client, db_session: AsyncSession):
     client = await _client_with_profile(db_session, telegram_id=601)
     np_client = _np_client(
         {
@@ -112,13 +114,13 @@ async def test_search_warehouses_returns(db_session: AsyncSession):
         }
     )
     whs = await address.search_warehouses(
-        db_session, client=client, city_ref="c1", np_client=np_client, cache=_cache()
+        db_session, client=client, city_ref="c1", np_client=np_client, cache=_cache(redis_client)
     )
     assert whs[0].ref == "w1"
     assert whs[0].number == "5"
 
 
-async def test_employee_searches_cities_with_owner_profile(db_session: AsyncSession):
+async def test_employee_searches_cities_with_owner_profile(redis_client, db_session: AsyncSession):
     """Регрессия: работник ищет город по ФОП владельца аккаунта.
 
     `address` скоупился по `client_id`, а у работника он свой, а не владельца, —
@@ -134,14 +136,16 @@ async def test_employee_searches_cities_with_owner_profile(db_session: AsyncSess
         client=employee,
         query="Львів",
         np_client=_np_client({("Address", "getCities"): [{"Ref": "c9", "Description": "Львів"}]}),
-        cache=_cache(),
+        cache=_cache(redis_client),
         sender_profile_id=profile.id,
         account_id=account.id,
     )
     assert [c.ref for c in cities] == ["c9"]
 
 
-async def test_employee_searches_warehouses_with_owner_profile(db_session: AsyncSession):
+async def test_employee_searches_warehouses_with_owner_profile(
+    redis_client, db_session: AsyncSession
+):
     owner, profile = await _owner_with_profile(db_session, telegram_id=622, phone="380507770003")
     employee = await employee_of(db_session, owner, phone="0507770004", telegram_id=623)
     account = await account_of(db_session, owner)
@@ -153,14 +157,14 @@ async def test_employee_searches_warehouses_with_owner_profile(db_session: Async
         np_client=_np_client(
             {("Address", "getWarehouses"): [{"Ref": "w9", "Number": "9", "Description": "№9"}]}
         ),
-        cache=_cache(),
+        cache=_cache(redis_client),
         sender_profile_id=profile.id,
         account_id=account.id,
     )
     assert [w.ref for w in whs] == ["w9"]
 
 
-async def test_profile_of_another_account_still_refused(db_session: AsyncSession):
+async def test_profile_of_another_account_still_refused(redis_client, db_session: AsyncSession):
     """Скоуп не «отключён», а переехал на аккаунт: чужой ФОП по-прежнему не отдаётся."""
     owner, _ = await _owner_with_profile(db_session, telegram_id=624, phone="380507770005")
     account = await account_of(db_session, owner)
@@ -174,14 +178,14 @@ async def test_profile_of_another_account_still_refused(db_session: AsyncSession
             client=owner,
             query="Київ",
             np_client=_np_client({("Address", "getCities"): []}),
-            cache=_cache(),
+            cache=_cache(redis_client),
             sender_profile_id=stranger_profile.id,
             account_id=account.id,
         )
     assert stranger.id != owner.id
 
 
-async def test_search_without_profile_raises(db_session: AsyncSession):
+async def test_search_without_profile_raises(redis_client, db_session: AsyncSession):
     client = await UserRepository(db_session).create(
         telegram_id=602, role=UserRole.client, status=UserStatus.active
     )
@@ -191,5 +195,5 @@ async def test_search_without_profile_raises(db_session: AsyncSession):
             client=client,
             query="Київ",
             np_client=_np_client({("Address", "getCities"): []}),
-            cache=_cache(),
+            cache=_cache(redis_client),
         )
