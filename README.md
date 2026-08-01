@@ -1,7 +1,7 @@
 # NovaPostBot — Telegram-бот фулфілменту Нової Пошти
 
 [![CI](https://github.com/yennned/NovaPostBot/actions/workflows/ci.yml/badge.svg)](https://github.com/yennned/NovaPostBot/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.14-blue)
+![Python](https://img.shields.io/badge/python-3.14%20runtime%20%7C%203.12%2B-blue)
 ![License](https://img.shields.io/badge/license-proprietary-lightgrey)
 
 Личный кабинет фулфілменту в Telegram: клиенты создают ТТН через API Нової Пошти
@@ -52,7 +52,7 @@ per-flag в `users.permissions`.
 
 ## Стек
 
-Python 3.14 · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
+Python 3.14 (рантайм; код совместим с 3.12+) · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
 Google Sheets API (service-account) · Nova Poshta API · Docker. Часовой пояс —
 Europe/Kyiv. Язык бота — украинский (uk).
 

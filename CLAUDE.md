@@ -36,7 +36,7 @@ Telegram-бот личного кабинета фулфилмента Ново�
 
 ## Стек
 
-Python 3.14 · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
+Python 3.14 (рантайм; код совместим с 3.12+) · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
 Google Sheets API (service-account) · Nova Poshta API · Docker.
 
 ## Структура
@@ -48,7 +48,8 @@ keyboards/texts/handlers), `services/`, `novaposhta/`, `utils/`; `migrations/`;
 
 ## Git-процесс
 
-GitHub, **ветка на задачу** (`feat/<owner>-<short>`), в `main` **только через PR**
+GitHub, **ветка на задачу** (`<тип>/<owner>-<short>`, где тип — `feat`/`fix`/
+`chore`/`test`; см. [CONTRIBUTING.md](CONTRIBUTING.md)), в `main` **только через PR**
 (защищённый main, зелёный CI), **точечные коммиты** (без `git add .`),
 **`PROGRESS.md` после каждого коммита**. Секреты (`.env`, service-account JSON,
 ключи) в git не попадают (`.gitignore`). Сообщения коммитов — conventional;
