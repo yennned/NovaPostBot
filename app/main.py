@@ -14,6 +14,7 @@ from app.logging_config import configure_logging, get_logger
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.services.bootstrap import ensure_owners
+from app.utils.work_schedule import schedule_summary
 
 
 async def main() -> None:
@@ -26,6 +27,9 @@ async def main() -> None:
         environment=settings.environment,
         timezone=settings.timezone,
     )
+    # Расписание влияет на дедлайн SLA, а в воркере ещё и на гейт фоновых задач,
+    # но само о себе не сообщает. Печатаем фактическое — см. schedule_summary.
+    log.info("work_schedule.effective", **schedule_summary(settings.work_schedule))
     if not settings.bot_token:
         log.warning("bot.token_missing")
         await asyncio.Event().wait()

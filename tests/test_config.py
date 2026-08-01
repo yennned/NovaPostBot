@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from app.config import Settings, get_settings, parse_ids, parse_work_schedule
 
 
@@ -33,10 +34,29 @@ def test_settings_defaults(monkeypatch):
     assert settings.inventory_source == "sheets"
 
 
+def test_default_work_schedule_covers_all_seven_days():
+    """Склад и НП работают без выходных; дефолт обязан это отражать.
+
+    Раньше дефолтом был `range(0, 5)`, а `WORK_SCHEDULE` в прод-`.env` не задан —
+    то есть прод два дня из семи не трекал ТТН и выдавал субботним отправлениям
+    дедлайн SLA в понедельник.
+    """
+    schedule = parse_work_schedule(None)
+    assert sorted(schedule) == [0, 1, 2, 3, 4, 5, 6]
+    assert set(schedule.values()) == {("08:00", "20:00")}
+
+
 def test_parse_work_schedule_from_json():
     schedule = parse_work_schedule('{"0": ["09:00", "18:00"], "5": null}')
     assert schedule[0] == ("09:00", "18:00")
     assert 5 not in schedule
+
+
+def test_parse_work_schedule_rejects_weekday_out_of_range():
+    # Опечатка «7» вместо «0» раньше молча оседала в словаре и читалась как
+    # «понедельник выходной»: ни ошибки, ни расписания на понедельник.
+    with pytest.raises(ValueError, match=r"expected 0\.\.6"):
+        parse_work_schedule('{"7": ["08:00", "20:00"]}')
 
 
 def test_get_settings_is_cached():
