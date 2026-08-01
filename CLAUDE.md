@@ -1,7 +1,7 @@
 # CLAUDE.md — контекст проекта NovaPostBot
 
 Краткая карта проекта для ассистентов и разработчиков (я + Степан). Подробности —
-в [`docs/`](docs/) и в плане `~/.claude/plans/squishy-launching-key.md`.
+в [`docs/`](docs/); фактическое состояние работ — в [`PROGRESS.md`](PROGRESS.md).
 
 > **Рабочая папка.** Работаем **только** в `/Users/yenin/Desktop/NovaPostBot`.
 > Другие папки не читаем и не трогаем.
