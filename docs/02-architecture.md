@@ -23,7 +23,7 @@ app/
                          support, reports, audit
   sheets/                seam источника склада (`StockSource`)
     source.py            контракт `StockSource`, `StockRow`, `StockDelta`
-    client.py            Sheets API: чтение/запись, лист на акаунт
+    client.py            Sheets API: чтение/запись, лист на аккаунт
     inventory.py         Google Sheets adapter + CRM/WMS stub
     cache.py, memo.py, runtime.py   кэш чтений и мемоизация хендшейка (квота Google)
   bot/
@@ -31,7 +31,7 @@ app/
     middlewares.py       inject session/sheets/user/t/bot/np, Throttling
     permissions.py       RBAC: иерархия ролей + per-flag права + dev god-mode
     states.py            FSM (Redis)
-    filters.py, types.py фильтры и контекст эффективного пользователя/акаунта
+    filters.py, types.py фильтры и контекст эффективного пользователя/аккаунта
     keyboards/           меню по ролям
     texts/               украинские строки
     handlers/            start, client_cabinet, ttn, clients_manage, account_team,
@@ -76,20 +76,20 @@ tests/                   pytest на **реальном Postgres** + харне�
 
 ### PostgreSQL — вся БД (managed Neon)
 
-- **`client_accounts` / `client_account_memberships`** — бізнес-акаунти та
-  зв'язок із фактичними користувачами. Один `user_id` може мати лише одне
-  membership; `account_owner` керує налаштуваннями бізнесу, `employee` має
-  операційний доступ без керування командою/ФОП/ключами.
+- **`client_accounts` / `client_account_memberships`** — бизнес-аккаунты и связь
+  с фактическими пользователями. Один `user_id` может иметь только одно
+  membership; `account_owner` управляет настройками бизнеса, `employee` имеет
+  операционный доступ без управления командой/ФОП/ключами.
 
 - **`users`** — клиенты/менеджеры/владелец: роль (`client`/`manager`/`owner`),
   статус (`pending`/`active`/`blocked`/`archived`), телефон, ПІБ, `permissions`
   (JSONB, per-flag для менеджера), дежурство (`on_duty`, `duty_date`),
   таймстемпы.
-- **`sender_profiles`** (ФОП) — много на акаунт: `account_id` (legacy `client_id`), `name`,
+- **`sender_profiles`** (ФОП) — много на аккаунт: `account_id` (legacy `client_id`), `name`,
   `np_api_key` (**Fernet-шифр**), `sender_full_name`, `sender_phone`, `org_type`
   (ФОП/ТОВ), `edrpou`, `np_sender_ref`/`np_contact_ref`, `np_sender_warehouse`,
   `is_default`, таймстемпы.
-- **`shipments`** + **`shipment_items`** — ТТН: номер/`np_ref`, акаунт, ФОП,
+- **`shipments`** + **`shipment_items`** — ТТН: номер/`np_ref`, аккаунт, ФОП,
   получатель (тип фіз/юр, ПІБ/телефон, місто/відділення), позиции
   (артикул×кол-во), вес/розмір, оплата/COD/страховка, `status`, таймстемпы
   (`created_at`, `dispatched_at`, `status_updated_at`), резерв. **SLA:**
@@ -109,9 +109,9 @@ tests/                   pytest на **реальном Postgres** + харне�
 
 ### Google Sheets — только учёт склада
 
-- **Книга «Склад»** — лист на клиента, текущие остатки (артикул/назва/категорія/
+- **Книга «Склад»** — лист на бизнес-аккаунт, текущие остатки (артикул/назва/категорія/
   кількість/ціна). Read-only (Protected), правит только Script/бот.
-- **Книга «Приймання»** — лист на клиента, черновик ввода; синк в «Склад»
+- **Книга «Приймання»** — лист на бизнес-аккаунт, черновик ввода; синк в «Склад»
   кнопкой «Внести» (Apps Script, double confirmation).
 - **Лист «Історія»** — журнал приёмок.
 

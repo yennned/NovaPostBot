@@ -267,8 +267,16 @@ always-on стенд когда-нибудь понадобится снова, 
    печатает `ps` + логи, **возвращает бэкап и поднимает прежнюю конфигурацию**,
    и только потом падает.
 
+Откат возвращает **и конфиг, и образ**. Перед `pull` шаг запоминает id образа, на
+котором прод работает сейчас, и при сбое поднимается с ним (`APP_IMAGE=<id>`).
+Только по compose откатывать нельзя: `APP_IMAGE` на сервере закреплён за `:latest`,
+а после `pull` этот тег уже указывает на новый образ — получился бы старый конфиг с
+новым кодом. Поэтому `docker image prune` выполняется лишь на успешном пути.
+
 Ручной откат на сервере, если понадобится:
-`mv docker-compose.yml.bak docker-compose.yml && docker compose up -d --no-build`.
+`mv docker-compose.yml.bak docker-compose.yml && docker compose up -d --no-build`
+(для отката кода — `APP_IMAGE=ghcr.io/<owner>/novapostbot:sha-<short> docker compose
+up -d --no-build`, либо воркфлоу `rollback.yml`).
 
 > ⚠️ **Предпосылки на сервере** (сверить перед первым таким деплоем): существует
 > каталог `./secrets` (compose монтирует `./secrets:/app/secrets:ro`), в `.env`

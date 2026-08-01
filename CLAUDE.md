@@ -16,12 +16,12 @@ Telegram-бот личного кабинета фулфилмента Ново�
 ## Архитектура (гибрид хранилища)
 
 - **PostgreSQL (managed Neon) — вся БД:** client_accounts +
-  client_account_memberships (бізнес-акаунт и его люди), users, sender_profiles
+  client_account_memberships (бизнес-аккаунт и его люди), users, sender_profiles
   (ФОП, ключ НП зашифрован Fernet), shipments + items, stock_movements, support,
   notification_settings, low_stock_alerts, audit_logs. SQLAlchemy async + Alembic.
   ФОП/ТТН/склад/поддержка скоупятся по `account_id`.
-- **Google Sheets — только склад:** книга «Склад» (лист на клиента, read-only) +
-  книга «Приёмка» (лист на клиента, черновик; синк в «Склад» кнопкой «Внести» с
+- **Google Sheets — только склад:** книга «Склад» (лист на бизнес-аккаунт, read-only) +
+  книга «Приёмка» (лист на бизнес-аккаунт, черновик; синк в «Склад» кнопкой «Внести» с
   двойным подтверждением, Apps Script). `available = Склад(Sheets) − reserved(PG)`.
 - **Redis** — FSM/кэш справочников НП. **Docker** — bot + worker.
 
@@ -69,7 +69,7 @@ GitHub, **ветка на задачу** (`<тип>/<owner>-<short>`, где т�
 воркере (5), поддержка/дежурство + персонал/аналитика (6), seam склада
 `StockSource` + `INVENTORY_SOURCE` (7).
 
-**После фаз работа идёт задачами:** бізнес-акаунти и команды (`client_accounts` +
+**После фаз работа идёт задачами:** бизнес-аккаунты и команды (`client_accounts` +
 memberships, `account_owner`/`employee`), физическое удаление клиентов/менеджеров,
 политика одного бота, CI/CD с откатом, харнесс живых aiogram-`Update` и пробники
 `scripts/e2e/`, хардening по боевым прогонам (кэш Sheets, видимость сбоев склада,

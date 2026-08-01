@@ -38,7 +38,7 @@
   ключ НП зашифрован Fernet), ТТН (`shipments` + items, резерв, движения),
   поддержка, уведомления, аудит/логи. Managed Postgres (**Neon**) + Alembic.
 - **Складской источник — за seam `app/sheets/`:** по умолчанию это Google Sheets
-  (книга «Склад», лист на клиента, read-only) + книга «Приймання» (черновик;
+  (книга «Склад», лист на бизнес-аккаунт, read-only) + книга «Приймання» (черновик;
   синк в «Склад» кнопкой «Внести», Apps Script). `available = Склад(source) −
   reserved(Postgres)`. Phase 7 добавляет переключатель `INVENTORY_SOURCE`
   (`sheets`/`crm`) без изменения handler/service слоя.
@@ -68,7 +68,7 @@ app/
   main.py              запуск бота (long polling)
   worker.py            APScheduler-воркер (трекинг, SLA, дежурство, low-stock)
   db/                  PostgreSQL — вся БД (models/, repositories/, base, enums)
-  sheets/              StockSource seam: Google Sheets now, CRM/WMS adapter later
+  sheets/              seam StockSource: сейчас Google Sheets, позже CRM/WMS
   bot/                 dispatcher, middlewares, permissions, states, filters,
                        keyboards, texts (uk), handlers (start, client_cabinet, ttn,
                        clients_manage, account_team, manager_shipments, support,
@@ -136,7 +136,7 @@ GitHub, ветка на задачу, в `main` только через PR (за
 ## Статус
 
 **Бот работает в проде** (Hetzner + Neon), деплой автоматический при мерже в `main`.
-Фазы **0–7** закрыты; после них работа идёт отдельными задачами — бізнес-акаунти и
+Фазы **0–7** закрыты; после них работа идёт отдельными задачами — бизнес-аккаунты и
 команды (`client_accounts` + memberships), физическое удаление клиентов/менеджеров,
 политика одного бота, CI/CD с откатом, харнесс живых `Update` и пробники
 `scripts/e2e/`, хардening по итогам боевых прогонов.

@@ -57,7 +57,7 @@ Telegram-контактами). Менеджер видит личность к�
 
 ## Модель данных
 
-- `SupportThread` — `account_id` (обязательный, бізнес-акаунт клиента),
+- `SupportThread` — `account_id` (обязательный, бизнес-аккаунт клиента),
   `client_id` (nullable — конкретный человек, если известен),
   assigned_manager_id, status (open/waiting/closed), привязка к ТТН (опц.),
   таймстемпы.

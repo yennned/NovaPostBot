@@ -26,7 +26,7 @@ HTTP 200**, бизнес-сбой выражен `success=false` в теле —
 
 ## Поля SenderProfile (ФОП) → отправитель ТТН
 
-- `account_id` — бізнес-акаунт, которому принадлежит ФОП (legacy-колонка
+- `account_id` — бизнес-аккаунт, которому принадлежит ФОП (legacy-колонка
   `client_id` осталась ради истории; скоуп идёт по `account_id`).
 - `name` — назва ФОП (видна клиенту при выборе).
 - `np_api_key` — ключ НП, **Fernet-шифр** (для вызовов API).
@@ -78,7 +78,7 @@ HTTP 200**, бизнес-сбой выражен `success=false` в теле —
 документации). Внутри `OptionsSeat` поля — **camelCase**, в отличие от PascalCase
 остальных полей запроса:
 
-```
+```text
 OptionsSeat: [{ volumetricVolume, volumetricWidth, volumetricLength,
                 volumetricHeight, weight }]
 ```

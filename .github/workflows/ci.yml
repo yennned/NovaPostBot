@@ -242,12 +242,29 @@ jobs:
             set -eu
             cd ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}
 
+            # Образ, на котором прод работает ПРЯМО СЕЙЧАС, — по id, а не по тегу.
+            # APP_IMAGE на сервере закреплён за `:latest`, и после `pull` этот тег
+            # уже указывает на новый образ: откат только по compose вернул бы старый
+            # конфиг с новым кодом. Id остаётся валидным, пока образ не удалён
+            # (`image prune` запускаем лишь на успешном пути).
+            PREV_IMAGE=""
+            prev_cid=$(docker compose ps -q bot 2>/dev/null || true)
+            if [ -n "$prev_cid" ]; then
+              PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$prev_cid" 2>/dev/null || true)
+            fi
+            echo "Текущий образ бота: ${PREV_IMAGE:-неизвестен}"
+
             # Подменяем compose на репозиторный, сохраняя откат. Валидируем ДО
             # pull/up: битый или несовместимый файл не должен уронить живой прод.
             restore_compose() {
               if [ -f docker-compose.yml.bak ]; then
                 echo "Откат на предыдущий docker-compose.yml"
                 mv -f docker-compose.yml.bak docker-compose.yml
+              fi
+              if [ -n "$PREV_IMAGE" ]; then
+                echo "Откат на предыдущий образ $PREV_IMAGE"
+                APP_IMAGE="$PREV_IMAGE" docker compose up -d --no-build || true
+              else
                 docker compose up -d --no-build || true
               fi
             }

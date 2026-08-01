@@ -17,7 +17,7 @@
 
 Крупные направления, доехавшие в `main` уже после закрытия фаз:
 
-- **Бізнес-акаунти и команды:** `client_accounts` + `client_account_memberships`
+- **Бизнес-аккаунты и команды:** `client_accounts` + `client_account_memberships`
   (`account_owner` / `employee`); ФОП, ТТН, склад, поддержка и статистика скоупятся
   по `account_id`, у ТТН отдельно `created_by_user_id`.
 - **Физическое удаление** клиента/менеджера (вместо мягкого архива), история
@@ -267,8 +267,10 @@
 ## Проверка (end-to-end)
 
 - **Локально (Docker):** `docker compose up -d --build` → `migrate`, `worker`,
-  `redis`; Postgres — Neon по `DATABASE_URL` (или локальный контейнер под профилем
-  `dev`); Sheets — service-account из `.env`. Логи: `docker compose logs -f worker`.
+  `redis`; Postgres — Neon по `DATABASE_URL`. Локальный контейнер Postgres объявлен
+  под профилем `dev` и обычным `up` **не поднимается** — нужен явный
+  `docker compose --profile dev up -d --build`. Sheets — service-account из `.env`.
+  Логи: `docker compose logs -f worker`.
   **Бот локально не поллит:** у проекта один боевой токен, `BOT_TOKEN` в локальном
   `.env` пустой намеренно (гард в `app/main.py`) — два процесса на одном токене
   дают `409 Conflict` и перехват сообщений реальных клиентов.
