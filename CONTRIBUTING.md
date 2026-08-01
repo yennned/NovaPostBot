@@ -19,7 +19,8 @@
 - Ветка на задачу от свежего `main`:
   - `feat/<owner>-<short>` — новая функциональность,
   - `fix/<owner>-<short>` — багфикс,
-  - `chore/<owner>-<short>` — инфраструктура/процесс.
+  - `chore/<owner>-<short>` — инфраструктура/процесс,
+  - `test/<owner>-<short>` — тесты и тестовая оснастка.
   - `<owner>` — хэндл: **alex** или **step**. Пример: `feat/alex-ttn-create`.
 - Параллельные задачи у агента — отдельный git **worktree** на задачу. У каждого
   разработчика — свой **клон** репозитория.
@@ -137,7 +138,7 @@ pytest -q
 а не на моках). Локально:
 
 ```bash
-docker compose --profile dev up -d postgres   # postgres:16 на localhost:5432
+docker compose --profile dev up -d postgres   # postgres:18 на localhost:5432
 cp .env.example .env                           # выставить DATABASE_URL(_DIRECT)
                                                # на localhost и FERNET_KEY
 pytest -q

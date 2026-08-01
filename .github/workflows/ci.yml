@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: novapost
           POSTGRES_PASSWORD: novapost
@@ -30,10 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
 
       - name: Install dependencies
@@ -65,7 +65,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: novapost
           POSTGRES_PASSWORD: novapost
@@ -82,10 +82,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
 
       - name: Install dependencies
@@ -121,6 +121,44 @@ jobs:
             -c "do \$\$ begin if (select count(*) from sender_profiles where account_id is null) > 0
                 then raise exception 'backfill left orphaned account_id rows'; end if; end \$\$;"
 
+  # Сборка образа на PR — БЕЗ публикации. До этого джоба `docker build` жил только
+  # в `deploy`, то есть выполнялся впервые уже после мержа в main: отсутствие колёс
+  # под новый Python, съехавший базовый образ или сломанный requirements.txt
+  # проходили зелёный PR и обнаруживались на боевом деплое. Здесь собираем ровно то
+  # же и теми же build-args, но `push: false` — GHCR не трогаем.
+  image-build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: novapostbot:pr
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Успешная сборка не значит «приложение стартует»: pip мог поставить всё, а
+      # импорт — упасть на несовместимости. Поэтому дополнительно импортируем точки
+      # входа внутри собранного образа.
+      - name: Import smoke inside the image
+        run: |
+          docker run --rm novapostbot:pr python -c "
+          import app.main, app.worker, app.bot.dispatcher
+          print('entrypoints import: ok')
+          "
+          docker run --rm novapostbot:pr alembic --version
+
   # CD: только при push в main и после зелёных lint/test и migration-smoke.
   # Образ всегда публикуется в GHCR (git sha + latest); деплой по SSH — лишь если
   # заданы секреты сервера (иначе шаг мягко скипается, первый merge не падает).
@@ -147,7 +185,7 @@ jobs:
       # buildx с драйвером docker-container — иначе GHA-кэш (cache-to: type=gha) не
       # поддерживается дефолтным docker-драйвером.
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         uses: docker/login-action@v4

@@ -1,7 +1,11 @@
 # Dev/CI-зависимости
 -r requirements.txt
-ruff>=0.6
+# Ruff закреплён ТОЧНО и совпадает с `rev` в .pre-commit-config.yaml: разные версии
+# форматтера дают разный результат, и `ruff format --check` в CI падал бы на коде,
+# который локальный pre-commit только что признал отформатированным. Обновлять эти
+# два места нужно вместе.
+ruff==0.16.1
 pytest>=9.1.1
 pytest-asyncio>=1.4.0
-pre-commit>=3.7
-fakeredis>=2.23  # in-memory Redis для тестов кэша НП-справочников
+pre-commit>=4.6.1
+fakeredis>=2.37.0  # in-memory Redis для тестов кэша НП-справочников
