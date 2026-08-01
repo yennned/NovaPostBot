@@ -94,8 +94,12 @@ def build_cart_picker_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_stepper_kb(*, qty: int, available: int) -> InlineKeyboardMarkup:
-    """Степпер количества для выбранной позиции (кнопки + запасной ввод числа)."""
+def build_stepper_kb(*, qty: int, available: int, edit: bool = False) -> InlineKeyboardMarkup:
+    """Степпер количества для выбранной позиции (кнопки + запасной ввод числа).
+
+    `edit=True` — правка позиции, уже лежащей в кошике: количество заменяется, а не
+    прибавляется, поэтому и подпись «Зберегти», и возврат — в кошик, откуда пришли.
+    """
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="−1", callback_data="cab:ttn:qd:-1"),
@@ -109,8 +113,13 @@ def build_stepper_kb(*, qty: int, available: int) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text="✏️ Ввести число", callback_data="cab:ttn:qnum")],
         [
-            InlineKeyboardButton(text="✓ Додати", callback_data="cab:ttn:qok"),
-            InlineKeyboardButton(text="◀ Назад", callback_data="cab:ttn:page:0"),
+            InlineKeyboardButton(
+                text="✓ Зберегти" if edit else "✓ Додати", callback_data="cab:ttn:qok"
+            ),
+            InlineKeyboardButton(
+                text="◀ Назад",
+                callback_data="cab:ttn:cart" if edit else "cab:ttn:page:0",
+            ),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
