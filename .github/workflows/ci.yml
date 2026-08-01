@@ -257,7 +257,7 @@ jobs:
         if: ${{ env.SSH_HOST != '' }}
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
-        uses: appleboy/scp-action@v1
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345  # v1.0.0
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -270,7 +270,7 @@ jobs:
         if: ${{ env.SSH_HOST != '' }}
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1.2.5
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}

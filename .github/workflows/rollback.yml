@@ -35,7 +35,7 @@ jobs:
       # На VPS: подменяем строку APP_IMAGE в .env на нужный тег и перекатываем.
       # sed правит существующую строку APP_IMAGE=... (она задана при активации деплоя).
       - name: Rollback over SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1.2.5
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
         with:
