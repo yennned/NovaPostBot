@@ -633,9 +633,17 @@ async def test_cart_edit_clamps_to_dropped_stock(monkeypatch):
     assert state._data["pending"]["qty"] == 3
 
 
-async def test_cart_edit_stock_gone_alerts(monkeypatch):
-    """Остаток обнулился: степпер с максимумом 0 нерабочий — говорим и рисуем кошик."""
-    _patch_inventory_from_items(monkeypatch, [_item("SKU1", "Кава", 0)])
+@pytest.mark.parametrize(
+    "stock",
+    [
+        pytest.param([_item("SKU1", "Кава", 0)], id="остаток обнулился"),
+        pytest.param([], id="позиция исчезла со склада"),
+    ],
+)
+async def test_cart_edit_unavailable_alerts(monkeypatch, stock):
+    """Править нечего: степпер с максимумом 0 нерабочий, а исчезнувшую позицию
+    правка «подтверждала» бы, отложив ошибку до создания отправления."""
+    _patch_inventory_from_items(monkeypatch, stock)
     state = FakeState(cart={"SKU1": {"qty": 2, "name": "Кава", "price": "100"}})
     cb = FakeCallback("cab:ttn:cedit:0")
 
