@@ -9,7 +9,7 @@ from redis.asyncio import from_url as redis_from_url
 
 from app.bot import build_dispatcher
 from app.config import get_settings
-from app.db.base import get_sessionmaker
+from app.db.base import check_server_version, get_sessionmaker
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
@@ -33,6 +33,10 @@ async def main() -> None:
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        # Пишем в лог фактическую версию Postgres: прод — managed Neon, его мажор
+        # может уехать без нашего участия, и тогда CI проверяет уже не то, на чём
+        # работает прод. См. EXPECTED_PG_MAJOR.
+        await check_server_version(session)
         owners = await ensure_owners(session, settings)
         await session.commit()
         log.info("bot.owners_bootstrapped", count=len(owners))

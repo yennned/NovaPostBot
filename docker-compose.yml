@@ -21,6 +21,9 @@ services:
       retries: 5
 
   postgres:
+    # Мажор держим в одном месте — `EXPECTED_PG_MAJOR` в app/db/base.py: бот на
+    # старте логирует фактическую версию БД и кричит, если прод-Neon от неё уехал.
+    # Меняете образ — меняйте и константу (и ci.yml).
     image: postgres:18-alpine
     profiles: ["dev"]
     environment:

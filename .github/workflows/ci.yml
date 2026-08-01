@@ -13,6 +13,8 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
+        # Мажор синхронизирован с `EXPECTED_PG_MAJOR` (app/db/base.py) — бот на
+        # старте логирует фактическую версию БД и кричит при расхождении.
         image: postgres:18-alpine
         env:
           POSTGRES_USER: novapost
@@ -90,6 +92,8 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
+        # Мажор синхронизирован с `EXPECTED_PG_MAJOR` (app/db/base.py) — бот на
+        # старте логирует фактическую версию БД и кричит при расхождении.
         image: postgres:18-alpine
         env:
           POSTGRES_USER: novapost
