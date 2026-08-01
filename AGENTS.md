@@ -3,8 +3,9 @@
 Проект — Telegram-бот личного кабинета фулфилмента Новой Почты.
 Полная карта — в [CLAUDE.md](CLAUDE.md), детальный план — в [`docs/`](docs/).
 
-**Стек:** Python 3.12 · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) ·
-Redis · Google Sheets API (service-account) · Nova Poshta API · Docker.
+**Стек:** Python 3.14 (рантайм; код совместим с 3.12+) · aiogram 3 ·
+PostgreSQL (SQLAlchemy async + Alembic) · Redis · Google Sheets API
+(service-account) · Nova Poshta API · Docker.
 
 **Хранилище (гибрид):** PostgreSQL — вся БД (users, sender_profiles, shipments,
 stock_movements, support, audit_logs). Google Sheets — только склад
