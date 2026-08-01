@@ -140,11 +140,38 @@ PR-гигиена при этом: крупную задачу довести **
 ## Линт и тесты
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -r requirements-dev.txt   # включает runtime-зависимости
 pre-commit install            # хуки ruff на коммит
 ruff check . && ruff format --check .
 pytest -q
 ```
+
+### Зависимости
+
+`requirements.in` / `requirements-dev.in` — **источник** (прямые зависимости и
+осознанные границы версий). `requirements.txt` / `requirements-dev.txt` —
+**скомпилированный лок** с транзитивными пакетами и хешами; именно его ставят
+Dockerfile (`--require-hashes`) и CI. Без лока `>=`-границы резолвились в момент
+сборки, и два образа одного git sha могли приехать с разными версиями.
+
+Добавили или подняли зависимость — правьте `.in` и перекомпилируйте **в том же
+образе, что и прод** (маркеры платформы влияют на состав, на macOS лок выйдет
+другой):
+
+```bash
+docker run --rm --platform linux/amd64 -v "$PWD:/w" -w /w python:3.14-slim sh -c '
+  pip install --quiet "pip-tools==7.6.0" &&
+  for src in requirements requirements-dev; do
+    pip-compile --quiet --generate-hashes --strip-extras \
+      --output-file "$src.txt" "$src.in"
+  done'
+```
+
+Коммитим `.in` и `.txt` вместе — CI (`Requirements lock is in sync`) сверяет их
+пересборкой и падает на расхождении. Версия `pip-tools` зафиксирована и здесь, и
+в `ci.yml`: разные версии форматируют лок по-разному. `pip-tools` намеренно НЕ в
+`requirements-dev.in` — он тянет «unsafe» pip/setuptools, которые pip отказывается
+ставить в hash-режиме.
 
 **Тесты требуют Postgres** (часть тестов гоняет репозитории/миграции на живой БД,
 а не на моках). Локально:

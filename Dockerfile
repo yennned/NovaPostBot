@@ -6,9 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Зависимости отдельным слоем (кэш)
+# Зависимости отдельным слоем (кэш). `--require-hashes` — не украшение: без него
+# `>=`-границы резолвились на момент сборки, и два образа одного git sha могли
+# приехать с разными версиями aiogram/pydantic/cryptography. requirements.txt —
+# скомпилированный лок (источник — requirements.in), см. CONTRIBUTING.md.
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip && pip install --require-hashes -r requirements.txt
 
 # Версия сборки: CI прокидывает git sha (--build-arg GIT_SHA=...), локально — «dev».
 # Пишется в лог при старте (bot.start/worker.start) → трассируемость «что в проде».

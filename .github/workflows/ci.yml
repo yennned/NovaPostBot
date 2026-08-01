@@ -39,7 +39,32 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.txt
+
+      # Лок обязан быть перекомпилирован вместе с правкой .in — иначе образ
+      # соберётся по старому набору версий, а PR будет выглядеть обновлённым.
+      # Компилируем в том же образе, что и прод (python:3.14-slim ≈ ubuntu+3.14):
+      # маркеры платформы влияют на состав, локальный macOS дал бы другой лок.
+      - name: Requirements lock is in sync
+        run: |
+          set -euo pipefail
+          # Отдельный venv: pip-tools тянет build/click/setuptools, и в общем
+          # окружении они подменяли бы то, на чём потом идут тесты.
+          python -m venv /tmp/piptools
+          /tmp/piptools/bin/pip install --quiet "pip-tools==${PIP_TOOLS_VERSION}"
+          for src in requirements requirements-dev; do
+            /tmp/piptools/bin/pip-compile --quiet --generate-hashes --strip-extras \
+              --output-file "${src}.txt" "${src}.in"
+          done
+          if ! git diff --exit-code -- requirements.txt requirements-dev.txt; then
+            echo "::error::Лок разошёлся с requirements*.in — перекомпилируйте (CONTRIBUTING.md)"
+            exit 1
+          fi
+        env:
+          # Версия зафиксирована: разные pip-tools форматируют лок по-разному, и
+          # плавающая ломала бы этот шаг на посторонних PR. Обновлять вместе с
+          # командой в CONTRIBUTING.md.
+          PIP_TOOLS_VERSION: 7.6.0
 
       - name: Layer boundary (no aiogram in services/db)
         run: |
@@ -91,7 +116,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.txt
 
       - name: Alembic upgrade from empty database
         run: python -m alembic upgrade head

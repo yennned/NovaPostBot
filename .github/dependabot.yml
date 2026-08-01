@@ -1,6 +1,9 @@
 version: 2
 updates:
-  # Python-зависимости (requirements.txt + requirements-dev.txt)
+  # Python-зависимости. Источник — requirements*.in, ставится скомпилированный
+  # лок requirements*.txt (см. CONTRIBUTING.md). Dependabot умеет и то, и другое:
+  # поднимает границу в .in и перекомпилирует лок в том же PR. Если у него не
+  # выйдет — CI-шаг «Requirements lock is in sync» это поймает.
   - package-ecosystem: pip
     directory: "/"
     schedule:
