@@ -5,8 +5,21 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
 from app.config import Settings
 from app.utils.sla import add_working_minutes, shipment_sla_deadline
+
+
+@pytest.fixture(autouse=True)
+def _no_work_schedule_env(monkeypatch):
+    """Убрать `WORK_SCHEDULE` из окружения на время тестов дефолта.
+
+    `Settings(_env_file=None)` отключает только чтение `.env`, но НЕ переменные
+    окружения — они по приоритету выше дефолта поля. Без этой фикстуры тесты ниже
+    утверждали бы «проверяем дефолт», а на машине с экспортированной переменной
+    проверяли бы чужое расписание. Тот же приём, что в `test_settings_defaults`.
+    """
+    monkeypatch.delenv("WORK_SCHEDULE", raising=False)
 
 
 def test_add_working_minutes_skips_night():
