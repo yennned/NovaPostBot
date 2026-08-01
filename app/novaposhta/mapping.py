@@ -30,6 +30,16 @@ from app.novaposhta.schemas import ParcelSpec, TTNDraft
 # меняется одной константой). Не путать с COD (накладений платіж получателя).
 PAYMENT_METHOD = "Cash"
 
+# Коэффициент объёмного («габаритного») веса НП: 1 м³ = 250 кг. Эквивалент
+# общеизвестной формулы Д×Ш×В(см)/4000. Вынесен константой: если НП поменяет
+# коэффициент, правится одна строка, логика расчёта не меняется.
+VOLUMETRIC_KG_PER_CUBIC_METER = Decimal("250")
+
+# Минимальный вес места, который принимает НП. Квантование до 0.001 кг может
+# схлопнуть очень лёгкое место в 0, а `OptionsSeat[].weight = 0` при непустом
+# верхнеуровневом `Weight` НП отклоняет.
+MIN_SEAT_WEIGHT = Decimal("0.001")
+
 
 def money(value: Decimal | int | str) -> str:
     """Денежную сумму → строку для НП (НП ждёт строки, не числа).
@@ -93,6 +103,49 @@ def _parcel_geometry(parcel: ParcelSpec) -> tuple[tuple[str, str, str], Decimal]
     return tuple(f"{value:f}" for value in dimensions), volume
 
 
+def volumetric_weight_kg(volume_m3: Decimal) -> Decimal:
+    """Объёмный вес одного места (кг) по правилу НП: 1 м³ = 250 кг.
+
+    НП тарифицирует по **максимуму** из фактического и объёмного веса, поэтому
+    ориентировочная оценка обязана считать объёмный вес так же, как посчитает НП
+    при приёме посылки. Иначе клиент видит цену за фактический вес, а платит за
+    объёмный (лёгкий товар в крупной коробке).
+    """
+    return volume_m3 * VOLUMETRIC_KG_PER_CUBIC_METER
+
+
+def billable_weight_kg(
+    weight_kg: Decimal | int | str,
+    *,
+    length_cm: Decimal | int | str | None = None,
+    width_cm: Decimal | int | str | None = None,
+    height_cm: Decimal | int | str | None = None,
+    seats_amount: int = 1,
+) -> Decimal:
+    """Тарифный вес = max(фактический, объёмный по габаритам всех мест).
+
+    Габариты необязательны: без них тарифный вес равен фактическому (поведение
+    до появления объёмного расчёта). Валидацию габаритов (все три вместе,
+    строго > 0) переиспользуем из `_parcel_geometry`, чтобы оценка и `save`
+    считали геометрию одинаково.
+    """
+    actual = Decimal(str(weight_kg))
+    if all(value is None for value in (length_cm, width_cm, height_cm)):
+        return actual
+    _, volume = _parcel_geometry(
+        ParcelSpec(
+            weight=actual,
+            length_cm=length_cm,
+            width_cm=width_cm,
+            height_cm=height_cm,
+        )
+    )
+    volumetric = volumetric_weight_kg(volume) * max(int(seats_amount), 1)
+    # normalize() убирает хвостовые нули расчёта (12.000 → 12): вес уходит в НП
+    # строкой, и «12» читается человеком в карточке лучше, чем «12.000».
+    return max(actual, volumetric.normalize())
+
+
 def to_save_props(draft: TTNDraft) -> dict[str, Any]:
     """Собрать `methodProperties` для `InternetDocument.save` из черновика."""
     seats_amount = max(int(draft.parcel.seats_amount), 1)
@@ -100,7 +153,12 @@ def to_save_props(draft: TTNDraft) -> dict[str, Any]:
     # InternetDocument.save отклоняет запрос только с SeatsAmount/Weight:
     # OptionsSeat обязателен даже для одного места. Для нескольких мест
     # делим общий вес и ограничиваем точность до 3 знаков после запятой.
-    seat_weight = (Decimal(str(draft.parcel.weight)) / seats_amount).quantize(Decimal("0.001"))
+    # Клемп до MIN_SEAT_WEIGHT: очень лёгкое место (≤ 0.0004 кг) иначе
+    # округлилось бы в 0, и НП отклонила бы ТТН с непустым `Weight`.
+    seat_weight = max(
+        (Decimal(str(draft.parcel.weight)) / seats_amount).quantize(MIN_SEAT_WEIGHT),
+        MIN_SEAT_WEIGHT,
+    )
     options_seat = [
         {
             "volumetricVolume": money(volume),
@@ -198,12 +256,31 @@ def to_price_props(
     service_type: str = "WarehouseWarehouse",
     cargo_type: str = "Cargo",
     cod_amount: Decimal | int | str | None = None,
+    length_cm: Decimal | int | str | None = None,
+    width_cm: Decimal | int | str | None = None,
+    height_cm: Decimal | int | str | None = None,
 ) -> dict[str, Any]:
-    """`methodProperties` для `InternetDocument.getDocumentPrice` (онлайн-цена)."""
+    """`methodProperties` для `InternetDocument.getDocumentPrice` (онлайн-цена).
+
+    Габариты сами по себе в запрос не уходят — они влияют только на `Weight`:
+    НП тарифицирует по максимуму из фактического и объёмного веса, а объёмный мы
+    воспроизводим локально (`billable_weight_kg`). Так оценка совпадает с тем,
+    что НП посчитает по реальным габаритам из `OptionsSeat` при `save`, и не
+    зависит от того, принимает ли `getDocumentPrice` нашей версии API
+    `OptionsSeat`.
+    """
     props: dict[str, Any] = {
         "CitySender": city_sender_ref,
         "CityRecipient": city_recipient_ref,
-        "Weight": weight(weight_kg),
+        "Weight": weight(
+            billable_weight_kg(
+                weight_kg,
+                length_cm=length_cm,
+                width_cm=width_cm,
+                height_cm=height_cm,
+                seats_amount=seats_amount,
+            )
+        ),
         "ServiceType": service_type,
         "Cost": money(cost),
         "CargoType": cargo_type,

@@ -8,43 +8,59 @@ app/
                          DATABASE_URL_DIRECT (Alembic), REDIS_URL,
                          INVENTORY_SOURCE, GOOGLE_SA_JSON (service account),
                          SHEETS_* (ID книг), FERNET_KEY, OWNER_TELEGRAM_IDS,
-                         DEV_TELEGRAM_IDS, TIMEZONE
+                         DEV_TELEGRAM_IDS, NP_* (URL/таймауты/Ref склада), TIMEZONE
   logging_config.py      structlog
   main.py                запуск бота (long polling)
-  worker.py              APScheduler-воркер (трекинг, low-stock)
+  worker.py              APScheduler-воркер (трекинг, SLA, дежурство, low-stock)
   jobs.py                фоновые задачи
   db/                    PostgreSQL — ВСЯ БД (SQLAlchemy async + Alembic)
     base.py              engine/session
-    models/              user, client_account/memberships, sender_profile (ФОП), shipment, support,
-                         notifications, audit, enums
-    repositories/        user, client_account, sender_profile, shipment, support, stats,
-                         notifications, audit
+    models/              user, client_account (+memberships), sender_profile (ФОП),
+                         shipment, stock_movement, support, notification_setting,
+                         low_stock_alert, audit, enums
+    repositories/        base, scope, user, client_account, sender_profile, shipment,
+                         stock_movement, notification_setting, low_stock_alert,
+                         support, reports, audit
   sheets/                seam источника склада (`StockSource`)
-    client.py            Sheets API: чтение/запись, лист на клиента, кэш
-    inventory.py         Google Sheets adapter + CRM/WMS stub
     source.py            контракт `StockSource`, `StockRow`, `StockDelta`
+    client.py            Sheets API: чтение/запись, лист на аккаунт
+    inventory.py         Google Sheets adapter + CRM/WMS stub
+    cache.py, memo.py, runtime.py   кэш чтений и мемоизация хендшейка (квота Google)
   bot/
     dispatcher.py        сборка диспетчера и роутеров
     middlewares.py       inject session/sheets/user/t/bot/np, Throttling
     permissions.py       RBAC: иерархия ролей + per-flag права + dev god-mode
     states.py            FSM (Redis)
-    filters.py           TextIn и пр.
+    filters.py, types.py фильтры и контекст эффективного пользователя/аккаунта
     keyboards/           меню по ролям
-    texts/               украинские строки (реестр + переводчик-обёртка)
-    handlers/            start, client_cabinet, clients_manage, ttn, stats,
-                         support, notifications, dev, common
+    texts/               украинские строки
+    handlers/            start, client_cabinet, ttn, clients_manage, account_team,
+                         manager_shipments, support, duty, staff, reports, analytics,
+                         dev, menu_escape, fallback, errors
   services/
-    inventory.py         резерв/списание/возврат: остаток в Sheets, движения в Postgres
-    shipment.py          создание/отмена ТТН (NP-first)
+    inventory.py         резерв/списание/возврат: остаток из StockSource, движения в PG
+    shipment.py / shipments.py   создание/отмена ТТН (NP-first) и выборки
+    pricing.py           онлайн-оценка стоимости ТТН (`getDocumentPrice`)
+    address.py           справочники міст/відділень НП с кэшем
+    tracking.py          продвижение статусов по трекингу + SLA-флаги
+    returns.py / manager_returns.py   возвраты и приёмка возврата
+    manager_shipments.py очередь отправлений менеджера
     notifications.py     исходящие пуши (надёжная доставка)
-    support.py           треды поддержки, дежурство менеджера
-    audit.py             append-only аудит (Postgres `audit_logs`)
-    reports.py           агрегаты для персонала (склад/отправки)
-  novaposhta/            client, methods, schemas, tracking, exceptions
-  utils/                 crypto (Fernet), validators
+    support.py, duty.py  треды поддержки, дежурство менеджера
+    clients.py, account_team.py, staff.py, sender_profile.py, sender_scope.py
+    client_settings.py, client_sheet_sync.py, stats.py, reports.py, bootstrap.py
+  novaposhta/            client (транспорт/ретраи), methods (обёртки методов),
+                         mapping (чистый маппинг полей), schemas, cache, tracking,
+                         exceptions
+  utils/                 crypto (Fernet), phone, dates, timefmt, sla, work_schedule
 migrations/              Alembic
-tests/                   unit-тесты (чистая логика, без живых Postgres/Sheets/TG)
+scripts/                 intake_apps_script.gs (Apps Script приёмки), e2e/ (живые пробники)
+tests/                   pytest на **реальном Postgres** + харнесс живых aiogram-Update
 ```
+
+Аудит пишется репозиторием `db/repositories/audit.py` (отдельного `services/audit.py`
+нет). Валидаторы живут в `utils/` по темам (`phone`, `dates`), общего
+`utils/validators.py` нет.
 
 ## Хранилище данных (гибрид)
 
@@ -60,20 +76,20 @@ tests/                   unit-тесты (чистая логика, без жи
 
 ### PostgreSQL — вся БД (managed Neon)
 
-- **`client_accounts` / `client_account_memberships`** — бізнес-акаунти та
-  зв'язок із фактичними користувачами. Один `user_id` може мати лише одне
-  membership; `account_owner` керує налаштуваннями бізнесу, `employee` має
-  операційний доступ без керування командою/ФОП/ключами.
+- **`client_accounts` / `client_account_memberships`** — бизнес-аккаунты и связь
+  с фактическими пользователями. Один `user_id` может иметь только одно
+  membership; `account_owner` управляет настройками бизнеса, `employee` имеет
+  операционный доступ без управления командой/ФОП/ключами.
 
 - **`users`** — клиенты/менеджеры/владелец: роль (`client`/`manager`/`owner`),
   статус (`pending`/`active`/`blocked`/`archived`), телефон, ПІБ, `permissions`
   (JSONB, per-flag для менеджера), дежурство (`on_duty`, `duty_date`),
   таймстемпы.
-- **`sender_profiles`** (ФОП) — много на акаунт: `account_id` (legacy `client_id`), `name`,
+- **`sender_profiles`** (ФОП) — много на аккаунт: `account_id` (legacy `client_id`), `name`,
   `np_api_key` (**Fernet-шифр**), `sender_full_name`, `sender_phone`, `org_type`
   (ФОП/ТОВ), `edrpou`, `np_sender_ref`/`np_contact_ref`, `np_sender_warehouse`,
   `is_default`, таймстемпы.
-- **`shipments`** + **`shipment_items`** — ТТН: номер/`np_ref`, акаунт, ФОП,
+- **`shipments`** + **`shipment_items`** — ТТН: номер/`np_ref`, аккаунт, ФОП,
   получатель (тип фіз/юр, ПІБ/телефон, місто/відділення), позиции
   (артикул×кол-во), вес/розмір, оплата/COD/страховка, `status`, таймстемпы
   (`created_at`, `dispatched_at`, `status_updated_at`), резерв. **SLA:**
@@ -93,9 +109,9 @@ tests/                   unit-тесты (чистая логика, без жи
 
 ### Google Sheets — только учёт склада
 
-- **Книга «Склад»** — лист на клиента, текущие остатки (артикул/назва/категорія/
+- **Книга «Склад»** — лист на бизнес-аккаунт, текущие остатки (артикул/назва/категорія/
   кількість/ціна). Read-only (Protected), правит только Script/бот.
-- **Книга «Приймання»** — лист на клиента, черновик ввода; синк в «Склад»
+- **Книга «Приймання»** — лист на бизнес-аккаунт, черновик ввода; синк в «Склад»
   кнопкой «Внести» (Apps Script, double confirmation).
 - **Лист «Історія»** — журнал приёмок.
 

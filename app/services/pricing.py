@@ -45,12 +45,19 @@ async def quote_ttn(
     cost: Decimal,
     np_client: NovaPoshtaClient,
     cod_amount: Decimal | None = None,
+    dimensions_cm: tuple[str, str, str] | None = None,
     account_id: uuid.UUID | None = None,
     settings: Settings | None = None,
 ) -> PriceQuote:
-    """Стоимость/срок доставки НП (склад-отправитель → відділення получателя)."""
+    """Стоимость/срок доставки НП (склад-отправитель → відділення получателя).
+
+    `dimensions_cm` — габариты выбранного пресета коробки (Д, Ш, В). Заданы →
+    цена считается по тарифному весу (максимум из фактического и объёмного), то
+    есть так же, как её посчитает НП по `OptionsSeat` при создании ТТН.
+    """
     settings = settings or get_settings()
     api_key = await _resolve_key(session, client, sender_profile_id, account_id)
+    length, width, height = dimensions_cm or (None, None, None)
     return await methods.get_price(
         np_client,
         api_key=api_key,
@@ -59,4 +66,7 @@ async def quote_ttn(
         weight_kg=weight,
         cost=cost,
         cod_amount=cod_amount,
+        length_cm=length,
+        width_cm=width,
+        height_cm=height,
     )

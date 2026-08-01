@@ -207,6 +207,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Compose едет вместе с кодом. Раньше прод работал по своей копии
+      # docker-compose.yml на сервере: инфраструктурные правки в репозитории
+      # (бамп образов PG/Redis, новые сервисы, healthcheck) на прод не доезжали и
+      # молча расходились. Кладём в staging-каталог, а НЕ поверх рабочего файла:
+      # подмену с бэкапом и валидацией делает SSH-шаг ниже, поэтому оборвавшийся
+      # scp не оставляет сервер с полуприменённым compose.
+      - name: Upload compose file
+        if: ${{ env.SSH_HOST != '' }}
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: docker-compose.yml
+          target: ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}/.deploy-incoming
+          overwrite: true
+
       - name: Deploy over SSH
         if: ${{ env.SSH_HOST != '' }}
         env:
@@ -222,21 +241,57 @@ jobs:
           script: |
             set -eu
             cd ${{ secrets.DEPLOY_PATH != '' && secrets.DEPLOY_PATH || '~/NovaPostBot' }}
-            docker compose pull
-            if ! docker compose up -d --no-build; then
-              docker compose ps
-              docker compose logs --no-color --tail=200 migrate bot worker
-              exit 1
+
+            # Образ, на котором прод работает ПРЯМО СЕЙЧАС, — по id, а не по тегу.
+            # APP_IMAGE на сервере закреплён за `:latest`, и после `pull` этот тег
+            # уже указывает на новый образ: откат только по compose вернул бы старый
+            # конфиг с новым кодом. Id остаётся валидным, пока образ не удалён
+            # (`image prune` запускаем лишь на успешном пути).
+            PREV_IMAGE=""
+            prev_cid=$(docker compose ps -q bot 2>/dev/null || true)
+            if [ -n "$prev_cid" ]; then
+              PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$prev_cid" 2>/dev/null || true)
             fi
-            if ! docker compose ps --status running --services | grep -Eq '(^| )bot( |$)'; then
-              docker compose ps
-              docker compose logs --no-color --tail=200 migrate bot worker
+            echo "Текущий образ бота: ${PREV_IMAGE:-неизвестен}"
+
+            # Подменяем compose на репозиторный, сохраняя откат. Валидируем ДО
+            # pull/up: битый или несовместимый файл не должен уронить живой прод.
+            restore_compose() {
+              if [ -f docker-compose.yml.bak ]; then
+                echo "Откат на предыдущий docker-compose.yml"
+                mv -f docker-compose.yml.bak docker-compose.yml
+              fi
+              if [ -n "$PREV_IMAGE" ]; then
+                echo "Откат на предыдущий образ $PREV_IMAGE"
+                APP_IMAGE="$PREV_IMAGE" docker compose up -d --no-build || true
+              else
+                docker compose up -d --no-build || true
+              fi
+            }
+            fail() {
+              docker compose ps || true
+              docker compose logs --no-color --tail=200 migrate bot worker || true
+              restore_compose
               exit 1
+            }
+
+            if [ -f .deploy-incoming/docker-compose.yml ]; then
+              # Не `[ -f … ] && cp` — под `set -e` ложное условие уронило бы скрипт
+              # на сервере, где compose ещё не лежит (первый деплой).
+              if [ -f docker-compose.yml ]; then
+                cp docker-compose.yml docker-compose.yml.bak
+              fi
+              mv -f .deploy-incoming/docker-compose.yml docker-compose.yml
+              if ! docker compose config -q; then
+                echo "Репозиторный docker-compose.yml не валиден на этом сервере"
+                fail
+              fi
             fi
-            if ! docker compose ps --status running --services | grep -Eq '(^| )worker( |$)'; then
-              docker compose ps
-              docker compose logs --no-color --tail=200 migrate bot worker
-              exit 1
-            fi
+
+            docker compose pull || fail
+            docker compose up -d --no-build || fail
+            docker compose ps --status running --services | grep -Eq '(^| )bot( |$)' || fail
+            docker compose ps --status running --services | grep -Eq '(^| )worker( |$)' || fail
+
             docker compose ps
             docker image prune -f

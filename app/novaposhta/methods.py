@@ -12,7 +12,12 @@ from decimal import Decimal
 
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaValidationError
-from app.novaposhta.mapping import to_price_props, to_recipient_counterparty_props, to_save_props
+from app.novaposhta.mapping import (
+    billable_weight_kg,
+    to_price_props,
+    to_recipient_counterparty_props,
+    to_save_props,
+)
 from app.novaposhta.schemas import (
     City,
     PriceQuote,
@@ -127,8 +132,22 @@ async def get_price(
     service_type: str = "WarehouseWarehouse",
     cargo_type: str = "Cargo",
     cod_amount: Decimal | int | str | None = None,
+    length_cm: Decimal | int | str | None = None,
+    width_cm: Decimal | int | str | None = None,
+    height_cm: Decimal | int | str | None = None,
 ) -> PriceQuote:
-    """`InternetDocument.getDocumentPrice` — онлайн-стоимость/срок."""
+    """`InternetDocument.getDocumentPrice` — онлайн-стоимость/срок.
+
+    Габариты необязательны; когда заданы, цена считается по тарифному весу
+    (максимум из фактического и объёмного) — см. `mapping.billable_weight_kg`.
+    """
+    billable = billable_weight_kg(
+        weight_kg,
+        length_cm=length_cm,
+        width_cm=width_cm,
+        height_cm=height_cm,
+        seats_amount=seats_amount,
+    )
     rows = await client.call(
         api_key=api_key,
         model="InternetDocument",
@@ -142,6 +161,9 @@ async def get_price(
             service_type=service_type,
             cargo_type=cargo_type,
             cod_amount=cod_amount,
+            length_cm=length_cm,
+            width_cm=width_cm,
+            height_cm=height_cm,
         ),
     )
     row = _first(rows, "getDocumentPrice")
@@ -153,6 +175,7 @@ async def get_price(
         cost=cost,
         cost_redelivery=_decimal(row.get("CostRedelivery")),
         estimated_delivery_date=row.get("EstimatedDeliveryDate") or None,
+        billable_weight=billable,
     )
 
 

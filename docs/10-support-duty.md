@@ -57,9 +57,11 @@ Telegram-контактами). Менеджер видит личность к�
 
 ## Модель данных
 
-- `SupportThread` — client_id, assigned_manager_id, status (open/waiting/closed),
-  привязка к ТТН (опц.), таймстемпы.
-- `SupportMessage` — thread_id, sender_role, text, created_at.
+- `SupportThread` — `account_id` (обязательный, бизнес-аккаунт клиента),
+  `client_id` (nullable — конкретный человек, если известен),
+  assigned_manager_id, status (open/waiting/closed), привязка к ТТН (опц.),
+  таймстемпы.
+- `SupportMessage` — thread_id, sender_role, `sender_user_id`, text, created_at.
 - Дежурство — поля у менеджера (`on_duty`, `duty_date`).
 - Рабочее время — **dev-конфиг** часов по дням недели (нигде в UI), Europe/Kyiv;
   телефон — из профиля дежурного.

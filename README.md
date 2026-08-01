@@ -9,10 +9,10 @@
 дежурным менеджером; менеджеры обрабатывают и отправляют ТТН, ведут склад,
 клиентов, поддержку и возвраты; владелец управляет персоналом и аналитикой.
 
-> Полный дизайн, флоу по ролям и поэтапный план — в [docs/](docs/) и в файле
-> плана `~/.claude/plans/squishy-launching-key.md`. Журнал прогресса —
-> `PROGRESS.md` (ведётся после каждого коммита). Контекст для ассистентов —
-> [`CLAUDE.md`](CLAUDE.md).
+> Полный дизайн, флоу по ролям и поэтапный план — в [docs/](docs/). Журнал
+> прогресса — [`PROGRESS.md`](PROGRESS.md) (ведётся после каждого коммита, самый
+> актуальный источник по состоянию работ). Контекст для ассистентов —
+> [`CLAUDE.md`](CLAUDE.md) и [`AGENTS.md`](AGENTS.md).
 
 ## Документация ([docs/](docs/))
 
@@ -29,7 +29,8 @@
 | 08 | [notifications-tracking-returns](docs/08-notifications-tracking-returns.md) | Уведомления, трекинг, возвраты |
 | 09 | [novaposhta-api](docs/09-novaposhta-api.md) | Интеграция НП, поля ТТН, ценообразование |
 | 10 | [support-duty](docs/10-support-duty.md) | Поддержка и дежурство менеджера |
-| — | [ROADMAP](docs/ROADMAP.md) | Git-процесс, фазы 0–7, проверка |
+| — | [ROADMAP](docs/ROADMAP.md) | Git-процесс, фазы 0–7, что не реализовано, проверка |
+| — | [phase3-stepan-brief](docs/phase3-stepan-brief.md) | Исторический бриф на Фазу 3 (закрыта) |
 
 ## Архитектура (гибрид хранилища)
 
@@ -37,7 +38,7 @@
   ключ НП зашифрован Fernet), ТТН (`shipments` + items, резерв, движения),
   поддержка, уведомления, аудит/логи. Managed Postgres (**Neon**) + Alembic.
 - **Складской источник — за seam `app/sheets/`:** по умолчанию это Google Sheets
-  (книга «Склад», лист на клиента, read-only) + книга «Приймання» (черновик;
+  (книга «Склад», лист на бизнес-аккаунт, read-only) + книга «Приймання» (черновик;
   синк в «Склад» кнопкой «Внести», Apps Script). `available = Склад(source) −
   reserved(Postgres)`. Phase 7 добавляет переключатель `INVENTORY_SOURCE`
   (`sheets`/`crm`) без изменения handler/service слоя.
@@ -62,21 +63,27 @@ Europe/Kyiv. Язык бота — украинский (uk).
 app/
   config.py            pydantic-settings (BOT_TOKEN, DATABASE_URL, REDIS_URL,
                        INVENTORY_SOURCE, GOOGLE_SA_JSON, SHEETS_*,
-                       FERNET_KEY, OWNER/DEV_TELEGRAM_IDS)
+                       FERNET_KEY, OWNER/DEV_TELEGRAM_IDS, NP_*)
   logging_config.py    structlog
   main.py              запуск бота (long polling)
-  worker.py            APScheduler-воркер (трекинг, low-stock)
+  worker.py            APScheduler-воркер (трекинг, SLA, дежурство, low-stock)
   db/                  PostgreSQL — вся БД (models/, repositories/, base, enums)
-  sheets/              StockSource seam: Google Sheets now, CRM/WMS adapter later
+  sheets/              seam StockSource: сейчас Google Sheets, позже CRM/WMS
   bot/                 dispatcher, middlewares, permissions, states, filters,
-                       keyboards, texts (uk), handlers (start, client_cabinet,
-                       clients_manage, ttn, stats, support, notifications, dev)
-  services/            inventory, shipment, notifications, support, audit, reports
-  novaposhta/          client, methods, schemas, tracking, exceptions
-  utils/               crypto (Fernet), validators
+                       keyboards, texts (uk), handlers (start, client_cabinet, ttn,
+                       clients_manage, account_team, manager_shipments, support,
+                       duty, staff, reports, analytics, dev, fallback, errors)
+  services/            inventory, shipment(s), pricing, address, tracking, returns,
+                       manager_shipments, notifications, support, duty, clients,
+                       account_team, staff, stats, reports
+  novaposhta/          client, methods, mapping, schemas, cache, tracking, exceptions
+  utils/               crypto (Fernet), phone, dates, timefmt, sla, work_schedule
 migrations/            Alembic
-tests/                 unit-тесты (чистая логика)
+scripts/               Apps Script приёмки + e2e/ (живые пробники к НП и проду)
+tests/                 pytest на реальном Postgres + харнесс живых aiogram-Update
 ```
+
+Полное дерево с пояснениями — [docs/02-architecture.md](docs/02-architecture.md).
 
 ## Быстрый старт (Docker)
 
@@ -111,8 +118,10 @@ Hetzner CPX21 VPS (бот + воркер + Redis в Docker) + managed Postgres *
 
 **CI/CD.** Push/PR в `main` → CI `lint-test` (layer-check, ruff, compileall,
 pytest на Postgres-контейнере). После зелёного CI **push в `main`** триггерит
-`deploy`: сборка образа → **GHCR** (`:latest` + `:sha-<short>`) → SSH-деплой на VPS
-(`docker compose pull && up -d --no-build`). Ручной `up -d --build` больше не нужен.
+`deploy`: сборка образа → **GHCR** (`:latest` + `:sha-<short>`) → доставка
+`docker-compose.yml` из репозитория на сервер (с бэкапом, валидацией и авто-откатом)
+→ `docker compose pull && up -d --no-build`. Ручной `up -d --build` больше не нужен,
+compose на сервере руками не правим.
 Версия сборки (git sha) пишется в лог старта (`bot.start version=…`) и отдаётся
 командой `/version` (dev). Вехи — теги `vX.Y.Z` (`release.yml` → GitHub Release +
 образ с тегом версии). Настройка секретов деплоя — в [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -126,6 +135,11 @@ GitHub, ветка на задачу, в `main` только через PR (за
 
 ## Статус
 
-Планирование завершено. Фазы **0–7** уже собраны в `main`. Phase 7 закрыла seam
-для склада: `StockSource`/`GoogleSheetsStockSource`/`CrmStockSource` и
-переключатель `INVENTORY_SOURCE` без изменений в хендлерах и сервисах.
+**Бот работает в проде** (Hetzner + Neon), деплой автоматический при мерже в `main`.
+Фазы **0–7** закрыты; после них работа идёт отдельными задачами — бизнес-аккаунты и
+команды (`client_accounts` + memberships), физическое удаление клиентов/менеджеров,
+политика одного бота, CI/CD с откатом, харнесс живых `Update` и пробники
+`scripts/e2e/`, хардening по итогам боевых прогонов.
+
+Актуальный журнал — [PROGRESS.md](PROGRESS.md). Что осознанно не реализовано —
+раздел «Что осознанно не реализовано» в [docs/ROADMAP.md](docs/ROADMAP.md).

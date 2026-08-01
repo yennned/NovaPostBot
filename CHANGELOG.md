@@ -1,18 +1,23 @@
 # Changelog
 
-Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
-версии — [SemVer](https://semver.org/lang/ru/). Записи наполняются из GitHub Releases
-(`gh release create vX.Y.Z --generate-notes` собирает их из заголовков squash-PR).
+> **Источник правды — не этот файл.** Полная история изменений живёт в
+> **[GitHub Releases](https://github.com/yennned/NovaPostBot/releases)** (заметки
+> генерируются из заголовков squash-PR) и в **[PROGRESS.md](PROGRESS.md)** — журнале
+> после каждого коммита. Вести третий список вручную бессмысленно: он отстаёт и
+> начинает врать (что и произошло — ниже висели записи июля при десятках более
+> поздних PR).
 
-## [Unreleased]
+Формат релизов — [SemVer](https://semver.org/lang/ru/). Веха выпускается тегом:
 
-### Added
-- CI/CD: автодеплой на push в `main` (сборка образа → GHCR → SSH-деплой на Hetzner),
-  версия сборки (git sha) в образе, логах старта и `/version`; релизы по тегам `v*`.
-- Командная гигиена GitHub: CODEOWNERS, PR/issue-шаблоны, Dependabot, LICENSE.
+```bash
+git tag vX.Y.Z && git push origin vX.Y.Z   # release.yml создаст Release с заметками
+```
 
-<!--
-При выпуске версии:
-  git tag vX.Y.Z && git push origin vX.Y.Z
-release.yml создаст GitHub Release с авто-заметками; перенеси их сюда под ## [X.Y.Z].
--->
+## Где что искать
+
+| Вопрос | Где смотреть |
+|--------|--------------|
+| Что вошло в версию `vX.Y.Z` | GitHub Releases, тег `vX.Y.Z` |
+| Что изменилось на этой неделе | [PROGRESS.md](PROGRESS.md) (обратная хронология) |
+| Что сейчас в проде | лог старта `bot.start version=…` или `/version` (dev) |
+| Что осознанно не сделано | [docs/ROADMAP.md](docs/ROADMAP.md) |

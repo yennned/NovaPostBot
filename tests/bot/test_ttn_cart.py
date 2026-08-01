@@ -11,6 +11,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
@@ -760,6 +761,21 @@ async def test_receive_weight_invalid():
     assert state.state == CreateTtnState.entering_weight
 
 
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "0", "-1", "1001"])
+async def test_receive_weight_rejects_non_finite_and_out_of_range(raw):
+    """`Decimal("nan")` проходит обе границы (сравнения с NaN всегда False).
+
+    Без явной проверки на конечность такой вес доехал бы до маппера НП и уронил
+    бы `quantize` на `InvalidOperation` уже при создании ТТН.
+    """
+    state = FakeState(size_token="s")
+    await state.set_state(CreateTtnState.entering_weight)
+    msg = FakeMessage(text=raw)
+    await h.receive_weight(msg, object(), state)
+    assert "Невірна вага" in msg.answers[-1]["text"]
+    assert "weight" not in state._data
+
+
 async def test_receive_weight_accepts_comma():
     state = FakeState(size_token="s")
     await state.set_state(CreateTtnState.entering_weight)
@@ -1144,6 +1160,7 @@ def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None, see
         cost,
         np_client,
         cod_amount=None,
+        dimensions_cm=None,
         account_id=None,
         settings=None,
     ):
@@ -1151,6 +1168,8 @@ def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None, see
             counter["n"] = counter.get("n", 0) + 1
         if seen is not None:
             seen["account_id"] = account_id
+            seen["dimensions_cm"] = dimensions_cm
+            seen["weight"] = weight
         if raise_exc is not None:
             raise raise_exc
         return quote
@@ -1260,6 +1279,43 @@ async def test_card_price_cache_is_invalidated_when_size_changes(monkeypatch):
 
     assert counter["n"] == 2
     assert second["key"] != first["key"]
+
+
+async def test_card_price_sends_preset_dimensions_to_np(monkeypatch):
+    """Габариты пресета обязаны доехать до оценки цены.
+
+    НП тарифицирует по максимуму из фактического и объёмного веса; без габаритов
+    оценка «Велика» + 2 кг показала бы цену за 2 кг вместо 12.
+    """
+    seen: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), seen=seen)
+    state = _card_state(insured_amount="0", size_token="l", weight="2")
+
+    await h._card_price(None, _CLIENT, state._data, object(), force=False)
+
+    assert seen["dimensions_cm"] == ("40", "40", "30")
+
+
+async def test_card_price_shows_billable_weight_only_when_volumetric_wins(monkeypatch):
+    seen: dict = {}
+    _patch_pricing(
+        monkeypatch,
+        quote=PriceQuote(cost=Decimal("70"), billable_weight=Decimal("12")),
+        seen=seen,
+    )
+    state = _card_state(insured_amount="0", size_token="l", weight="2")
+    bulky = await h._card_price(None, _CLIENT, state._data, object(), force=False)
+    assert bulky["billable_weight"] == "12"
+
+    _patch_pricing(monkeypatch, quote=PriceQuote(cost=Decimal("70"), billable_weight=Decimal("30")))
+    heavy = await h._card_price(
+        None,
+        _CLIENT,
+        _card_state(insured_amount="0", size_token="l", weight="30")._data,
+        object(),
+        force=False,
+    )
+    assert "billable_weight" not in heavy
 
 
 async def test_recompute_forces_price(monkeypatch):
