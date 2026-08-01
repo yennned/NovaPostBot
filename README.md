@@ -118,8 +118,10 @@ Hetzner CPX21 VPS (бот + воркер + Redis в Docker) + managed Postgres *
 
 **CI/CD.** Push/PR в `main` → CI `lint-test` (layer-check, ruff, compileall,
 pytest на Postgres-контейнере). После зелёного CI **push в `main`** триггерит
-`deploy`: сборка образа → **GHCR** (`:latest` + `:sha-<short>`) → SSH-деплой на VPS
-(`docker compose pull && up -d --no-build`). Ручной `up -d --build` больше не нужен.
+`deploy`: сборка образа → **GHCR** (`:latest` + `:sha-<short>`) → доставка
+`docker-compose.yml` из репозитория на сервер (с бэкапом, валидацией и авто-откатом)
+→ `docker compose pull && up -d --no-build`. Ручной `up -d --build` больше не нужен,
+compose на сервере руками не правим.
 Версия сборки (git sha) пишется в лог старта (`bot.start version=…`) и отдаётся
 командой `/version` (dev). Вехи — теги `vX.Y.Z` (`release.yml` → GitHub Release +
 образ с тегом версии). Настройка секретов деплоя — в [CONTRIBUTING.md](CONTRIBUTING.md).
