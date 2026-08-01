@@ -1,0 +1,18 @@
+# Runtime-зависимости NovaPostBot (Python 3.14) — ИСТОЧНИК, а не то, что ставится.
+# Здесь только прямые зависимости и осознанные границы версий; полный список с
+# транзитивными пакетами и хешами компилируется отсюда в requirements.txt.
+# Как обновлять — CONTRIBUTING.md, раздел «Зависимости».
+aiogram>=3.30.0,<4
+SQLAlchemy[asyncio]>=2.0.51,<2.1
+asyncpg>=0.31.0
+alembic>=1.18.5
+redis>=8.1.0
+pydantic>=2.13.4
+pydantic-settings>=2.14.2
+structlog>=26.1.0
+cryptography>=50.0.0
+APScheduler>=3.11.3,<4
+httpx>=0.28.1
+tenacity>=9.1.4
+gspread>=6.2.1
+google-auth>=2.56.2

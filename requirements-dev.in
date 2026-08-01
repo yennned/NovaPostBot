@@ -1,0 +1,14 @@
+# Dev/CI-зависимости — ИСТОЧНИК (компилируется в requirements-dev.txt с хешами).
+# `pip-tools` здесь СОЗНАТЕЛЬНО нет: он тянет в лок «unsafe» pip/setuptools,
+# которые pip отказывается ставить в hash-режиме. Ставим его разово в том шаге,
+# где компилируем/сверяем лок (см. CONTRIBUTING.md и job lint-test).
+-r requirements.in
+# Ruff закреплён ТОЧНО и совпадает с `rev` в .pre-commit-config.yaml: разные версии
+# форматтера дают разный результат, и `ruff format --check` в CI падал бы на коде,
+# который локальный pre-commit только что признал отформатированным. Обновлять эти
+# два места нужно вместе.
+ruff==0.16.1
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+pre-commit>=4.6.1
+fakeredis>=2.37.0  # in-memory Redis для тестов кэша НП-справочников
