@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from app.bot.keyboards.ttn import SIZE_PRESETS
 from app.bot.texts.common import invalid_phone_text
@@ -184,11 +184,21 @@ def search_unavailable_text() -> str:
 
 
 def insured_prompt() -> str:
-    return "Введіть оголошену вартість (страхову суму) у гривнях, напр. 1200:"
+    return (
+        "Введіть оголошену вартість (страхову суму) у гривнях, напр. 1200.\n"
+        "Саме цю суму НП відшкодує у разі втрати або пошкодження."
+    )
 
 
 def insured_invalid() -> str:
     return "❌ Невірна сума. Введіть число 0 або більше (напр. 1200)."
+
+
+def insured_required_alert() -> str:
+    """Алерт на «Відправити ТТН», когда сумму не из чего вывести (в «Складі» нет цен)."""
+    return (
+        "Вкажіть оголошену вартість — кнопка «✏️ Вартість». Без неї НП відшкодує 0 ₴ у разі втрати."
+    )
 
 
 def description_prompt() -> str:
@@ -233,6 +243,41 @@ def success_text(ttn_number: str | None) -> str:
     )
 
 
+def _insured_lines(data: dict, cart: dict) -> list[str]:
+    """Блок оголошеної вартості: сумма, её происхождение и явные предупреждения.
+
+    Показываем источник так же, как у накладного платежа, потому что сумма теперь
+    выводится автоматически из корзины — клиент должен видеть, откуда она взялась и
+    когда её стоит поправить. Оба предупреждения — про недострахованность, это
+    единственный случай, где молчание стоит клиенту денег.
+    """
+    raw = data.get("insured_amount")
+    if raw is None:
+        return [
+            "🛡 Оголошена вартість: <b>не вказана</b>",
+            "   ⚠️ У «Складі» немає цін — вкажіть суму, інакше НП відшкодує 0 ₴",
+        ]
+    lines = [
+        f"🛡 Оголошена вартість: {raw} ₴ "
+        f"({'сума з кошика' if data.get('insured_amount_source') == 'cart' else 'власна сума'})"
+    ]
+    if data.get("insured_amount_source") == "cart" and any(
+        entry["price"] is None for entry in cart.values()
+    ):
+        lines.append("   ⚠️ Частина товарів без ціни у «Складі» — сума неповна, перевірте")
+    if _is_zero(raw):
+        lines.append("   ⚠️ Без страхування: у разі втрати НП відшкодує 0 ₴")
+    return lines
+
+
+def _is_zero(raw: str) -> bool:
+    """`"0"`, `"0.00"` — всё это ноль; сравнивать со строкой `"0"` нельзя."""
+    try:
+        return Decimal(raw) == 0
+    except InvalidOperation:
+        return False
+
+
 def card_text(data: dict, price: dict) -> str:
     """Карточка-зведення перед відправкою. `data` — FSM-data, `price` — кэш цены."""
     cart = data.get("cart", {})
@@ -259,10 +304,10 @@ def card_text(data: dict, price: dict) -> str:
             f"⚖️ Вага: {data.get('weight', '')} кг",
             f"📐 Габарити: {size_label}",
             f"📝 Опис: {html.escape(data.get('description', ''))}",
-            f"🛡 Оголошена вартість: {data.get('insured_amount', '0')} ₴",
-            f"💳 Оплата: {payment}",
         ]
     )
+    lines.extend(_insured_lines(data, cart))
+    lines.append(f"💳 Оплата: {payment}")
     if data.get("cod_amount"):
         source = "сума з кошика" if data.get("cod_amount_source") == "cart" else "власна сума"
         lines.append(f"   Накладений платіж: {data['cod_amount']} ₴ ({source})")

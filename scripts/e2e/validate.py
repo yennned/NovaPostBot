@@ -71,9 +71,12 @@ def _percentiles(values: list[float]) -> dict[str, float]:
 # Состояние БД после прогона
 # --------------------------------------------------------------------------- #
 _AFTER_QUERIES = {
+    # `insured_amount` в срезе не для полноты: это база страхового возмещения НП,
+    # и её занижение (тем более ноль) по отчёту иначе не увидеть.
     "shipments": """
         select id::text, ttn_number, np_ref, sender_profile_id::text, status::text,
-               account_id::text, created_by_user_id::text, recipient_city, created_at::text
+               account_id::text, created_by_user_id::text, recipient_city,
+               insured_amount::text, created_at::text
         from shipments order by created_at desc
     """,
     "items": """
@@ -295,6 +298,7 @@ async def _np_reconcile(
     from app.novaposhta.methods import get_status_documents
     from app.services.shipment import cancel_shipment_np_first
     from sqlalchemy import select
+    from sqlalchemy.orm import joinedload
 
     report: dict[str, Any] = {"checked": [], "deleted": [], "kept": [], "errors": []}
     tracked = [s for s in new_shipments if s.get("ttn_number")]
@@ -327,11 +331,26 @@ async def _np_reconcile(
                 continue
             try:
                 async with sessionmaker() as session:
+                    # joinedload обязателен: `cancel_shipment_np_first` читает
+                    # `shipment.items` и `shipment.account`, а ленивая загрузка в
+                    # asyncio падает `MissingGreenlet` — уборка молча не работала,
+                    # и созданные прогоном ТТН оставались висеть в НП с резервом.
                     row = (
-                        await session.execute(
-                            select(Shipment).where(Shipment.id == uuid_module.UUID(shipment["id"]))
+                        (
+                            await session.execute(
+                                select(Shipment)
+                                .where(Shipment.id == uuid_module.UUID(shipment["id"]))
+                                .options(
+                                    joinedload(Shipment.items),
+                                    joinedload(Shipment.account),
+                                    joinedload(Shipment.sender_profile),
+                                    joinedload(Shipment.client),
+                                )
+                            )
                         )
-                    ).scalar_one()
+                        .unique()
+                        .scalar_one()
+                    )
                     owner = (
                         await session.execute(select(User).where(User.id == row.client_id))
                     ).scalar_one()
@@ -450,11 +469,15 @@ def _render(
 
     if new_shipments:
         lines.append("\n## Створені відправлення\n")
-        lines.append("| ТТН | Статус | Створив |")
-        lines.append("|---|---|---|")
+        lines.append("| ТТН | Статус | Оголошена вартість | Створив |")
+        lines.append("|---|---|---:|---|")
         for row in new_shipments:
+            insured = row.get("insured_amount")
+            # Ноль тут — не косметика: НП возмещает в пределах оголошеної вартості.
+            insured_cell = "⚠️ 0" if insured in (None, "0", "0.00") else insured
             lines.append(
-                f"| {row.get('ttn_number') or '—'} | {row['status']} | {row.get('created_by_user_id')} |"
+                f"| {row.get('ttn_number') or '—'} | {row['status']} | {insured_cell} | "
+                f"{row.get('created_by_user_id')} |"
             )
 
     lines.append("\n---\n")
