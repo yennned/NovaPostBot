@@ -29,7 +29,8 @@
 | 08 | [notifications-tracking-returns](docs/08-notifications-tracking-returns.md) | Уведомления, трекинг, возвраты |
 | 09 | [novaposhta-api](docs/09-novaposhta-api.md) | Интеграция НП, поля ТТН, ценообразование |
 | 10 | [support-duty](docs/10-support-duty.md) | Поддержка и дежурство менеджера |
-| — | [ROADMAP](docs/ROADMAP.md) | Git-процесс, фазы 0–7, проверка |
+| — | [ROADMAP](docs/ROADMAP.md) | Git-процесс, фазы 0–7, что не реализовано, проверка |
+| — | [phase3-stepan-brief](docs/phase3-stepan-brief.md) | Исторический бриф на Фазу 3 (закрыта) |
 
 ## Архитектура (гибрид хранилища)
 
@@ -62,21 +63,27 @@ Europe/Kyiv. Язык бота — украинский (uk).
 app/
   config.py            pydantic-settings (BOT_TOKEN, DATABASE_URL, REDIS_URL,
                        INVENTORY_SOURCE, GOOGLE_SA_JSON, SHEETS_*,
-                       FERNET_KEY, OWNER/DEV_TELEGRAM_IDS)
+                       FERNET_KEY, OWNER/DEV_TELEGRAM_IDS, NP_*)
   logging_config.py    structlog
   main.py              запуск бота (long polling)
-  worker.py            APScheduler-воркер (трекинг, low-stock)
+  worker.py            APScheduler-воркер (трекинг, SLA, дежурство, low-stock)
   db/                  PostgreSQL — вся БД (models/, repositories/, base, enums)
   sheets/              StockSource seam: Google Sheets now, CRM/WMS adapter later
   bot/                 dispatcher, middlewares, permissions, states, filters,
-                       keyboards, texts (uk), handlers (start, client_cabinet,
-                       clients_manage, ttn, stats, support, notifications, dev)
-  services/            inventory, shipment, notifications, support, audit, reports
-  novaposhta/          client, methods, schemas, tracking, exceptions
-  utils/               crypto (Fernet), validators
+                       keyboards, texts (uk), handlers (start, client_cabinet, ttn,
+                       clients_manage, account_team, manager_shipments, support,
+                       duty, staff, reports, analytics, dev, fallback, errors)
+  services/            inventory, shipment(s), pricing, address, tracking, returns,
+                       manager_shipments, notifications, support, duty, clients,
+                       account_team, staff, stats, reports
+  novaposhta/          client, methods, mapping, schemas, cache, tracking, exceptions
+  utils/               crypto (Fernet), phone, dates, timefmt, sla, work_schedule
 migrations/            Alembic
-tests/                 unit-тесты (чистая логика)
+scripts/               Apps Script приёмки + e2e/ (живые пробники к НП и проду)
+tests/                 pytest на реальном Postgres + харнесс живых aiogram-Update
 ```
+
+Полное дерево с пояснениями — [docs/02-architecture.md](docs/02-architecture.md).
 
 ## Быстрый старт (Docker)
 
@@ -126,6 +133,11 @@ GitHub, ветка на задачу, в `main` только через PR (за
 
 ## Статус
 
-Планирование завершено. Фазы **0–7** уже собраны в `main`. Phase 7 закрыла seam
-для склада: `StockSource`/`GoogleSheetsStockSource`/`CrmStockSource` и
-переключатель `INVENTORY_SOURCE` без изменений в хендлерах и сервисах.
+**Бот работает в проде** (Hetzner + Neon), деплой автоматический при мерже в `main`.
+Фазы **0–7** закрыты; после них работа идёт отдельными задачами — бізнес-акаунти и
+команды (`client_accounts` + memberships), физическое удаление клиентов/менеджеров,
+политика одного бота, CI/CD с откатом, харнесс живых `Update` и пробники
+`scripts/e2e/`, хардening по итогам боевых прогонов.
+
+Актуальный журнал — [PROGRESS.md](PROGRESS.md). Что осознанно не реализовано —
+раздел «Что осознанно не реализовано» в [docs/ROADMAP.md](docs/ROADMAP.md).

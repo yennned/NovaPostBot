@@ -7,9 +7,13 @@
 PostgreSQL (SQLAlchemy async + Alembic) · Redis · Google Sheets API
 (service-account) · Nova Poshta API · Docker.
 
-**Хранилище (гибрид):** PostgreSQL — вся БД (users, sender_profiles, shipments,
-stock_movements, support, audit_logs). Google Sheets — только склад
-(«Склад» read-only + «Приёмка» черновик). `available = Склад(Sheets) − reserved(PG)`.
+**Хранилище (гибрид):** PostgreSQL — вся БД (client_accounts +
+client_account_memberships, users, sender_profiles, shipments, stock_movements,
+support, audit_logs). Google Sheets — только склад («Склад» read-only + «Приёмка»
+черновик). `available = Склад(Sheets) − reserved(PG)`.
+
+**Скоуп данных — акаунт.** ФОП, ТТН, склад, поддержка и статистика принадлежат
+`account_id`, а не отдельному человеку; у ТТН отдельно `created_by_user_id`.
 
 ## Review guidelines
 

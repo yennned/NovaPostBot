@@ -15,9 +15,11 @@ Telegram-бот личного кабинета фулфилмента Ново�
 
 ## Архитектура (гибрид хранилища)
 
-- **PostgreSQL (managed Neon) — вся БД:** users, sender_profiles (ФОП, ключ НП
-  зашифрован Fernet), shipments + items, stock_movements, support, notifications,
-  audit_logs. SQLAlchemy async + Alembic.
+- **PostgreSQL (managed Neon) — вся БД:** client_accounts +
+  client_account_memberships (бізнес-акаунт и его люди), users, sender_profiles
+  (ФОП, ключ НП зашифрован Fernet), shipments + items, stock_movements, support,
+  notification_settings, low_stock_alerts, audit_logs. SQLAlchemy async + Alembic.
+  ФОП/ТТН/склад/поддержка скоупятся по `account_id`.
 - **Google Sheets — только склад:** книга «Склад» (лист на клиента, read-only) +
   книга «Приёмка» (лист на клиента, черновик; синк в «Склад» кнопкой «Внести» с
   двойным подтверждением, Apps Script). `available = Склад(Sheets) − reserved(PG)`.
@@ -57,28 +59,26 @@ GitHub, **ветка на задачу** (`<тип>/<owner>-<short>`, где т�
 
 ## Текущий статус
 
-**Фазы 0–7 — в `main`.** Фаза 0 (инфраструктура/каркас), Фаза 1 (данные+RBAC,
-каркас бота, auth, dev god-mode), Фаза 2 (регистрация/подтверждение + управление
-клиентами), Фаза 3 (кабинет клиента + остатки), Фаза 4 (интеграция НП + создание
-ТТН, NP-first; + hardening follow-up: гейт полноты данных отправителя, стойкость
-Redis-кэша, обязательный `sender_phone` при сохранении профиля, backstop
-`DecryptionError` при ротации `FERNET_KEY`), Фаза 5 (уведомления/трекинг/SLA/
-возвраты в воркере: APScheduler-поллинг статусов НП, списание в «Склад» при
-«відправлено», SLA-таймер 30 раб. минут, возвраты returned/lost/damaged, очередь
-отправлений менеджера, клиентские настройки уведомлений + low-stock anti-spam),
-Фаза 6 (поддержка/дежурство + персонал/аналитика: дежурство «🟢 Я на зв'язку» +
-авто-снятие воркером по расписанию, релей-чат клиент↔дежурный + очередь без
-дежурного → владельцу + лог owner/dev, 👔 Персонал с per-flag правами/наймом/
-блокировкой/снятием роли, 📊 Звіти/📈 Аналітика — fee-итоги + список опоздавших ТТН +
-поддержка по менеджерам), Фаза 7 (seam склада: `StockSource` +
-`GoogleSheetsStockSource` + заглушка `CrmStockSource`, переключение через
-`INVENTORY_SOURCE`, без изменения handler/service слоя). Опц. отложено —
-PR 9e «Останні отримувачі»; per-manager аттрибуция ТТН, сводка склада в отчётах,
-кастомный диапазон/графики; отдельной будущей задачей остаётся реальный
-CRM/WMS REST adapter поверх seam.
+**Бот работает в проде** (Hetzner VPS: bot + worker + Redis в Docker; БД — Neon).
+Мерж в `main` = автодеплой: CI → образ в GHCR → SSH `docker compose pull && up -d`.
+Есть `rollback.yml` и релизные теги `vX.Y.Z`.
 
-**Модель работы — sequential-by-phase:** один человек полностью закрывает фазу
-(домен + bot/UI), второй ждёт мержа в `main`. Phase 2/4/6 → alex, Phase 3/5/7 → step.
-Детали и распределение — в [docs/ROADMAP.md](docs/ROADMAP.md) и
-[CONTRIBUTING.md](CONTRIBUTING.md). Репозиторий **публичный** (приватный ломает CI
-на free-тарифе).
+**Фазы 0–7 закрыты:** инфраструктура/каркас (0), данные+RBAC+auth+dev god-mode (1),
+регистрация/подтверждение + управление клиентами (2), кабинет клиента + остатки (3),
+интеграция НП + создание ТТН NP-first (4), уведомления/трекинг/SLA/возвраты в
+воркере (5), поддержка/дежурство + персонал/аналитика (6), seam склада
+`StockSource` + `INVENTORY_SOURCE` (7).
+
+**После фаз работа идёт задачами:** бізнес-акаунти и команды (`client_accounts` +
+memberships, `account_owner`/`employee`), физическое удаление клиентов/менеджеров,
+политика одного бота, CI/CD с откатом, харнесс живых aiogram-`Update` и пробники
+`scripts/e2e/`, хардening по боевым прогонам (кэш Sheets, видимость сбоев склада,
+объёмный вес в оценке цены).
+
+Что осознанно **не** реализовано — одноимённый раздел в
+[docs/ROADMAP.md](docs/ROADMAP.md). Фактический журнал — [PROGRESS.md](PROGRESS.md).
+
+**Модель работы — sequential-by-phase** (один человек закрывает фазу целиком,
+второй ждёт мержа): правило действует, но фазы закрыты и активный писатель сейчас
+один. Детали — [CONTRIBUTING.md](CONTRIBUTING.md). Репозиторий **публичный**
+(приватный ломает CI на free-тарифе).
