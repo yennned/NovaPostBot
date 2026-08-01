@@ -65,15 +65,19 @@ class Settings(BaseSettings):
     # Версия сборки (git sha от CI, «dev» локально) — для логов старта и /version.
     app_version: str = Field(default="dev", alias="APP_VERSION")
 
-    # Среда исполнения — чтобы в логах/`/version` было видно, куда подключён процесс,
-    # и случайно не спутать локальный тест-бот с продом. На поведение кода не влияет
-    # (разделение сред идёт через .env: токен/URL), только на трассировку.
-    environment: Literal["local", "staging", "production"] = Field(
+    # Среда исполнения — чтобы в логах/`/version` было видно, куда подключён процесс.
+    # На поведение кода не влияет (разделение идёт через .env: токен/URL), только на
+    # трассировку. `staging` убран вместе со staging-стендом (2026-07-31): у проекта
+    # один бот, а незанятое значение в Literal читается как «стенд есть» и приглашает
+    # поднять второй поллер на боевом токене.
+    environment: Literal["local", "production"] = Field(
         default="local",
         alias="ENVIRONMENT",
     )
 
-    # Telegram
+    # Telegram. Один бот на проект: токен живёт только в .env на боевом сервере.
+    # Локально пусто — `app/main.py` тогда не поднимает поллинг, и машина
+    # разработчика физически не может перехватить трафик реальных клиентов.
     bot_token: str = Field(default="", alias="BOT_TOKEN")
 
     # PostgreSQL (Neon): pooled — для приложения, direct — для Alembic
@@ -90,16 +94,38 @@ class Settings(BaseSettings):
     google_sa_json: str = Field(default="", alias="GOOGLE_SA_JSON")
     sheets_stock_book_id: str = Field(default="", alias="SHEETS_STOCK_BOOK_ID")
     sheets_intake_book_id: str = Field(default="", alias="SHEETS_INTAKE_BOOK_ID")
+    # Ретраи ЧТЕНИЯ Sheets на временную недоступность (квота 429, 5xx). Квота
+    # Google — 60 read/min на service-account, то есть на весь бот, поэтому упереться
+    # в неё реально. Записи (`apply_deltas`) не ретраим: они могли примениться
+    # частично, и повтор удвоил бы дельту остатка.
+    sheets_retry_attempts: int = Field(default=3, alias="SHEETS_RETRY_ATTEMPTS")
+    sheets_retry_backoff: float = Field(default=0.5, alias="SHEETS_RETRY_BACKOFF")
+
     inventory_source: Literal["sheets", "crm"] = Field(
         default="sheets",
         alias="INVENTORY_SOURCE",
     )
+
+    # Сколько секунд переиспользовать прочитанный лист «Склад» между апдейтами.
+    # Квота Google — 60 чтений/мин на service-account, то есть на ВЕСЬ бот, а один
+    # сценарий створення ТТН делал ~8 чтений: потолок ≈7 ТТН/мин на всех клиентов,
+    # дальше 429 и «Склад тимчасово недоступний» (замерено E2E-прогоном).
+    # Гейт от oversell (`shipment._resolve_items`) кэш не читает — он всегда
+    # перечитывает лист, поэтому TTL влияет только на отрисовку экранов.
+    # 0 — выключить кэш (поведение до правки).
+    stock_cache_ttl_seconds: int = Field(default=45, alias="STOCK_CACHE_TTL_SECONDS")
 
     # Нова Пошта (ключ — per-ФОП, шифруется в БД; здесь только транспорт).
     # Тарифы/мин-стоимость не храним — НП валидирует онлайн.
     np_api_url: str = Field(default="https://api.novaposhta.ua/v2.0/json/", alias="NP_API_URL")
     np_timeout_seconds: float = Field(default=15.0, alias="NP_TIMEOUT_SECONDS")
     np_max_retries: int = Field(default=3, alias="NP_MAX_RETRIES")
+    # Интерактивный поиск справочников (город/відділення при создании ТТН): жёстче
+    # таймаут и меньше ретраев, чем у фоновых вызовов — иначе флаки-НП вешает
+    # пользователя до ~45с (15с × 3). Здесь важнее быстрый отклик: не нашли —
+    # пользователь просто повторит ввод.
+    np_lookup_timeout_seconds: float = Field(default=6.0, alias="NP_LOOKUP_TIMEOUT_SECONDS")
+    np_lookup_max_retries: int = Field(default=2, alias="NP_LOOKUP_MAX_RETRIES")
     # Базовый множитель экспоненциального бэкоффа ретраев (сек). 0 — без пауз
     # (используется в тестах, чтобы ретраи не спали по-настоящему).
     np_retry_backoff: float = Field(default=0.5, alias="NP_RETRY_BACKOFF")

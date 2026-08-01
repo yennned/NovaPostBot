@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.bot.keyboards import support as kb
-from app.bot.keyboards.menus import build_role_menu
+from app.bot.keyboards.menus import CLIENT_MENU_TEXTS, MENU_TEXTS, build_role_menu
 from app.bot.notify import BotNotifier
 from app.bot.screen import remember_screen
 from app.bot.states import SupportState
@@ -103,9 +103,14 @@ async def _exit_chat_to_home(
     Во время чата висела ReplyKeyboardMarkup («Вийти з чату»/«Завершити
     відповідь»). Новая reply-панель роли заменяет её одним сообщением — НЕ
     ReplyKeyboardRemove, иначе нижнее меню исчезнет до наступного /start.
+
+    `account_owner` обязателен: без него панель пересобиралась без «👥 Команда»,
+    и кнопка пропадала до следующего /start (reply-клавиатура живёт до замены).
     """
     role = ctx.effective_role or default_role
-    await message.answer(text, reply_markup=build_role_menu(role))
+    await message.answer(
+        text, reply_markup=build_role_menu(role, account_owner=permissions.is_account_owner(ctx))
+    )
 
 
 async def _thread_id_from_state(state: FSMContext) -> uuid.UUID | None:
@@ -144,9 +149,10 @@ async def client_chat_exit(
         if manager_tid is not None:
             await BotNotifier(bot).send_message(manager_tid, closed_note)
     await state.clear()
-    await _exit_chat_to_home(
-        message, effective_context, texts.chat_closed_text(), default_role=UserRole.client
-    )
+    # Вышли, не написав ни слова, — треда нет, закрывать нечего: «звернення
+    # закрито» было бы неправдой.
+    exit_text = texts.chat_closed_text() if thread is not None else texts.chat_exited_text()
+    await _exit_chat_to_home(message, effective_context, exit_text, default_role=UserRole.client)
 
 
 @router.message(StateFilter(None), F.text == kb.CLIENT_CHAT_EXIT)
@@ -168,7 +174,12 @@ async def client_chat_exit_stale(
     )
 
 
-@router.message(SupportState.client_chatting, F.text)
+# Кнопки нижней панели релей НЕ ловит: тап «⚙️ Налаштування» внутри чата уходил
+# менеджеру как реплика, а клиент получал ack вместо настроек. Стейт снимает общий
+# `menu_escape`-роутер (подключён первым), но одного его мало: `raw_state` для
+# фильтров резолвится middleware один раз на апдейт, поэтому без исключения ниже
+# релей всё равно подхватил бы кнопку. См. app/bot/handlers/menu_escape.py.
+@router.message(SupportState.client_chatting, F.text, ~F.text.in_(CLIENT_MENU_TEXTS))
 async def client_chat_message(
     message: Message,
     effective_context: EffectiveContext,
@@ -176,9 +187,8 @@ async def client_chat_message(
     state: FSMContext,
     bot: Bot,
 ) -> None:
-    thread_id = await _thread_id_from_state(state)
-    thread = await SupportRepository(db_session).get_with_messages(thread_id) if thread_id else None
-    if thread is None or thread.status is SupportThreadStatus.closed:
+    client = _client_user(effective_context)
+    if client is None or client.status is not UserStatus.active:
         await state.clear()
         await _exit_chat_to_home(
             message,
@@ -188,12 +198,75 @@ async def client_chat_message(
         )
         return
 
+    thread_id = await _thread_id_from_state(state)
+    notify_managers = False
+    if thread_id is None:
+        # Первое сообщение в чате — только теперь заводим тред, вместе с текстом.
+        # На тапе «Почати чат» треда уже не создаём (см. `client_start`), поэтому
+        # менеджер получает пинг с содержимым, а не пустую карточку.
+        try:
+            result = await support.open_or_get_thread(
+                db_session,
+                client=client,
+                account_id=effective_context.account.id if effective_context.account else None,
+            )
+        except ClientServiceError as exc:
+            await state.clear()
+            await _exit_chat_to_home(
+                message, effective_context, str(exc), default_role=UserRole.client
+            )
+            return
+        notify_managers = result.notify_managers
+        thread_id = result.thread.id
+
+    # Перечитываем с joinedload: у свежесозданного треда связи (client,
+    # assigned_manager) не загружены, а ленивый доступ в async-сессии упал бы.
+    thread = await SupportRepository(db_session).get_with_messages(thread_id)
+    if (
+        thread is None
+        or thread.status is SupportThreadStatus.closed
+        or (
+            effective_context.account is not None
+            and thread.account_id != effective_context.account.id
+        )
+    ):
+        await state.clear()
+        await _exit_chat_to_home(
+            message,
+            effective_context,
+            texts.thread_unavailable_text(),
+            default_role=UserRole.client,
+        )
+        return
+
+    # Тексты/получатели — до commit, пока ORM-атрибуты живые («commit, потім notify»).
     manager_tid = thread.assigned_manager.telegram_id if thread.assigned_manager else None
+    client_label = _client_label(thread.client)
     relay_text = notifications.support_message_for_manager_text(thread.client, message.text)
-    await support.post_message(db_session, thread=thread, sender_role="client", text=message.text)
+    await support.post_message(
+        db_session,
+        thread=thread,
+        sender_role="client",
+        sender_user_id=(
+            effective_context.effective_user.id if effective_context.effective_user else None
+        ),
+        text=message.text,
+    )
     await db_session.commit()
+    # id треда — в стейт только после успешного commit: иначе упавший `post_message`
+    # откатил бы создание, а в FSM остался бы id несуществующего треда — следующее
+    # сообщение выкинуло бы клиента из чата через `thread_unavailable`, потеряв текст.
+    # До commit'а стейт хранит "" → повтор просто создаст тред заново.
+    await state.update_data(support_thread_id=str(thread_id))
+    if notify_managers:
+        await notifications.notify_support_queued_to_managers(
+            db_session, BotNotifier(bot), client_label=client_label
+        )
     if manager_tid is not None:
         await BotNotifier(bot).send_message(manager_tid, relay_text)
+        # Подтверждаем клиенту каждое сообщение: без ack чат выглядит «одноразовым»
+        # (после отправки ничего не происходит) — это и рождало жалобу «застряли».
+        await message.answer(texts.client_message_ack_text())
     else:
         await message.answer(texts.queued_ack_text())
 
@@ -209,7 +282,13 @@ async def client_open(
     if client is None:
         raise SkipHandler()
     await state.clear()
-    existing = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    existing = (
+        await SupportRepository(db_session).get_active_thread_for_client(client.id)
+        if effective_context.account is None
+        else await SupportRepository(db_session).get_active_thread_for_account(
+            effective_context.account.id
+        )
+    )
     if existing is not None:
         await state.set_state(SupportState.client_chatting)
         await state.update_data(support_thread_id=str(existing.id))
@@ -233,7 +312,13 @@ async def client_open_home(
         await callback.answer(_STALE, show_alert=True)
         return
     await state.clear()
-    existing = await SupportRepository(db_session).get_active_thread_for_client(client.id)
+    existing = (
+        await SupportRepository(db_session).get_active_thread_for_client(client.id)
+        if effective_context.account is None
+        else await SupportRepository(db_session).get_active_thread_for_account(
+            effective_context.account.id
+        )
+    )
     if existing is not None:
         await callback.message.edit_text(
             texts.client_resume_text(),
@@ -256,31 +341,30 @@ async def client_open_home(
 async def client_start(
     callback: CallbackQuery,
     effective_context: EffectiveContext,
-    db_session: AsyncSession,
     state: FSMContext,
-    bot: Bot,
 ) -> None:
     client = _client_user(effective_context)
     if client is None or callback.message is None:
         await callback.answer(_STALE, show_alert=True)
         return
     try:
-        result = await support.open_or_get_thread(db_session, client=client)
+        # Доступ проверяем на входе, а не после того, как клиент напишет: иначе
+        # заблокированного/неподтверждённого зовут в чат и отшивают уже по тексту.
+        support.ensure_can_open(client)
     except ClientServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    client_label = _client_label(client)
-    await db_session.commit()
-    if result.notify_managers:
-        await notifications.notify_support_queued_to_managers(
-            db_session, BotNotifier(bot), client_label=client_label
-        )
+    # Тред НЕ создаём здесь: раньше тап «Почати чат» сразу писал пустой
+    # SupportThread, пинговал менеджеров и — если дежурного нет — отвечал
+    # «Повідомлення збережено», хотя клиент ещё ничего не написал. В инбоксе
+    # висели пустышки, а клиент был уверен, что обращение уже ушло. Теперь тап
+    # только открывает чат; тред рождается с первым сообщением
+    # (см. `client_chat_message`).
     await state.set_state(SupportState.client_chatting)
-    await state.update_data(support_thread_id=str(result.thread.id))
-    prompt = (
-        "Напишіть повідомлення — воно піде менеджеру." if result.routed else texts.queued_ack_text()
+    await state.update_data(support_thread_id="")
+    await callback.message.answer(
+        texts.chat_started_prompt_text(), reply_markup=kb.build_client_chat_kb()
     )
-    await callback.message.answer(prompt, reply_markup=kb.build_client_chat_kb())
     await callback.answer()
 
 
@@ -326,7 +410,7 @@ async def staff_reply_exit(
     )
 
 
-@router.message(SupportState.manager_replying, F.text)
+@router.message(SupportState.manager_replying, F.text, ~F.text.in_(MENU_TEXTS))
 async def staff_reply_message(
     message: Message,
     effective_context: EffectiveContext,
@@ -372,6 +456,9 @@ async def staff_reply_message(
         db_session,
         thread=thread,
         sender_role=_staff_sender_role(effective_context),
+        sender_user_id=(
+            effective_context.effective_user.id if effective_context.effective_user else None
+        ),
         text=message.text,
     )
     await db_session.commit()
@@ -548,7 +635,7 @@ async def cb_search(
     await callback.answer()
 
 
-@router.message(SupportState.log_search, F.text)
+@router.message(SupportState.log_search, F.text, ~F.text.in_(MENU_TEXTS))
 async def staff_search_input(
     message: Message,
     effective_context: EffectiveContext,

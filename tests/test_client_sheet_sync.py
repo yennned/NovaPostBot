@@ -3,14 +3,23 @@
 Главный инвариант: `stock_sheet_key` в PG продвигается на новое имя ТОЛЬКО когда
 переименование вкладки в «Складі» подтверждено. Если `update_title` упал — ключ
 остаётся старым, иначе снапшот искал бы лист с именем, которого нет → пустой склад.
+
+Ключ — свойство АККАУНТА: копия на `users` снесена, синк account-scoped.
 """
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
-from app.services.client_sheet_sync import sync_client_sheets
+from app.db.repositories import ClientAccountRepository, UserRepository
+from app.services.client_sheet_sync import (
+    _VIEW_HEADERS,
+    ViewRow,
+    _view_data_row,
+    sync_client_sheets,
+)
 from app.sheets.client import SheetsClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,16 +68,23 @@ class _FakeGc:
         raise AssertionError("gc.create() не должен вызываться в рантайм-синке")
 
 
-async def _active_client(session: AsyncSession, telegram_id: int) -> object:
+async def _active_account(session: AsyncSession, telegram_id: int):
+    """Клиент + его аккаунт, вкладка которого сейчас называется «old_key».
+
+    `account.name` («Нове Імʼя») — цель синка, `stock_sheet_key` («old_key») —
+    текущее имя вкладки. Их расхождение и запускает переименование.
+    """
     client = await UserRepository(session).create(
         telegram_id=telegram_id,
         full_name="Нове Імʼя",
         role=UserRole.client,
         status=UserStatus.active,
     )
-    client.stock_sheet_key = "old_key"
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    account = membership.account
+    account.stock_sheet_key = "old_key"
     await session.flush()
-    return client
+    return client, account
 
 
 def _sheets_settings():
@@ -86,39 +102,156 @@ def _sheets_settings():
 async def test_stock_sheet_key_advances_on_successful_rename(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = await _active_client(db_session, telegram_id=900)
+    client, account = await _active_account(db_session, telegram_id=900)
     monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=False))
 
     await sync_client_sheets(
-        db_session, client=client, reader=_FakeReader(), settings=_sheets_settings()
+        db_session,
+        client=client,
+        account=account,
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
     )
 
-    assert client.stock_sheet_key == "Нове Імʼя"
+    assert account.stock_sheet_key == "Нове Імʼя"
 
 
 async def test_stock_sheet_key_unchanged_when_rename_fails(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = await _active_client(db_session, telegram_id=901)
+    client, account = await _active_account(db_session, telegram_id=901)
     monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=True))
 
     await sync_client_sheets(
-        db_session, client=client, reader=_FakeReader(), settings=_sheets_settings()
+        db_session,
+        client=client,
+        account=account,
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
     )
 
     # Переименование упало → ключ остаётся прежним, чтобы PG указывал на реальный лист.
-    assert client.stock_sheet_key == "old_key"
+    assert account.stock_sheet_key == "old_key"
+
+
+async def test_sync_renames_from_account_key_only(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Источник переименования — ТОЛЬКО `account.stock_sheet_key`. Раньше сюда мог
+    # попасть user-scoped `previous_sheet_key` (ключ работника), и правка ПІБ
+    # работником уводила вкладку общего склада в его имя. Сам параметр теперь
+    # снесён, но инвариант «источник = ключ аккаунта» держим тестом.
+    import app.services.client_sheet_sync as css
+
+    client, account = await _active_account(db_session, telegram_id=902)
+    account.name = "Магазин"
+    account.stock_sheet_key = "Магазин"
+    await db_session.flush()
+    seen: dict = {}
+
+    def fake_rename(gc, settings, source, target):
+        seen["source"] = source
+        seen["target"] = target
+        return True
+
+    monkeypatch.setattr(css, "_rename_main_worksheets", fake_rename)
+    monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=False))
+
+    await sync_client_sheets(
+        db_session,
+        client=client,
+        account=account,
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
+    )
+
+    assert seen["source"] == "Магазин"  # ключ аккаунта, а не чей-то user-scoped
+    assert seen["target"] == "Магазин"
+    assert account.stock_sheet_key == "Магазин"
+
+
+async def test_account_sync_whitespace_name_falls_back_to_id(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `account.name or str(account.id)` пропускал имя из пробелов в имя вкладки.
+    import app.services.client_sheet_sync as css
+
+    client, account = await _active_account(db_session, telegram_id=903)
+    account.name = "   "
+    account.stock_sheet_key = None
+    await db_session.flush()
+    seen: dict = {}
+
+    monkeypatch.setattr(
+        css,
+        "_rename_main_worksheets",
+        lambda gc, s, source, target: seen.update(target=target) or True,
+    )
+    monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=False))
+
+    await sync_client_sheets(
+        db_session,
+        client=client,
+        account=account,
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
+    )
+
+    assert seen["target"] == str(account.id)
 
 
 async def test_view_book_not_created_at_runtime(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = await _active_client(db_session, telegram_id=902)
+    client, account = await _active_account(db_session, telegram_id=904)
     monkeypatch.setattr(SheetsClient, "_authorize", lambda self: _FakeGc(fail_rename=False))
 
     # _FakeGc.create() ассертит, если рантайм попытается создать книгу.
     await sync_client_sheets(
-        db_session, client=client, reader=_FakeReader(), settings=_sheets_settings()
+        db_session,
+        client=client,
+        account=account,
+        reader=_FakeReader(),
+        settings=_sheets_settings(),
     )
 
-    assert client.stock_view_book_id is None
+    assert account.stock_view_book_id is None
+
+
+def _view_row(**over) -> ViewRow:
+    base = {
+        "sku": "SKU-1",
+        "name": "Кава",
+        "category": "Напої",
+        "price": Decimal("125.50"),
+        "stock": 7,
+        "reserved": 2,
+        "available": 5,
+    }
+    return ViewRow(**{**base, **over})
+
+
+def test_view_headers_match_sklad_order():
+    # Порядок = как в основной книге «Склад»: D=Кількість, E=Ціна, F=Резерв, G=Доступно.
+    # От этого зависит переиспользование форматирования/pivot провижна (build_view_summary,
+    # style_stock_worksheet зашиты под этот порядок).
+    assert _VIEW_HEADERS == [
+        "Артикул",
+        "Назва",
+        "Категорія",
+        "Кількість",
+        "Ціна",
+        "Резерв",
+        "Доступно",
+    ]
+
+
+def test_view_data_row_order_and_types():
+    # A–F: Артикул, Назва, Категорія, Кількість, Ціна, Резерв. «Доступно» (G) — формула.
+    assert _view_data_row(_view_row()) == ["SKU-1", "Кава", "Напої", 7, 125.5, 2]
+    # Цена — число (float), не строка: comma-локаль книги иначе исказит "125.50".
+    assert isinstance(_view_data_row(_view_row())[4], float)
+
+
+def test_view_data_row_handles_missing_price_and_category():
+    assert _view_data_row(_view_row(price=None, category=None)) == ["SKU-1", "Кава", "", 7, "", 2]

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import html
+import re
 from decimal import Decimal
 
 from app.bot.keyboards.ttn import SIZE_PRESETS
+from app.bot.texts.common import invalid_phone_text
 from app.services.inventory import InventoryItem, InventoryPage
 
 
@@ -123,8 +125,15 @@ def recipient_name_prompt(kind: str) -> str:
     return "Введіть ПІБ отримувача (напр. Іваненко Іван Іванович):"
 
 
-def recipient_name_invalid() -> str:
-    return "❌ Порожнє значення. Введіть ПІБ або назву організації."
+def recipient_name_invalid(kind: str = "person") -> str:
+    if kind == "organization":
+        return "❌ Порожнє значення. Введіть назву організації."
+    return "❌ ПІБ має містити тільки слова без цифр (напр. Іваненко Іван Іванович)."
+
+
+def recipient_person_name_valid(value: str) -> bool:
+    """ФИО: буквы, пробелы, дефис и апостроф; цифры запрещены."""
+    return bool(re.fullmatch(r"[^\W\d_]+(?:[ '\u2019-]+[^\W\d_]+)*", value.strip(), re.UNICODE))
 
 
 def edrpou_prompt() -> str:
@@ -140,7 +149,7 @@ def phone_prompt() -> str:
 
 
 def phone_invalid() -> str:
-    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+    return invalid_phone_text()
 
 
 def city_prompt() -> str:
@@ -206,6 +215,14 @@ def payment_edit_text() -> str:
     return "💳 Спосіб оплати:"
 
 
+def cod_amount_choice_text() -> str:
+    return "💵 Оберіть суму накладеного платежу:"
+
+
+def cod_amount_prompt() -> str:
+    return "Введіть суму накладеного платежу в гривнях, наприклад 1200:"
+
+
 def success_text(ttn_number: str | None) -> str:
     num = f"<b>{html.escape(ttn_number)}</b>" if ttn_number else "—"
     return (
@@ -228,6 +245,7 @@ def card_text(data: dict, price: dict) -> str:
     lines = [
         "📋 <b>Перевірте ТТН перед відправкою</b>",
         "",
+        f"🏢 ФОП-відправник: {html.escape(data.get('sender_profile_name', '—'))}",
         f"📦 Товари: {items}",
         f"👤 Отримувач: {html.escape(data.get('recipient_name', ''))} ({kind})",
     ]
@@ -246,13 +264,14 @@ def card_text(data: dict, price: dict) -> str:
         ]
     )
     if data.get("cod_amount"):
-        lines.append(f"   Накладений платіж: {data['cod_amount']} ₴")
+        source = "сума з кошика" if data.get("cod_amount_source") == "cart" else "власна сума"
+        lines.append(f"   Накладений платіж: {data['cod_amount']} ₴ ({source})")
     lines.append(f"🧾 Платник доставки: {payer}")
     lines.append("─────────────")
     if price.get("unavailable"):
         lines.append("💵 Розрахунок недоступний — вартість підтвердить менеджер")
     else:
-        lines.append(f"💵 Вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
+        lines.append(f"💵 Орієнтовна вартість доставки (НП): <b>{price.get('cost', '—')}</b> ₴")
         if price.get("redelivery"):
             # Орієнтовно: оцінка йде через RedeliveryCalculate, фактичну комісію
             # «Контроль оплати» (NovaPay) підтверджує менеджер при відправленні.

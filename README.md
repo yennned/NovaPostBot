@@ -1,7 +1,7 @@
 # NovaPostBot — Telegram-бот фулфілменту Нової Пошти
 
 [![CI](https://github.com/yennned/NovaPostBot/actions/workflows/ci.yml/badge.svg)](https://github.com/yennned/NovaPostBot/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.12-blue)
+![Python](https://img.shields.io/badge/python-3.14%20runtime%20%7C%203.12%2B-blue)
 ![License](https://img.shields.io/badge/license-proprietary-lightgrey)
 
 Личный кабинет фулфілменту в Telegram: клиенты создают ТТН через API Нової Пошти
@@ -52,7 +52,7 @@ per-flag в `users.permissions`.
 
 ## Стек
 
-Python 3.12 · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
+Python 3.14 (рантайм; код совместим с 3.12+) · aiogram 3 · PostgreSQL (SQLAlchemy async + Alembic) · Redis ·
 Google Sheets API (service-account) · Nova Poshta API · Docker. Часовой пояс —
 Europe/Kyiv. Язык бота — украинский (uk).
 
@@ -89,11 +89,13 @@ docker compose up -d --build     # migrate (alembic upgrade head) → bot + work
 docker compose logs -f bot
 ```
 
-> **Локально — отдельный тест-бот.** В `.env` укажи `BOT_TOKEN` **тест-бота** (создать
-> у [@BotFather](https://t.me/BotFather)), а не боевого: два процесса на одном токене
-> дают `409 Conflict` и задевают реальных клиентов. Цикл обкатки: `git checkout feat/x`
-> → `docker compose up` → тыкаешь тест-бота → `/version` покажет `Середовище: local` →
-> PR → merge. Подробнее — [CONTRIBUTING.md](CONTRIBUTING.md#среды-и-процесс).
+> **У проекта один бот.** Его токен живёт только в `.env` на боевом сервере, локально
+> `BOT_TOKEN` остаётся **пустым** — тогда контейнер бота не поллит (гард в `app/main.py`).
+> Вписать локально боевой токен нельзя: два процесса на одном токене дают `409 Conflict`
+> и сообщения реальных клиентов начнёт перехватывать твоя машина. Локальный стек нужен
+> для миграций, воркера и ручных скриптов; поведение бота проверяется тестами
+> (`pytest`), затем PR → merge → авто-деплой. Подробнее —
+> [CONTRIBUTING.md](CONTRIBUTING.md#среды-и-процесс).
 
 Генерация `FERNET_KEY`:
 ```bash

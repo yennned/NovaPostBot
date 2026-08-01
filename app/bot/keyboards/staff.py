@@ -58,6 +58,17 @@ def build_card_kb(card: StaffCard) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    # Блокировка — обратимая альтернатива удалению. `block_manager`/`unblock_manager`
+    # в сервисе есть с самого начала, но кнопок не было: из UI они были недостижимы,
+    # и единственным способом «убрать» менеджера оставалось удаление.
+    if card.status is UserStatus.blocked:
+        rows.append(
+            [InlineKeyboardButton(text="✅ Розблокувати", callback_data=f"stf:unblock:{card.id}")]
+        )
+    else:
+        rows.append(
+            [InlineKeyboardButton(text="🚫 Заблокувати", callback_data=f"stf:block:{card.id}")]
+        )
     rows.append(
         [InlineKeyboardButton(text="🗑 Видалити менеджера", callback_data=f"stf:delete:{card.id}")]
     )

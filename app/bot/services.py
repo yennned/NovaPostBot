@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+import structlog
+
 from app.bot.types import DevSession, EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories import AuditRepository, UserRepository
 from app.utils.phone import normalize_phone
+
+logger = structlog.get_logger(__name__)
 
 
 class UserStore(Protocol):
@@ -100,7 +104,16 @@ class StartService:
     async def register_contact(self, telegram_id: int, phone: str, full_name: str) -> StartResult:
         # Храним телефон в формате НП (380XXXXXXXXX): так найм менеджера по телефону
         # («Персонал») сверяет нормализованный ввод с колонкой точным равенством.
-        phone = normalize_phone(phone) or phone
+        normalized = normalize_phone(phone)
+        if normalized is None:
+            # Не украинский мобильный (напр. иностранная SIM). Вход не блокируем —
+            # контакт пришёл от Telegram, он настоящий; но точное сравнение при
+            # адопции по телефону такому номеру не сработает, поэтому логируем.
+            # `telegram_id` и сам номер не логируем: это прямые идентификаторы, а
+            # ветка срабатывает на каждом некорректном контакте. Длины хватает, чтобы
+            # отличить иностранный номер от мусора.
+            logger.warning("contact_phone_not_normalized", phone_len=len(phone or ""))
+        phone = normalized or phone
         existing = await self.user_store.get_by_telegram_id(telegram_id)
         if existing is not None:
             if existing.phone != phone:
@@ -119,6 +132,36 @@ class StartService:
         # (telegram_id пуст) — проставляем telegram_id, роль/статус сохраняются.
         by_phone = await self.user_store.get_by_phone(phone)
         if by_phone is not None:
+            # Запрошений працівник активується лише після збігу номера з
+            # invitation. Заблокований працівник не може повторно прив'язати
+            # Telegram через /start.
+            repo = getattr(self.user_store, "repo", None)
+            activated = False
+            if repo is not None:
+                from app.services.account_team import activate_employee_contact
+
+                activated = await activate_employee_contact(
+                    repo.session,
+                    user=by_phone,
+                    telegram_id=telegram_id,
+                    full_name=full_name,
+                )
+            if activated:
+                await self.user_store.save(by_phone)
+                return StartResult(user=by_phone, created=False)
+            if repo is not None:
+                from app.db.models.enums import MembershipRole, MembershipStatus
+                from app.db.repositories import ClientAccountRepository
+
+                membership = await ClientAccountRepository(repo.session).get_membership(
+                    user_id=by_phone.id
+                )
+                if (
+                    membership is not None
+                    and membership.role is MembershipRole.employee
+                    and membership.status is MembershipStatus.blocked
+                ):
+                    return StartResult(user=by_phone, created=False)
             by_phone.telegram_id = telegram_id
             if full_name:
                 by_phone.full_name = full_name

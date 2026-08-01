@@ -14,6 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.keyboards.reports import build_period_kb
 from app.bot.states import ReportsState
 from app.bot.texts import reports as texts
@@ -143,7 +144,12 @@ async def cb_pick(
     await callback.answer()
 
 
-@router.message(ReportsState.waiting_for_date, F.text, ~F.text.startswith("/"))
+@router.message(
+    ReportsState.waiting_for_date,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_date(
     message: Message,
     effective_context: EffectiveContext,

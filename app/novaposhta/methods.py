@@ -54,7 +54,13 @@ def _decimal(value: object) -> Decimal | None:
 
 
 async def get_cities(
-    client: NovaPoshtaClient, *, api_key: str, query: str, limit: int = 20
+    client: NovaPoshtaClient,
+    *,
+    api_key: str,
+    query: str,
+    limit: int = 20,
+    attempts: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> list[City]:
     """`Address.getCities` — поиск города по подстроке."""
     rows = await client.call(
@@ -62,6 +68,8 @@ async def get_cities(
         model="Address",
         method="getCities",
         props={"FindByString": query, "Limit": str(limit)},
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
     )
     return [
         City(ref=row["Ref"], name=row.get("Description", ""), area=row.get("AreaDescription"))
@@ -77,12 +85,21 @@ async def get_warehouses(
     city_ref: str,
     query: str | None = None,
     limit: int = 50,
+    attempts: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> list[Warehouse]:
     """`Address.getWarehouses` — відділення в городе (опц. поиск по номеру/строке)."""
     props: dict[str, str] = {"CityRef": city_ref, "Limit": str(limit)}
     if query:
         props["FindByString"] = query
-    rows = await client.call(api_key=api_key, model="Address", method="getWarehouses", props=props)
+    rows = await client.call(
+        api_key=api_key,
+        model="Address",
+        method="getWarehouses",
+        props=props,
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+    )
     return [
         Warehouse(
             ref=row["Ref"],

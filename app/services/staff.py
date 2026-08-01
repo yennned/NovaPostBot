@@ -15,9 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import ClientAccountStatus, MembershipRole, UserRole, UserStatus
 from app.db.models.user import User
-from app.db.repositories import AuditRepository, SupportRepository, UserRepository
+from app.db.repositories import (
+    AuditRepository,
+    ClientAccountRepository,
+    SupportRepository,
+    UserRepository,
+)
 from app.services.exceptions import (
     AlreadyInStatus,
     InvalidPermissionFlag,
@@ -87,7 +92,7 @@ def _require_owner(actor: User, settings: Settings | None) -> None:
 
 
 def _permission_states(user: User) -> list[StaffPermissionState]:
-    perms = user.permissions or {}
+    perms = user.permissions
     return [
         StaffPermissionState(
             key=flag.key,
@@ -178,7 +183,9 @@ async def add_manager(
     """Назначить менеджера по Telegram-ID или телефону.
 
     Существующего владельца/уже-менеджера отклоняем; активного клиента нельзя
-    «переназначить» в менеджеры. Если по телефону пользователь ещё не найден —
+    «переназначить» в менеджеры; работника клиентского акаунта — тоже нельзя
+    (менеджер платформы и люди со стороны клиента не пересекаются). Если по
+    телефону пользователь ещё не найден —
     заводим предзаготовленную запись менеджера (`telegram_id` пуст): при первом
     входе по контакту `register_contact` подхватит её по номеру. Все флаги прав
     включены по умолчанию.
@@ -200,6 +207,15 @@ async def add_manager(
             raise StaffPromotionForbidden("не можна змінити роль власника")
         if existing.status is UserStatus.active:
             raise StaffPromotionForbidden("активного клієнта не можна призначити менеджером")
+        # Зеркало запрета в `account_team.invite_employee` («номер належить
+        # внутрішньому працівнику платформи»): клиент/его работники и менеджер
+        # платформы — непересекающиеся множества. Приглашённый работник заведён
+        # как `role=client, status=pending`, то есть мимо проверок выше проходит.
+        # Владельца акаунта (`account_owner`) НЕ отбиваем: членство автосоздаётся
+        # каждому клиенту, а найм `pending`-клиента и есть основной флоу найма.
+        membership = await ClientAccountRepository(session).get_membership(user_id=existing.id)
+        if membership is not None and membership.role is MembershipRole.employee:
+            raise StaffPromotionForbidden("номер належить працівнику клієнта")
         await users.update_role(existing, UserRole.manager)
         await users.update_status(existing, UserStatus.active)
         await users.set_permissions(existing, {})
@@ -239,7 +255,7 @@ async def set_permission(
     users = UserRepository(session)
     manager = await _get_manager(users, manager_id)
     _require_can_manage(actor, manager, settings)
-    perms = dict(manager.permissions or {})
+    perms = dict(manager.permissions)
     before = bool(perms.get(flag, True))
     perms[flag] = enabled
     await users.set_permissions(manager, perms)
@@ -318,22 +334,52 @@ async def unblock_manager(
 async def delete_manager(
     session: AsyncSession, *, actor: User, manager_id: uuid.UUID, settings: Settings | None = None
 ) -> None:
-    """Удалить менеджера из персонала: снять роль, закрыть доступ, вернуть треды в очередь."""
+    """Физически удалить менеджера: строка `users` исчезает, номер и Telegram ID свободны.
+
+    Раньше это был демоушен `manager → client` + `blocked` + автосоздание клиентского
+    аккаунта. Тот аккаунт нужен был только потому, что человек оставался в базе
+    «клиентом», которым никогда не был: номер занят навсегда, повторный найм
+    невозможен, а `invite_employee` вынужден проверять роль платформы раньше
+    членства — иначе демоутнутый менеджер получал бы лживое «номер пов'язаний з
+    іншим акаунтом». Физическое удаление снимает всю конструкцию разом.
+
+    Данные при этом не теряются: `e5f6a7b8c1d3` перевела `client_id` в ТТН/движениях
+    склада/тредах на `SET NULL`, поэтому история остаётся, а ссылка на человека
+    обнуляется. Ключ НП, наоборот, обязан умереть — `sender_profiles` уходит
+    каскадом вместе со строкой.
+
+    Повторный найм того же номера заведёт **нового** пользователя с новым UUID: ни
+    старых прав, ни дежурства, ни истории доступа он не унаследует.
+    """
     _require_owner(actor, settings)
     users = UserRepository(session)
     manager = await _get_manager(users, manager_id)
     _require_can_manage(actor, manager, settings)
     before_status = manager.status
-    await users.set_duty(manager, on_duty=False, duty_date=manager.duty_date, duty_since=None)
+    # Дежурство снимать не нужно — оно живёт колонками в самой строке `users`.
+    # А вот открытые обращения обязаны вернуться в очередь до удаления: FK
+    # `assigned_manager_id` обнулился бы, но тред остался бы в статусе `open` без
+    # дежурного, то есть невидимым для всех.
     await SupportRepository(session).unassign_open_for_manager(manager.id)
-    if manager.status is not UserStatus.blocked:
-        await users.update_status(manager, UserStatus.blocked)
-    await users.update_role(manager, UserRole.client)
-    await users.set_permissions(manager, {})
-    await AuditRepository(session).log(
+
+    # Демоутнутый когда-то менеджер мог обзавестись клиентским аккаунтом. Членство
+    # уйдёт каскадом вместе со строкой, а вот сам аккаунт — нет: FK из `users` в
+    # `client_accounts` не существует, связь только через членство. Аккаунт остался
+    # бы живой пустышкой без владельца — гасим, как это делает `_take_over`.
+    membership = await ClientAccountRepository(session).get_membership(user_id=manager.id)
+    if membership is not None and membership.role is MembershipRole.account_owner:
+        membership.account.status = ClientAccountStatus.archived
+
+    audit = AuditRepository(session)
+    await audit.log(
         "manager_deleted",
         user_id=actor.id,
         affected_entity=f"user:{manager.id}",
-        before={"role": UserRole.manager, "status": before_status},
-        after={"role": UserRole.client, "status": UserStatus.blocked},
+        before={"role": UserRole.manager.value, "status": before_status.value},
+        after={"role": None, "status": "deleted"},
     )
+    # До `session.delete`: после него строк с этим `user_id` уже не найти —
+    # FK обнулится, и payload'ы с ПИБ/телефоном осиротеют неочищенными.
+    await audit.scrub_user_pii(manager.id)
+    await session.delete(manager)
+    await session.flush()

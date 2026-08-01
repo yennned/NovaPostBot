@@ -14,8 +14,13 @@ from uuid import uuid4
 from app.bot.handlers import ttn as h
 from app.bot.states import CreateTtnState
 from app.bot.texts import ttn as ttn_texts
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import SenderProfileRepository, UserRepository
+from app.db.repositories import (
+    ClientAccountRepository,
+    SenderProfileRepository,
+    UserRepository,
+)
 from app.novaposhta.schemas import City, PriceQuote, Warehouse
 from app.services.inventory import InventoryItem, InventoryPage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,9 +47,24 @@ class FakeState:
         return self._data
 
 
+class FakeBot:
+    """Минимальный бот для индикатора поиска и проверки старых экранов."""
+
+    def __init__(self) -> None:
+        self.actions: list[dict] = []
+        self.edits: list[dict] = []
+
+    async def send_chat_action(self, **kw) -> None:
+        self.actions.append(kw)
+
+    async def edit_message_text(self, text, reply_markup=None, **kw) -> None:
+        self.edits.append({"text": text, "reply_markup": reply_markup})
+
+
 class FakeMessage:
     def __init__(self, text: str | None = None) -> None:
         self.text = text
+        self.chat = SimpleNamespace(id=1)
         self.answers: list[dict] = []
         self.edits: list[dict] = []
 
@@ -65,11 +85,17 @@ class FakeCallback:
         self.acks.append({"text": text, "show_alert": show_alert})
 
 
-def _item(sku: str, name: str, available: int, price: str | None = "100") -> InventoryItem:
+def _item(
+    sku: str,
+    name: str,
+    available: int,
+    price: str | None = "100",
+    category: str | None = None,
+) -> InventoryItem:
     return InventoryItem(
         sku=sku,
         name=name,
-        category=None,
+        category=category,
         stock=available,
         reserved=0,
         available=available,
@@ -91,15 +117,98 @@ def _page(
 
 def _patch_inventory(monkeypatch, page: InventoryPage) -> None:
     async def fake_list_inventory(
-        session, *, client, query=None, category=None, limit=8, offset=0, reader=None
+        session,
+        *,
+        client,
+        query=None,
+        category=None,
+        limit=8,
+        offset=0,
+        reader=None,
+        **kwargs,
     ):
         return page
 
+    async def fake_find_inventory_item(session, *, client, sku, **kwargs):
+        return next((item for item in page.items if item.sku == sku), None)
+
     monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+    monkeypatch.setattr(h, "find_inventory_item", fake_find_inventory_item)
+
+
+def _patch_inventory_from_items(monkeypatch, items: list[InventoryItem]) -> None:
+    """Фейк склада, ЧЕСТНО применяющий `query`/`category`/`offset`.
+
+    `_patch_inventory` отдаёт одну и ту же страницу на любые аргументы, поэтому
+    структурно не способен поймать рассинхрон «клавиатуру нарисовали с фильтром, а
+    тап резолвили без него» — тесты `cb_pick` были зелёными на сломанном коде.
+    Фильтрация повторяет `app.services.inventory.list_inventory`; сам сервис здесь
+    не переиспользуем, потому что он тянет `reserved` из БД, а эти тесты чистые.
+    """
+
+    async def fake_list_inventory(
+        session,
+        *,
+        client,
+        query=None,
+        category=None,
+        limit=h.TTN_PAGE_SIZE,
+        offset=0,
+        reader=None,
+        **kwargs,
+    ):
+        rows = list(items)
+        categories = sorted({item.category for item in rows if item.category})
+        if query:
+            needle = query.strip().lower()
+            rows = [
+                item
+                for item in rows
+                if needle in item.sku.lower()
+                or needle in item.name.lower()
+                or needle in (item.category or "").lower()
+            ]
+        if category:
+            rows = [item for item in rows if (item.category or "").lower() == category.lower()]
+        return InventoryPage(
+            items=rows[offset : offset + limit],
+            total=len(rows),
+            limit=limit,
+            offset=offset,
+            categories=categories,
+        )
+
+    async def fake_find_inventory_item(session, *, client, sku, **kwargs):
+        return next((item for item in items if item.sku == sku), None)
+
+    monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+    monkeypatch.setattr(h, "find_inventory_item", fake_find_inventory_item)
 
 
 def _ctx(client):
-    return SimpleNamespace(effective_user=client, actor_user=client)
+    # Настоящий EffectiveContext, а не SimpleNamespace: фейк не имел `account`/
+    # `account_context`, и хендлеры держались только на `getattr(..., None)`.
+    # Пользователь остаётся фейковым — здесь важна форма контекста, не User.
+    return EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+    )
+
+
+def _ctx_with_account(client, account_id):
+    """Контекст работника: `account_context` заполнен, как это делает мидлварь."""
+    account = SimpleNamespace(id=account_id)
+    return EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+        account_context=ClientAccountContext(
+            user=client, account=account, membership=SimpleNamespace(id="mid")
+        ),
+    )
 
 
 _CLIENT = SimpleNamespace(id="cid", telegram_id=900)
@@ -194,6 +303,60 @@ async def test_entry_ok_shows_picker(db_session: AsyncSession, monkeypatch):
     assert "Створення ТТН" in msg.answers[-1]["text"]
 
 
+def _capture_inventory(monkeypatch, page: InventoryPage) -> dict:
+    """Как `_patch_inventory`, но запоминает kwargs — иначе проброс не проверить."""
+    seen: dict = {}
+
+    async def fake_list_inventory(session, *, client, **kwargs):
+        seen.update(kwargs)
+        seen["client"] = client
+        return page
+
+    monkeypatch.setattr(h, "list_inventory", fake_list_inventory)
+    return seen
+
+
+async def _account_ctx(session, client):
+    """Контекст с РЕАЛЬНЫМ аккаунтом: `_require_account_actor` сверяет членство в БД."""
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    account = membership.account
+    return SimpleNamespace(
+        effective_user=client, actor_user=client, account=account, membership=membership
+    ), account
+
+
+async def test_entry_passes_account_to_inventory(db_session: AsyncSession, monkeypatch):
+    # Регрессия: `_resolve_sender_and_begin` передавал в `_show_picker` только
+    # `account_id`, но не `account`. `list_inventory` берёт ключ листа от
+    # `account or client`, поэтому работник видел свой склад вместо складу
+    # магазина. Пара (account_id, account) обязана ехать вместе.
+    client = await _active_client(db_session, 930)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    await _dispatchable_profile(db_session, client, "ФОП", is_default=True)
+    ctx, account = await _account_ctx(db_session, client)
+    seen = _capture_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
+
+    await h.start_create_ttn(FakeMessage(), FakeState(), ctx, db_session)
+
+    assert seen["account"] is account
+    assert seen["account_id"] == account.id
+
+
+async def test_cb_pick_sender_passes_account_to_inventory(db_session: AsyncSession, monkeypatch):
+    client = await _active_client(db_session, 931)
+    monkeypatch.setenv("NP_SENDER_CITY_REF", "sender-city")
+    monkeypatch.setenv("NP_SENDER_WAREHOUSE_REF", "sender-wh")
+    profile = await _dispatchable_profile(db_session, client, "ФОП A", is_default=True)
+    ctx, account = await _account_ctx(db_session, client)
+    seen = _capture_inventory(monkeypatch, _page([_item("SKU1", "Товар", 10)]))
+
+    await h.cb_pick_sender(FakeCallback(f"ttn:sender:{profile.id}"), FakeState(), ctx, db_session)
+
+    assert seen["account"] is account
+    assert seen["account_id"] == account.id
+
+
 async def _dispatchable_profile(session, client, name, *, is_default):
     return await SenderProfileRepository(session).create(
         client_id=client.id,
@@ -208,6 +371,10 @@ async def _dispatchable_profile(session, client, name, *, is_default):
 
 def _callbacks(markup) -> list[str]:
     return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+
+
+def _button_labels(markup) -> list[str]:
+    return [button.text for row in markup.inline_keyboard for button in row]
 
 
 async def test_entry_multi_profile_shows_sender_picker(db_session: AsyncSession, monkeypatch):
@@ -244,12 +411,62 @@ async def test_cb_pick_sender_begins_cart(db_session: AsyncSession, monkeypatch)
     assert cb.message.edits  # кошик отрисован
 
 
+async def test_edit_sender_requires_existing_cart(monkeypatch):
+    state = FakeState(sender_profile_id=str(uuid4()), cart={})
+    await state.set_state(CreateTtnState.summary)
+    cb = FakeCallback("cab:ttn:edit:sender")
+
+    await h.cb_edit_sender(cb, _ctx(_CLIENT), object(), state)
+
+    assert cb.acks[-1]["show_alert"] is True
+    assert state.state == CreateTtnState.summary
+
+
+async def test_edit_sender_pick_preserves_cart_and_updates_profile(monkeypatch):
+    profile_id = uuid4()
+    profile = SimpleNamespace(id=profile_id, name="ФОП B")
+    state = FakeState(
+        cart={"SKU1": {"name": "Товар", "qty": 1, "price": "10"}},
+        sender_profile_id=str(uuid4()),
+    )
+    await state.set_state(CreateTtnState.picking_sender)
+    shown = {}
+
+    async def fake_resolve_sender_id(*args, **kwargs):
+        return profile_id
+
+    async def fake_get_profile(*args, **kwargs):
+        return profile
+
+    async def fake_show_card(*args, **kwargs):
+        shown["called"] = True
+
+    monkeypatch.setattr(h, "resolve_sender_id", fake_resolve_sender_id)
+    monkeypatch.setattr(h.sender_profile, "get_profile", fake_get_profile)
+    monkeypatch.setattr(h, "_show_card", fake_show_card)
+
+    await h.cb_edit_sender_pick(
+        FakeCallback(f"cab:ttn:sender:{profile_id}"),
+        _ctx(_CLIENT),
+        object(),
+        object(),
+        state,
+    )
+
+    assert state.state == CreateTtnState.summary
+    assert state._data["sender_profile_id"] == str(profile_id)
+    assert state._data["sender_profile_name"] == "ФОП B"
+    assert state._data["cart"]["SKU1"]["qty"] == 1
+    assert shown["called"] is True
+
+
 # ----------------------------------------------------------------- кошик (чистые)
 
 
 async def test_pick_opens_stepper(monkeypatch):
+    # `picker_skus` — идентичность отрисованной страницы; её пишет рендер пикера.
     _patch_inventory(monkeypatch, _page([_item("SKU1", "Кава", 24)]))
-    state = FakeState(cart_offset=0, cart={})
+    state = FakeState(cart_offset=0, cart={}, picker_skus=["SKU1"])
     cb = FakeCallback("cab:ttn:pick:0")
     await h.cb_pick(cb, _ctx(_CLIENT), None, state)
     assert state._data["pending"]["sku"] == "SKU1"
@@ -259,11 +476,118 @@ async def test_pick_opens_stepper(monkeypatch):
 
 async def test_pick_zero_available_blocked(monkeypatch):
     _patch_inventory(monkeypatch, _page([_item("SKU0", "Немає", 0)]))
-    state = FakeState(cart_offset=0, cart={})
+    state = FakeState(cart_offset=0, cart={}, picker_skus=["SKU0"])
     cb = FakeCallback("cab:ttn:pick:0")
     await h.cb_pick(cb, _ctx(_CLIENT), None, state)
     assert "pending" not in state._data
     assert cb.acks[-1]["show_alert"] is True
+
+
+def _catalog() -> list[InventoryItem]:
+    """Склад «как на видео»: нулевая «Дріп кава» впереди, Lavazza в наличии — дальше."""
+    return [
+        _item("DRIP-BRA", "Дріп кава Бразилія 7 шт", 0, category="Дріп кава"),
+        _item("DRIP-ETH", "Дріп кава Ефіопія 7 шт", 0, category="Дріп кава"),
+        _item("LAV-BEAN", "Кава в зернах Lavazza", 7, category="Кава Lavazza"),
+        _item("LAV-GRND", "Кава мелена Lavazza", 9, category="Кава Lavazza"),
+    ]
+
+
+async def test_pick_resolves_item_from_rendered_page(monkeypatch):
+    """Регрессия: после смены категории тап брал товар из НЕфильтрованного списка.
+
+    На видео владельца это выглядит так: активна «Кава Lavazza», все видимые позиции
+    в наличии (7/9 шт), а тап отвечает «Дріп кава ... немає на залишку» — про товар,
+    которого на экране нет. Индекс кнопки резолвился против другого снапшота.
+    """
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, ttn_category="Кава Lavazza")
+    await h._show_picker(FakeMessage(), None, _CLIENT, state, offset=0, edit=False)
+
+    cb = FakeCallback("cab:ttn:pick:0")
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert state._data.get("pending", {}).get("sku") == "LAV-BEAN"
+    assert [ack for ack in cb.acks if ack["show_alert"]] == []
+
+
+async def test_pick_category_then_pick(monkeypatch):
+    """Сквозной путь как у пользователя: чип категории → тап по товару."""
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={})
+    await h._show_picker(FakeMessage(), None, _CLIENT, state, offset=0, edit=False)
+    # «Кава Lavazza» — индекс 1 в отсортированном списке категорий страницы.
+    idx = state._data["ttn_categories"].index("Кава Lavazza")
+
+    await h.cb_pick_category(FakeCallback(f"cab:ttn:pcat:{idx}"), _ctx(_CLIENT), None, state)
+    cb = FakeCallback("cab:ttn:pick:1")
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert state._data["ttn_category"] == "Кава Lavazza"
+    assert state._data["pending"]["sku"] == "LAV-GRND"
+
+
+async def test_show_picker_stores_page_skus(monkeypatch):
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, ttn_category="Кава Lavazza")
+
+    await h._show_picker(FakeMessage(), None, _CLIENT, state, offset=0, edit=False)
+
+    assert state._data["picker_skus"] == ["LAV-BEAN", "LAV-GRND"]
+
+
+async def test_receive_item_search_stores_page_skus(monkeypatch):
+    """Второй рендер пикера обязан вести ту же идентичность, что и `_show_picker`."""
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={})
+
+    await h.receive_item_search(FakeMessage(text="мелена"), FakeBot(), state, _ctx(_CLIENT), None)
+
+    assert state._data["picker_skus"] == ["LAV-GRND"]
+
+
+async def test_pick_item_gone_from_stock(monkeypatch):
+    """Позиция исчезла со склада между рендером и тапом → явный алерт, не молчание."""
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, picker_skus=["GONE-SKU"], cart_offset=0)
+    cb = FakeCallback("cab:ttn:pick:0")
+
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert "pending" not in state._data
+    assert cb.acks[-1]["show_alert"] is True
+    assert cb.message.edits  # пикер перерисован, кнопки снова совпадают со складом
+
+
+async def test_pick_index_out_of_range(monkeypatch):
+    _patch_inventory_from_items(monkeypatch, _catalog())
+    state = FakeState(cart={}, picker_skus=["LAV-BEAN"])
+    cb = FakeCallback("cab:ttn:pick:5")
+
+    await h.cb_pick(cb, _ctx(_CLIENT), None, state)
+
+    assert "pending" not in state._data
+    assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_cart_edit_resolves_sku_beyond_first_page(monkeypatch):
+    """Регрессия: `cb_cart_edit` искал остаток через `query=sku` с лимитом страницы.
+
+    Подстрочный матч по общему префиксу выдаёт больше позиций, чем помещается на
+    странице, и нужная в неё не попадала → `available` тихо падал на количество из
+    корзины, и степпер показывал устаревший максимум.
+    """
+    # «SKU-1» — подстрока каждого из SKU-10…SKU-19, поэтому подстрочный поиск
+    # выдаёт 11 позиций, а нужная в первую страницу (6) не попадает.
+    items = [_item(f"SKU-1{i}", f"Кава 1{i}", 1) for i in range(10)]
+    items.append(_item("SKU-1", "Кава одна", 12))
+    _patch_inventory_from_items(monkeypatch, items)
+    state = FakeState(cart={"SKU-1": {"qty": 2, "name": "Кава одна", "price": "100"}})
+    cb = FakeCallback("cab:ttn:cedit:0")
+
+    await h.cb_cart_edit(cb, _ctx(_CLIENT), None, state)
+
+    assert state._data["pending"]["available"] == 12
 
 
 async def test_qty_delta_clamps_to_available():
@@ -340,6 +664,64 @@ async def test_cart_remove(monkeypatch):
     cb = FakeCallback("cab:ttn:crm:0")
     await h.cb_cart_remove(cb, state)
     assert list(state._data["cart"].keys()) == ["B"]
+
+
+async def test_search_clear_empties_cart(db_session: AsyncSession, monkeypatch):
+    """«🧹 Скинути» очищает и фильтры, и корзину, перерисовывая пикер."""
+    client = await _active_client(db_session, 960)
+    _patch_inventory(monkeypatch, _page([_item("A", "Кава", 10)]))
+    state = FakeState(
+        cart={"A": {"qty": 3, "name": "Кава", "price": "100"}},
+        ttn_query="кава",
+        ttn_category="напої",
+        pending={"sku": "B"},
+    )
+    cb = FakeCallback("cab:ttn:searchclear")
+    await h.cb_search_clear(cb, _ctx(client), db_session, state)
+    assert state._data["cart"] == {}
+    assert state._data["ttn_query"] is None
+    assert state._data["ttn_category"] is None
+    assert state._data["pending"] is None
+    assert state.state == CreateTtnState.picking_items
+    assert cb.message.edits  # пикер перерисован
+
+
+async def test_item_search_keeps_reset_button(monkeypatch):
+    """После текстового поиска «🧹 Скинути» остаётся на экране (has_reset передан).
+
+    Регрессия: второй вызов build_cart_picker_kb в receive_item_search шёл без
+    has_reset → кнопка сброса пропадала после поиска.
+    """
+    _patch_inventory(monkeypatch, _page([_item("A", "Кава", 10)]))
+    state = FakeState(
+        cart={"A": {"qty": 1, "name": "Кава", "price": "100"}},
+        _screen_chat_id=1,
+        _screen_message_id=10,
+    )
+    await state.set_state(CreateTtnState.entering_item_search)
+    bot = FakeBot()
+    msg = FakeMessage(text="кава")
+    await h.receive_item_search(msg, bot, state, _ctx(_CLIENT), None)
+    kb = msg.answers[-1]["reply_markup"]
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "🧹 Скинути" in labels
+    assert bot.edits == []  # результат поиска всегда отправлен последним сообщением
+
+
+def test_cart_picker_reset_button_guarded():
+    """«🧹 Скинути» скрыта без корзины/фильтра и показана, когда есть что сбросить."""
+    from app.bot.keyboards.ttn import build_cart_picker_kb
+
+    page = _page([_item("A", "Кава", 10)])
+    hidden_kb = build_cart_picker_kb(page, cart_count=0)
+    hidden = [b.text for row in hidden_kb.inline_keyboard for b in row]
+    assert "🧹 Скинути" not in hidden
+    shown = [
+        b.text
+        for row in build_cart_picker_kb(page, cart_count=1, has_reset=True).inline_keyboard
+        for b in row
+    ]
+    assert "🧹 Скинути" in shown
 
 
 # --------------------------------------------------------- параметри посилки
@@ -454,14 +836,16 @@ async def test_show_parcel_defaults_weight_so_dali_available():
 # ----------------------------------------------------------- COD-гард (анти cod_amount=None)
 
 
-async def test_set_payment_cod_zero_price_blocked():
-    # Корзина без цены → COD ставить нельзя (иначе cod_amount=None упадёт на submit).
+async def test_set_payment_cod_without_cart_price_offers_custom_amount():
+    # Без цен в корзине можно указать свою сумму, но нельзя ошибочно выбрать сумму корзины.
     state = FakeState(cart={"A": {"qty": 1, "name": "A", "price": None}}, payment_method="prepay")
     cb = FakeCallback("cab:ttn:setpm:cod")
     await h.cb_set_payment(cb, None, None, None, state)
-    assert cb.acks[-1]["show_alert"] is True
     assert state._data.get("payment_method") == "prepay"
     assert "cod_amount" not in state._data
+    labels = _button_labels(cb.message.edits[-1]["reply_markup"])
+    assert "✏️ Ввести власну суму" in labels
+    assert not any("Сума з кошика" in label for label in labels)
 
 
 # ----------------------------------------------------------- фильтр-категория в пикере
@@ -502,6 +886,13 @@ def test_valid_edrpou():
     assert h._valid_edrpou("abcdefgh") is False
 
 
+def test_recipient_person_name_rejects_digits_and_accepts_words():
+    assert ttn_texts.recipient_person_name_valid("Петренко Іван") is True
+    assert ttn_texts.recipient_person_name_valid("Петренко Іванович") is True
+    assert ttn_texts.recipient_person_name_valid("5514") is False
+    assert ttn_texts.recipient_person_name_valid("Петренко 5514") is False
+
+
 async def test_recipient_kind_forwards_to_name():
     state = FakeState(weight="1.0")
     cb = FakeCallback("cab:ttn:rk:o")
@@ -537,6 +928,14 @@ async def test_receive_name_empty_rejected():
     assert state.state == CreateTtnState.entering_recipient_name
 
 
+async def test_receive_name_with_digits_rejected():
+    state = FakeState(recipient_kind="person")
+    await state.set_state(CreateTtnState.entering_recipient_name)
+    await h.receive_recipient_name(FakeMessage(text="5514"), state)
+    assert "recipient_name" not in state._data
+    assert state.state == CreateTtnState.entering_recipient_name
+
+
 async def test_receive_edrpou_invalid_then_valid():
     state = FakeState()
     await state.set_state(CreateTtnState.entering_recipient_edrpou)
@@ -558,17 +957,31 @@ async def test_receive_phone_normalizes_and_advances():
     assert state.state == CreateTtnState.entering_city_query
 
 
-def _patch_cities(monkeypatch, cities):
-    async def fake(session, *, client, query, np_client, cache, sender_profile_id=None):
+def _patch_cities(monkeypatch, cities, *, seen=None):
+    async def fake(
+        session, *, client, query, np_client, cache, sender_profile_id=None, account_id=None
+    ):
+        if seen is not None:
+            seen["account_id"] = account_id
         return cities
 
     monkeypatch.setattr(h.address, "search_cities", fake)
 
 
-def _patch_warehouses(monkeypatch, whs):
+def _patch_warehouses(monkeypatch, whs, *, seen=None):
     async def fake(
-        session, *, client, city_ref, np_client, cache, query=None, sender_profile_id=None
+        session,
+        *,
+        client,
+        city_ref,
+        np_client,
+        cache,
+        query=None,
+        sender_profile_id=None,
+        account_id=None,
     ):
+        if seen is not None:
+            seen["account_id"] = account_id
         return whs
 
     monkeypatch.setattr(h.address, "search_warehouses", fake)
@@ -578,10 +991,86 @@ async def test_city_query_shows_results(monkeypatch):
     _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
-    msg = FakeMessage(text="Київ")
-    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
+    msg = FakeMessage(text="Ки")
+    bot = FakeBot()
+    await h.receive_city_query(msg, bot, state, _ctx(_CLIENT), None, object(), object())
     assert state._data["cities"][0]["ref"] == "c1"
     assert msg.answers[-1]["reply_markup"] is not None
+    assert bot.actions and bot.actions[-1]["action"] == "typing"  # индикатор загрузки
+
+
+async def test_city_query_passes_account_id_to_address(monkeypatch):
+    """Проводка: хендлер отдаёт `account_id` в поиск городов.
+
+    Сервисный фикс без этого бесполезен — `address` ушёл бы в legacy-ветку по
+    `client_id`, и работник снова получил бы «ФОП не знайдено». Тест ловит именно
+    обрыв провода между хендлером и сервисом.
+    """
+    seen: dict = {}
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")], seen=seen)
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+
+    await h.receive_city_query(
+        FakeMessage(text="Ки"),
+        FakeBot(),
+        state,
+        _ctx_with_account(_CLIENT, "acc-1"),
+        None,
+        object(),
+        object(),
+    )
+
+    assert seen["account_id"] == "acc-1"
+
+
+async def test_warehouse_pick_passes_account_id_to_address(monkeypatch):
+    seen: dict = {}
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
+    _patch_warehouses(
+        monkeypatch, [Warehouse(ref="w1", number="5", description="Хрещатик")], seen=seen
+    )
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+
+    await h.receive_city_query(
+        FakeMessage(text="Київ"),  # точное совпадение → сразу грузит відділення
+        FakeBot(),
+        state,
+        _ctx_with_account(_CLIENT, "acc-2"),
+        None,
+        object(),
+        object(),
+    )
+
+    assert seen["account_id"] == "acc-2"
+
+
+async def test_city_query_exact_match_opens_warehouses(monkeypatch):
+    """Точное название города не требует дополнительного выбора кнопкой."""
+    _patch_cities(monkeypatch, [City(ref="c1", name="Київ", area="Київська")])
+    _patch_warehouses(monkeypatch, [Warehouse(ref="w1", number="5", description="Хрещатик")])
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+    msg = FakeMessage(text="Київ")
+
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
+
+    assert state._data["recipient_city_ref"] == "c1"
+    assert state._data["warehouses"][0]["ref"] == "w1"
+    assert state.state == CreateTtnState.entering_warehouse_query
+    assert msg.answers[-1]["reply_markup"] is not None
+
+
+async def test_city_query_empty_stays_on_city_step():
+    state = FakeState()
+    await state.set_state(CreateTtnState.entering_city_query)
+    msg = FakeMessage(text="   ")
+
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
+
+    assert state.state == CreateTtnState.entering_city_query
+    assert "Введіть назву міста" in msg.answers[-1]["text"]
 
 
 async def test_city_query_not_found(monkeypatch):
@@ -589,9 +1078,27 @@ async def test_city_query_not_found(monkeypatch):
     state = FakeState()
     await state.set_state(CreateTtnState.entering_city_query)
     msg = FakeMessage(text="Хххх")
-    await h.receive_city_query(msg, object(), state, _ctx(_CLIENT), None, object(), object())
+    await h.receive_city_query(msg, FakeBot(), state, _ctx(_CLIENT), None, object(), object())
     assert "cities" not in state._data
     assert "Нічого не знайшли" in msg.answers[-1]["text"]
+
+
+async def test_back_from_city_returns_to_recipient_phone():
+    state = FakeState(
+        recipient_city_ref="c1",
+        recipient_city_name="Київ",
+        recipient_warehouse_ref="w1",
+        recipient_warehouse_name="№5: Хрещатик",
+        warehouses=[{"ref": "w1", "number": "5", "description": "Хрещатик"}],
+    )
+    cb = FakeCallback("cab:ttn:back:recipient_phone")
+
+    await h.cb_back(cb, _ctx(_CLIENT), None, state)
+
+    assert state.state == CreateTtnState.entering_recipient_phone
+    assert state._data["recipient_city_ref"] is None
+    assert state._data["recipient_warehouse_ref"] is None
+    assert "Введіть телефон" in cb.message.edits[-1]["text"]
 
 
 async def test_city_pick_loads_warehouses(monkeypatch):
@@ -613,7 +1120,20 @@ async def test_city_pick_no_warehouses_returns_to_city(monkeypatch):
     assert "не знайдено" in cb.message.edits[-1]["text"]
 
 
-def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None):
+async def test_back_from_warehouse_search_returns_to_warehouse_list():
+    state = FakeState(
+        recipient_city_name="Київ",
+        warehouses=[{"ref": "w1", "number": "5", "description": "Хрещатик"}],
+    )
+    cb = FakeCallback("cab:ttn:back:warehouse")
+
+    await h.cb_back(cb, _ctx(_CLIENT), None, state)
+
+    assert state.state == CreateTtnState.entering_warehouse_query
+    assert "Відділення у місті Київ" in cb.message.edits[-1]["text"]
+
+
+def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None, seen=None):
     async def fake(
         session,
         *,
@@ -624,10 +1144,13 @@ def _patch_pricing(monkeypatch, *, quote=None, raise_exc=None, counter=None):
         cost,
         np_client,
         cod_amount=None,
+        account_id=None,
         settings=None,
     ):
         if counter is not None:
             counter["n"] = counter.get("n", 0) + 1
+        if seen is not None:
+            seen["account_id"] = account_id
         if raise_exc is not None:
             raise raise_exc
         return quote
@@ -707,6 +1230,36 @@ async def test_card_price_cached_between_renders(monkeypatch):
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)  # те же поля → кэш
     assert counter["n"] == 1
+
+
+async def test_card_price_cache_is_invalidated_when_sender_changes(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state(insured_amount="0")
+    data = state._data
+
+    first = await h._card_price(None, _CLIENT, data, object(), force=False)
+    data["price_cache"] = first
+    data["sender_profile_id"] = str(uuid4())
+    second = await h._card_price(None, _CLIENT, data, object(), force=False)
+
+    assert counter["n"] == 2
+    assert second["key"] != first["key"]
+
+
+async def test_card_price_cache_is_invalidated_when_size_changes(monkeypatch):
+    counter: dict = {}
+    _patch_pricing(monkeypatch, quote=_quote(), counter=counter)
+    state = _card_state(insured_amount="0", size_token="s")
+    data = state._data
+
+    first = await h._card_price(None, _CLIENT, data, object(), force=False)
+    data["price_cache"] = first
+    data["size_token"] = "l"
+    second = await h._card_price(None, _CLIENT, data, object(), force=False)
+
+    assert counter["n"] == 2
+    assert second["key"] != first["key"]
 
 
 async def test_recompute_forces_price(monkeypatch):
@@ -825,30 +1378,73 @@ async def test_set_payer(monkeypatch):
 
 async def test_set_payment_prepay_clears_cod(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
-    state = _card_state(payment_method="cod", cod_amount="300")
+    state = _card_state(payment_method="cod", cod_amount="300", cod_amount_source="cart")
     cb = FakeCallback("cab:ttn:setpm:prepay")
     await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["payment_method"] == "prepay"
     assert state._data["cod_amount"] is None
+    assert state._data["cod_amount_source"] is None
+
+
+async def test_set_payment_cod_opens_amount_choice():
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:setpm:cod")
+
+    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+
+    labels = _button_labels(cb.message.edits[-1]["reply_markup"])
+    assert "🧺 Сума з кошика: 300 ₴" in labels
+    assert "✏️ Ввести власну суму" in labels
+    assert state._data.get("payment_method", "prepay") == "prepay"
 
 
 async def test_set_payment_cod_uses_cart_total(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state()
-    cb = FakeCallback("cab:ttn:setpm:cod")
-    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    cb = FakeCallback("cab:ttn:cod:cart")
+    await h.cb_set_cod_from_cart(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["payment_method"] == "cod"
     assert state._data["cod_amount"] == "300"
+    assert state._data["cod_amount_source"] == "cart"
     assert state.state == CreateTtnState.summary
 
 
 async def test_set_payment_cod_not_linked_to_insured(monkeypatch):
     _patch_pricing(monkeypatch, quote=_quote())
     state = _card_state(insured_amount="450")
-    cb = FakeCallback("cab:ttn:setpm:cod")
-    await h.cb_set_payment(cb, _ctx(_CLIENT), None, object(), state)
+    cb = FakeCallback("cab:ttn:cod:cart")
+    await h.cb_set_cod_from_cart(cb, _ctx(_CLIENT), None, object(), state)
     assert state._data["cod_amount"] == "300"
     assert state._data["payment_method"] == "cod"
+
+
+async def test_set_payment_cod_custom_amount(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state()
+    cb = FakeCallback("cab:ttn:cod:custom")
+
+    await h.cb_set_cod_custom(cb, state)
+
+    assert state.state == CreateTtnState.editing_field
+    assert state._data["edit_field"] == "cod_amount"
+    msg = FakeMessage(text="450,50")
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
+    assert state._data["payment_method"] == "cod"
+    assert state._data["cod_amount"] == "450.50"
+    assert state._data["cod_amount_source"] == "custom"
+    assert state.state == CreateTtnState.summary
+
+
+async def test_set_payment_cod_custom_amount_must_be_positive(monkeypatch):
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="cod_amount")
+    await state.set_state(CreateTtnState.editing_field)
+    msg = FakeMessage(text="0")
+
+    await h.receive_edit(msg, object(), state, _ctx(_CLIENT), None, object())
+
+    assert state.state == CreateTtnState.editing_field
+    assert "більшою за 0" in msg.answers[-1]["text"]
 
 
 async def test_back_to_card(monkeypatch):

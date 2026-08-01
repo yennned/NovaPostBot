@@ -53,12 +53,16 @@ def _clear_settings_cache():
 @pytest.fixture(autouse=True)
 def _reset_shared_sheets_client():
     """Сбрасываем процесс-глобальный кэш `SheetsClient` — иначе первый тест с
-    включёнными Sheets закэшировал бы клиент со своими settings на всю сессию."""
-    from app.services import client_sheet_sync
+    включёнными Sheets закэшировал бы клиент со своими settings на всю сессию.
 
-    client_sheet_sync._shared_sheets_client = None
+    Живёт в `app/sheets/runtime.py` (переехал туда из `services/client_sheet_sync`,
+    чтобы им пользовалось и чтение склада).
+    """
+    from app.sheets.runtime import reset_sheets_runtime
+
+    reset_sheets_runtime()
     yield
-    client_sheet_sync._shared_sheets_client = None
+    reset_sheets_runtime()
 
 
 def _assert_safe_test_database(url: str) -> None:
@@ -104,3 +108,41 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         await session.close()
         await trans.rollback()
         await conn.close()
+
+
+async def account_of(session: AsyncSession, client):
+    """Аккаунт клиента — так же, как его отдаёт мидлварь хендлерам.
+
+    Каждому `role=client` аккаунт заводится при создании, а склад/ТТН/статистика
+    account-scoped. Раньше тесты звали эти сервисы без аккаунта и тем держали
+    легаси-путь «клиент без аккаунта» живым; теперь путь запрещён гейтом
+    `shipments.require_client_account`, и тесты обязаны передавать аккаунт —
+    ровно как прод.
+    """
+    from app.db.repositories import ClientAccountRepository
+
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    assert membership is not None, f"у клиента {client.id} нет аккаунта — сломанное состояние"
+    return membership.account
+
+
+async def employee_of(session: AsyncSession, owner, *, phone: str, telegram_id: int):
+    """Активный работник в аккаунте `owner` — через настоящие сервисные пути.
+
+    Членство не собираем руками: `invite_employee` + `activate_employee_contact` —
+    ровно то, что делает бот, поэтому тест не разъедется с продом.
+    """
+    from app.bot.types import ClientAccountContext
+    from app.db.repositories import ClientAccountRepository, UserRepository
+    from app.services import account_team
+
+    membership = await ClientAccountRepository(session).get_membership(user_id=owner.id)
+    assert membership is not None, f"у владельца {owner.id} нет аккаунта — сломанное состояние"
+    context = ClientAccountContext(user=owner, account=membership.account, membership=membership)
+    invited = await account_team.invite_employee(session, context=context, phone=phone)
+    employee = await UserRepository(session).get_by_id(invited.user_id)
+    assert employee is not None
+    await account_team.activate_employee_contact(
+        session, user=employee, telegram_id=telegram_id, full_name="Працівник"
+    )
+    return employee

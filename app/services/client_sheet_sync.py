@@ -2,49 +2,36 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal
 
 import structlog
+from gspread.exceptions import WorksheetNotFound
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.db.models.client_account import ClientAccount
 from app.db.models.user import User
-from app.db.repositories import SenderProfileRepository
 from app.services.inventory import get_inventory_snapshot
 from app.sheets import GoogleSheetsStockSource, StockSource
 from app.sheets.client import SheetsClient
+from app.sheets.runtime import run_on_sheets_executor, shared_sheets_client
 from app.sheets.source import StockSheetNotFound
 
 logger = structlog.get_logger(__name__)
 
-_VIEW_HEADERS = ["Артикул", "Назва", "Категорія", "Ціна", "Кількість", "Резерв", "Доступно"]
+# Порядок колонок = как в основной книге «Склад» (STOCK_HEADERS провижна): D=Кількість,
+# E=Ціна, F=Резерв, G=Доступно. Это позволяет переиспользовать форматирование/формулы/
+# pivot «Склада» для книги-зеркала без изменений (они зашиты под этот порядок). Бот
+# книгу-зеркало не читает — порядок важен только для оформления и `_view_data_row`.
+_VIEW_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна", "Резерв", "Доступно"]
 _VIEW_TAB = "Товари"
 
-# Один авторизованный SheetsClient на процесс: пересоздание клиента на каждый синк —
-# лишний OAuth-handshake service-account. gspread-сессия не рассчитана на параллельные
-# потоки (см. inventory.stock_summary), поэтому синк идёт через выделенный executor из
-# ОДНОГО воркера — это сериализует доступ к общему клиенту без глобального лока и, в
-# отличие от `asyncio.to_thread`, не занимает воркеров общего пула (иначе медленные
-# записи в Sheets головой блокировали бы чтения/записи склада).
-_sheets_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheets-sync")
-_shared_sheets_client: SheetsClient | None = None
-
-
-async def run_on_sheets_executor(fn, /, *args):
-    """Выполнить блокирующий вызов Sheets на выделенном single-worker executor.
-
-    Сериализует ВСЕ обращения к Sheets (клиентский синк + записи склада
-    `apply_deltas`): один воркер исключает гонку read-modify-write по одному листу
-    и конкуренцию за общий gspread-клиент. В отличие от `asyncio.to_thread` (общий
-    пул) не позволяет медленной записи в Sheets занять воркеров склада.
-    """
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_sheets_executor, functools.partial(fn, *args))
+# Общий клиент и single-worker executor переехали в `app/sheets/runtime.py` — ими
+# пользуется и чтение склада (`services/inventory`), а держать их здесь означало бы
+# цикл импортов. `run_on_sheets_executor` реэкспортируем: на него ссылаются
+# `services/tracking` и `services/returns`.
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +45,6 @@ class ViewRow:
     available: int
 
 
-def desired_stock_sheet_key(*, full_name: str | None, telegram_id: int) -> str:
-    return (full_name or "").strip() or str(telegram_id)
-
-
 def _sheets_enabled(settings: Settings) -> bool:
     return bool(settings.google_sa_json.strip())
 
@@ -70,22 +53,35 @@ async def sync_client_sheets(
     session: AsyncSession,
     *,
     client: User,
-    previous_sheet_key: str | None = None,
+    account: ClientAccount,
     reader: StockSource | None = None,
     settings: Settings | None = None,
 ) -> None:
+    """Синхронизировать вкладки склада аккаунта и его книгу-зеркало.
+
+    Всё здесь привязано к аккаунту: вкладка принадлежит аккаунту, а не человеку.
+    `client` нужен только как читатель остатков (`get_inventory_snapshot`).
+    """
     cfg = settings or get_settings()
-    target_key = desired_stock_sheet_key(full_name=client.full_name, telegram_id=client.telegram_id)
-    source_key = client.stock_sheet_key or target_key
+    # `.strip()`, а не голый `or`: имя из пробелов прошло бы мимо фолбэка и
+    # стало бы именем вкладки.
+    target_key = (account.name or "").strip() or str(account.id)
+    source_key = account.stock_sheet_key or target_key
+    view_book_id = account.stock_view_book_id
 
     if not _sheets_enabled(cfg):
-        if client.stock_sheet_key != target_key:
-            client.stock_sheet_key = target_key
+        if account.stock_sheet_key != target_key:
+            account.stock_sheet_key = target_key
             await session.flush()
         return
 
-    snapshot = await get_inventory_snapshot(session, client=client, reader=reader)
-    default_profile = await SenderProfileRepository(session).get_default_for_client(client.id)
+    snapshot = await get_inventory_snapshot(
+        session,
+        client=client,
+        account_id=account.id,
+        account=account,
+        reader=reader,
+    )
     rows = [
         ViewRow(
             sku=item.sku,
@@ -98,26 +94,25 @@ async def sync_client_sheets(
         )
         for item in snapshot
     ]
-    rename_ok, book_id = await asyncio.get_running_loop().run_in_executor(
-        _sheets_executor,
-        functools.partial(
-            _sync_client_sheets_sync,
-            cfg,
-            source_key,
-            previous_sheet_key or (source_key if source_key != target_key else None),
-            target_key,
-            client.stock_view_book_id,
-            client.full_name or str(client.telegram_id),
-            (default_profile.name if default_profile is not None else None),
-            rows,
-        ),
+    rename_ok, book_id = await run_on_sheets_executor(
+        _sync_client_sheets_sync,
+        cfg,
+        # Явные `settings` → свой клиент, как в `build_stock_source`: расшаренный
+        # создаётся один раз под `get_settings()`, и подмена конфигурации на нём
+        # молча не сработала бы.
+        settings is not None,
+        source_key,
+        source_key if source_key != target_key else None,
+        target_key,
+        view_book_id,
+        rows,
     )
     # Продвигаем ключ только при подтверждённом переименовании вкладок: иначе PG
     # указывал бы на лист с новым именем, которого в «Складі» нет → пустой остаток.
     if rename_ok:
-        client.stock_sheet_key = target_key
-    if book_id and client.stock_view_book_id != book_id:
-        client.stock_view_book_id = book_id
+        account.stock_sheet_key = target_key
+    if book_id and view_book_id != book_id:
+        account.stock_view_book_id = book_id
     await session.flush()
 
 
@@ -125,8 +120,8 @@ async def best_effort_sync(
     session: AsyncSession,
     *,
     client: User,
+    account: ClientAccount,
     log_key: str,
-    previous_sheet_key: str | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
     **log_context: str,
@@ -142,7 +137,7 @@ async def best_effort_sync(
         await sync_client_sheets(
             session,
             client=client,
-            previous_sheet_key=previous_sheet_key,
+            account=account,
             reader=reader,
             settings=settings,
         )
@@ -154,30 +149,20 @@ async def best_effort_sync(
 
 def _sync_client_sheets_sync(
     settings: Settings,
+    own_client: bool,
     source_key: str,
     previous_sheet_key: str | None,
     target_key: str,
     stock_view_book_id: str | None,
-    client_label: str,
-    sender_name: str | None,
     rows: list[ViewRow],
 ) -> tuple[bool, str | None]:
-    # Один воркер `_sheets_executor` → вызовы сериализованы, общий клиент безопасен.
-    global _shared_sheets_client
-    if _shared_sheets_client is None:
-        _shared_sheets_client = SheetsClient(settings)
-    client = _shared_sheets_client
+    # Один воркер executor'а → вызовы сериализованы, общий клиент безопасен.
+    client = SheetsClient(settings) if own_client else shared_sheets_client()
     gc = client._authorize()  # кэшируется на инстансе → OAuth-handshake только раз
     rename_ok = _rename_main_worksheets(gc, settings, previous_sheet_key or source_key, target_key)
     # Зеркалим резерв (из снапшота PG) в колонку «Резерв» актуального листа «Склад».
     _write_stock_reserved(client, target_key if rename_ok else source_key, rows)
-    book_id = _sync_view_book(
-        gc,
-        stock_view_book_id=stock_view_book_id,
-        client_label=client_label,
-        sender_name=sender_name,
-        rows=rows,
-    )
+    book_id = _sync_view_book(gc, stock_view_book_id=stock_view_book_id, rows=rows)
     return rename_ok, book_id
 
 
@@ -228,45 +213,38 @@ def _rename_main_worksheets(gc, settings: Settings, source_key: str, target_key:
     return ok
 
 
-def _sync_view_book(
-    gc,
-    *,
-    stock_view_book_id: str | None,
-    client_label: str,
-    sender_name: str | None,
-    rows: list[ViewRow],
-) -> str | None:
+def _view_data_row(row: ViewRow) -> list[str | int | float]:
+    """Строка данных «Товари» (A–F, порядок «Склада»): Артикул, Назва, Категорія,
+    Кількість, Ціна, Резерв. «Доступно» (G) — ARRAYFORMULA, её пишет провижн."""
+    return [
+        row.sku,
+        row.name,
+        row.category or "",
+        row.stock,
+        float(row.price) if row.price is not None else "",
+        row.reserved,
+    ]
+
+
+def _sync_view_book(gc, *, stock_view_book_id: str | None, rows: list[ViewRow]) -> str | None:
     # View-book отложен: рантайм-сервис-аккаунт имеет только drive.readonly, а
-    # gc.create() требует Drive write → 403. Книгу создаёт provisioning (полный
-    # drive + share клиенту); пока id не задан — синк строк пропускаем.
+    # gc.create() требует Drive write → 403. Книгу создаёт provisioning (полный drive +
+    # share + оформление/pivot); пока id не задан — синк строк пропускаем.
     if not stock_view_book_id:
         return None
     book = gc.open_by_key(stock_view_book_id)
-    if not book.worksheets():
-        ws = book.add_worksheet(title=_VIEW_TAB, rows=1000, cols=10)
-    else:
-        ws = book.worksheet(book.worksheets()[0].title)
-        if ws.title != _VIEW_TAB:
-            ws.update_title(_VIEW_TAB)
-    values: list[list[str | int]] = [
-        [f"Клієнт: {client_label}"],
-        [f"ФОП: {sender_name or '—'}"],
-        [],
-        _VIEW_HEADERS,
-    ]
-    for row in rows:
-        values.append(
-            [
-                row.sku,
-                row.name,
-                row.category or "",
-                f"{row.price:.2f}" if row.price is not None else "",
-                row.stock,
-                row.reserved,
-                row.available,
-            ]
-        )
-    ws.clear()
-    ws.update(values=values, range_name=f"A1:G{len(values)}")
-    ws.freeze(rows=4)
+    try:
+        ws = book.worksheet(_VIEW_TAB)
+    except WorksheetNotFound:
+        # Нет вкладки «Товари» → книга не была провижена (провижн всегда создаёт вкладку
+        # + оформление + формулу «Доступно»). Не «дооформляем» наполовину — иначе получим
+        # книгу без формулы/стилей и замаскируем пробел провижна. Логируем и пропускаем.
+        logger.warning("view_book_not_provisioned", stock_view_book_id=stock_view_book_id)
+        return None
+    # Пишем ТОЛЬКО данные (A2:F): заголовки/оформление/бэндинг/CF/формула «Доступно»(G)
+    # и лист «📊 Зведення» ставит провижн один раз; `values:clear` их не трогает.
+    # Цену — числом (RAW), иначе comma-локаль книги исказит "12.34".
+    ws.batch_clear(["A2:F1000"])  # снять «хвост» ранее удалённых позиций
+    if rows:
+        ws.update(values=[_view_data_row(row) for row in rows], range_name=f"A2:F{1 + len(rows)}")
     return book.id

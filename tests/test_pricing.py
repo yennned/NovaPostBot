@@ -16,6 +16,8 @@ from app.services import pricing
 from app.services.exceptions import SenderProfileNotConfigured
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import account_of, employee_of
+
 
 def _np_client(price_row: dict | None):
     settings = Settings(_env_file=None)
@@ -44,6 +46,57 @@ async def _client_with_profile(session: AsyncSession, telegram_id: int = 700):
         client_id=client.id, name="ФОП", np_api_key="np-key", is_default=True, np_sender_ref="cp"
     )
     return client, profile
+
+
+async def test_employee_quotes_with_owner_profile(db_session: AsyncSession):
+    """Регрессия: работник получает цену по ФОП владельца аккаунта.
+
+    `pricing` скоупился по `client_id` — у работника он свой, а не владельца, —
+    поэтому расчёт стоимости падал «ФОП не знайдено» так же, как поиск города.
+    """
+    owner = await UserRepository(db_session).create(
+        telegram_id=710, phone="380507710001", role=UserRole.client, status=UserStatus.active
+    )
+    profile = await SenderProfileRepository(db_session).create(
+        client_id=owner.id, name="ФОП", np_api_key="np-key", is_default=True, np_sender_ref="cp"
+    )
+    employee = await employee_of(db_session, owner, phone="0507710002", telegram_id=711)
+    account = await account_of(db_session, owner)
+
+    quote = await pricing.quote_ttn(
+        db_session,
+        client=employee,
+        sender_profile_id=profile.id,
+        account_id=account.id,
+        city_recipient_ref="rcpt-city",
+        weight=Decimal("1"),
+        cost=Decimal("100"),
+        np_client=_np_client(
+            {"Cost": 55, "CostRedelivery": 0, "EstimatedDeliveryDate": "2026-07-20"}
+        ),
+        settings=_settings(),
+    )
+    assert quote.cost == Decimal("55")
+
+
+async def test_quote_ttn_foreign_account_profile_raises(db_session: AsyncSession):
+    """Скоуп переехал на аккаунт, а не отключён: чужой ФОП по-прежнему не отдаётся."""
+    owner, _ = await _client_with_profile(db_session, telegram_id=712)
+    account = await account_of(db_session, owner)
+    _stranger, stranger_profile = await _client_with_profile(db_session, telegram_id=713)
+
+    with pytest.raises(SenderProfileNotConfigured):
+        await pricing.quote_ttn(
+            db_session,
+            client=owner,
+            sender_profile_id=stranger_profile.id,
+            account_id=account.id,
+            city_recipient_ref="rcpt-city",
+            weight=Decimal("1"),
+            cost=Decimal("100"),
+            np_client=_np_client({"Cost": 50}),
+            settings=_settings(),
+        )
 
 
 async def test_quote_ttn_returns_price(db_session: AsyncSession):

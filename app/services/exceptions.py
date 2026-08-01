@@ -95,6 +95,13 @@ class TtnCancelFailed(ClientServiceError):
     """НП отклонила удаление ТТН — статус не меняем, резерв не трогаем."""
 
 
+class InvalidCancellationReason(ClientServiceError):
+    """Причина отмены не помещается в безопасный размер сообщений."""
+
+    def __init__(self, max_length: int) -> None:
+        super().__init__(f"Причина скасування має містити не більше {max_length} символів")
+
+
 class ShipmentActionForbidden(ClientServiceError):
     """Действие с отправлением недопустимо в текущем статусе."""
 
@@ -110,6 +117,41 @@ class InvalidNotificationSetting(ClientServiceError):
 
 class PermissionDenied(ClientServiceError):
     """У актёра нет прав на действие (иерархия `can_manage` или per-flag)."""
+
+
+class AccountMembershipConflict(ClientServiceError):
+    """Користувач уже належить іншому акаунту або платформній команді."""
+
+
+class AccountMemberNotFound(ClientServiceError):
+    """Учасник не знайдений у поточному акаунті."""
+
+
+class LastAccountOwnerError(ClientServiceError):
+    """Неможливо залишити акаунт без активного власника."""
+
+
+class ClientDeletionBlocked(ClientServiceError):
+    """Видалення клієнта заблоковане активними відправленнями.
+
+    Активні ТТН (`dispatched`/`in_transit`/`arrived`/`returning`, а також
+    `returned` без оформленого повернення на склад) кинути не можна — їх спершу
+    доводить до кінця менеджер. `blocking` — список таких ТТН для показу власнику;
+    у БД при цьому нічого не змінюється.
+    """
+
+    def __init__(self, blocking: list) -> None:
+        self.blocking = blocking
+        super().__init__("є активні відправлення, які має завершити менеджер")
+
+
+class ClientDeletionRetryable(ClientServiceError):
+    """Частину ТТН не вдалося скасувати в НП — акаунт лишається замороженим.
+
+    Відмова НП (крім «вже видалено») перериває видалення до сносу команди, тому
+    жоден користувач ще не видалений. Повтор безпечний: `NovaPoshtaNotFound` на
+    вже видалених ТТН вважається успіхом, а вже скасовані ТТН пропускаються.
+    """
 
 
 class StaffNotFound(ClientServiceError):

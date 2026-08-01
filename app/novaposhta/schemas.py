@@ -143,6 +143,12 @@ class ParcelSpec:
     weight: Decimal
     seats_amount: int = 1
     volume_general: Decimal | None = None
+    # Габариты одного места в сантиметрах. НП требует OptionsSeat даже для
+    # одной посылки; если размеры не заданы, маппер подставляет безопасный
+    # минимальный пресет.
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
+    height_cm: Decimal | None = None
 
 
 # --- Черновик и результат ТТН ------------------------------------------------

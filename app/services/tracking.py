@@ -136,6 +136,7 @@ async def apply_tracking_status(
 
     await AuditRepository(session).log(
         "shipment_tracking_status_updated",
+        account_id=shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before={"status": before_status.value if before_status else None},
         after={
@@ -147,12 +148,7 @@ async def apply_tracking_status(
 
     pushed = False
     if notifier is not None:
-        await notifications.notify_shipment_status_changed(
-            session,
-            notifier,
-            client=shipment.client,
-            shipment=shipment,
-        )
+        await notifications.notify_shipment_status_changed(session, notifier, shipment=shipment)
         pushed = True
         if target_status in NONSTANDARD_STATUSES:
             await notifications.notify_nonstandard_shipment(
@@ -177,7 +173,7 @@ async def _apply_dispatch_stock(
 
     await run_on_sheets_executor(
         (mutator or build_stock_source()).apply_deltas,
-        stock_sheet_key(shipment.client),
+        stock_sheet_key(shipment.account),
         [
             StockDelta(
                 sku=item.sku,
@@ -191,6 +187,7 @@ async def _apply_dispatch_stock(
     )
     await StockMovementRepository(session).record_for_items(
         client_id=shipment.client_id,
+        account_id=shipment.account_id,
         shipment_id=shipment.id,
         items=shipment.items,
         movement_type=StockMovementType.ttn_dispatch,
@@ -200,6 +197,7 @@ async def _apply_dispatch_stock(
     await best_effort_sync(
         session,
         client=shipment.client,
+        account=shipment.account,
         log_key="tracking_sheet_sync_failed",
         shipment_id=str(shipment.id),
     )

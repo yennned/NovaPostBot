@@ -7,6 +7,7 @@ import uuid
 from datetime import date
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.types.base import TelegramObject
@@ -22,6 +23,7 @@ from app.bot.keyboards.calendar import (
 )
 from app.bot.keyboards.client import (
     NOTIFICATION_CALLBACK_TOKENS,
+    PRODUCT_NOOP,
     PRODUCTS_PAGE_SIZE,
     SENDER_PROFILE_FIELD_TOKENS,
     SHIPMENTS_PAGE_SIZE,
@@ -33,6 +35,7 @@ from app.bot.keyboards.client import (
     build_shipments_kb,
     build_stats_kb,
 )
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.screen import edit_stored_screen, remember_screen
 from app.bot.states import ClientCabinetState, SenderProfileCreateState
 from app.bot.texts.client_cabinet import (
@@ -56,12 +59,14 @@ from app.bot.texts.client_cabinet import (
     stats_calendar_text,
     stats_text,
 )
+from app.bot.texts.common import invalid_phone_text
 from app.bot.types import EffectiveContext
 from app.config import get_settings
-from app.db.models.enums import OrgType
+from app.db.models.enums import MembershipRole, OrgType
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
 from app.services import client_settings, sender_profile
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     InvalidNotificationSetting,
     PermissionDenied,
@@ -95,6 +100,20 @@ _SENDER_PROFILE_FIELDS_BY_TOKEN = {value: key for key, value in SENDER_PROFILE_F
 
 def _effective_client(context: EffectiveContext):
     return context.effective_user or context.actor_user
+
+
+def _account(context: EffectiveContext):
+    return context.account
+
+
+def _account_id(context: EffectiveContext):
+    account = _account(context)
+    return account.id if account is not None else None
+
+
+def _account_owner(context: EffectiveContext) -> bool:
+    membership = context.membership
+    return membership is None or membership.role is MembershipRole.account_owner
 
 
 async def _remember_if_possible(state: FSMContext, target: Message | TelegramObject) -> None:
@@ -141,19 +160,30 @@ async def _show_inventory(
         category=category,
         limit=PRODUCTS_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(context),
+        account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
     await target.answer(
-        products_text(page),
-        reply_markup=build_inventory_kb(
-            page,
-            active_category=category,
-            query=query,
-            sheet_url=stock_view_book_url(client),
-        ),
+        products_text(page, sheet_url=stock_view_book_url(_account(context))),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
     await _remember_if_possible(state, target)
+    # Синк-на-входе: зеркалим текущий склад в персональную Google-книгу, чтобы за
+    # ссылкой были свежие данные. Экран уже показан → задержка записи не видна; сбой
+    # Google глотается в лог (best_effort) и не роняет экран. Только когда клиент
+    # открывает СВОЙ склад: под импперсонизацией owner/dev (`/as client`) просмотр чужого
+    # склада не должен писать в его Google-таблицы и мутировать его строку в БД.
+    actor = context.actor_user
+    if actor is not None and client.id == actor.id:
+        await best_effort_sync(
+            session,
+            client=client,
+            account=_account(context),
+            log_key="inventory_open_sheet_sync_failed",
+        )
 
 
 async def _edit_inventory(
@@ -175,18 +205,24 @@ async def _edit_inventory(
         category=category,
         limit=PRODUCTS_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(context),
+        account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
-    await message.edit_text(
-        products_text(page),
-        reply_markup=build_inventory_kb(
-            page,
-            active_category=category,
-            query=query,
-            sheet_url=stock_view_book_url(client),
-        ),
-        parse_mode="HTML",
-    )
+    try:
+        await message.edit_text(
+            products_text(page, sheet_url=stock_view_book_url(_account(context))),
+            reply_markup=build_inventory_kb(page, active_category=category, query=query),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as exc:
+        # Дабл-тап/no-op-редактирование: экран уже в нужном состоянии. Глушим ЗДЕСЬ,
+        # а не глобальным errors-роутером: тот срабатывает уже после того, как
+        # исключение вынесло нас из хендлера мимо `callback.answer()`, и Telegram
+        # остаётся с висящим спиннером на кнопке. Прочие BadRequest — наверх.
+        if "message is not modified" not in str(exc):
+            raise
     await remember_screen(state, message)
 
 
@@ -211,6 +247,7 @@ async def _show_shipments(
         query=query,
         limit=SHIPMENTS_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(context),
     )
     await state.update_data(shipment_bucket=bucket)
     await target.answer(
@@ -241,6 +278,7 @@ async def _edit_shipments(
         query=query,
         limit=SHIPMENTS_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(context),
     )
     await state.update_data(shipment_bucket=bucket)
     await message.edit_text(
@@ -260,10 +298,12 @@ async def _show_settings(
     if client is None:
         await target.answer("Спочатку авторизуйтесь через /start.")
         return
-    view = await client_settings.get_client_settings(session, client=client)
+    view = await client_settings.get_client_settings(
+        session, client=client, account_id=_account_id(context)
+    )
     await target.answer(
         settings_text(view),
-        reply_markup=build_settings_kb(view),
+        reply_markup=build_settings_kb(view, account_owner=_account_owner(context)),
         parse_mode="HTML",
     )
 
@@ -276,10 +316,12 @@ async def _edit_settings(
     client = _effective_client(context)
     if client is None:
         return
-    view = await client_settings.get_client_settings(session, client=client)
+    view = await client_settings.get_client_settings(
+        session, client=client, account_id=_account_id(context)
+    )
     await message.edit_text(
         settings_text(view),
-        reply_markup=build_settings_kb(view),
+        reply_markup=build_settings_kb(view, account_owner=_account_owner(context)),
         parse_mode="HTML",
     )
 
@@ -303,19 +345,17 @@ async def _edit_inventory_screen(
         category=category,
         limit=PRODUCTS_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(context),
+        account=_account(context),
     )
     await state.update_data(product_categories=page.categories)
     return await edit_stored_screen(
         bot,
         state,
-        text=products_text(page),
-        reply_markup=build_inventory_kb(
-            page,
-            active_category=category,
-            query=query,
-            sheet_url=stock_view_book_url(client),
-        ),
+        text=products_text(page, sheet_url=stock_view_book_url(_account(context))),
+        reply_markup=build_inventory_kb(page, active_category=category, query=query),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -339,6 +379,7 @@ async def _edit_shipments_screen(
         query=query,
         limit=SHIPMENTS_PAGE_SIZE,
         offset=offset,
+        account_id=_account_id(context),
     )
     await state.update_data(shipment_bucket=bucket)
     return await edit_stored_screen(
@@ -354,12 +395,14 @@ async def _edit_settings_screen(
     bot: Bot,
     state: FSMContext,
     view,
+    *,
+    account_owner: bool = True,
 ) -> bool:
     return await edit_stored_screen(
         bot,
         state,
         text=settings_text(view),
-        reply_markup=build_settings_kb(view),
+        reply_markup=build_settings_kb(view, account_owner=account_owner),
         parse_mode="HTML",
     )
 
@@ -368,12 +411,14 @@ async def _edit_sender_profile_screen(
     bot: Bot,
     state: FSMContext,
     profile,
+    *,
+    can_manage: bool = True,
 ) -> bool:
     return await edit_stored_screen(
         bot,
         state,
         text=sender_profile_text(profile),
-        reply_markup=build_sender_profile_kb(profile),
+        reply_markup=build_sender_profile_kb(profile, can_manage=can_manage),
         parse_mode="HTML",
     )
 
@@ -390,10 +435,11 @@ async def _edit_sender_profiles(
         session,
         actor=client,
         client_id=client.id,
+        account_id=_account_id(context),
     )
     await message.edit_text(
         sender_profiles_text(profiles),
-        reply_markup=build_sender_profiles_kb(profiles),
+        reply_markup=build_sender_profiles_kb(profiles, can_manage=_account_owner(context)),
         parse_mode="HTML",
     )
 
@@ -409,10 +455,12 @@ async def _show_sender_profile(
     if client is None:
         await target.answer("Спочатку авторизуйтесь через /start.")
         return
-    profile = await sender_profile.get_profile(session, actor=client, profile_id=profile_id)
+    profile = await sender_profile.get_profile(
+        session, actor=client, profile_id=profile_id, account_id=_account_id(context)
+    )
     await target.answer(
         sender_profile_text(profile),
-        reply_markup=build_sender_profile_kb(profile),
+        reply_markup=build_sender_profile_kb(profile, can_manage=_account_owner(context)),
         parse_mode="HTML",
     )
 
@@ -427,10 +475,12 @@ async def _edit_sender_profile(
     client = _effective_client(context)
     if client is None:
         return
-    profile = await sender_profile.get_profile(session, actor=client, profile_id=profile_id)
+    profile = await sender_profile.get_profile(
+        session, actor=client, profile_id=profile_id, account_id=_account_id(context)
+    )
     await message.edit_text(
         sender_profile_text(profile),
-        reply_markup=build_sender_profile_kb(profile),
+        reply_markup=build_sender_profile_kb(profile, can_manage=_account_owner(context)),
         parse_mode="HTML",
     )
 
@@ -504,6 +554,12 @@ async def cb_products(
     await callback.answer()
 
 
+@router.callback_query(F.data == PRODUCT_NOOP)
+async def cb_product_noop(callback: CallbackQuery) -> None:
+    """Строка товара — витрина, не действие: гасим спиннер и ничего не делаем."""
+    await callback.answer()
+
+
 @router.callback_query(F.data == "cab:psearch")
 async def cb_product_search(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message is None:
@@ -571,7 +627,12 @@ async def cb_product_category(
     await callback.answer()
 
 
-@router.message(ClientCabinetState.waiting_for_product_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientCabinetState.waiting_for_product_search,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_product_search(
     message: Message,
     bot: Bot,
@@ -714,7 +775,12 @@ async def cb_shipment_clear(
     await callback.answer("Пошук скинуто.")
 
 
-@router.message(ClientCabinetState.waiting_for_shipment_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientCabinetState.waiting_for_shipment_search,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_shipment_search(
     message: Message,
     bot: Bot,
@@ -770,7 +836,12 @@ async def cb_shipment_card(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        card = await get_shipment_card(db_session, client=client, shipment_id=shipment_id)
+        card = await get_shipment_card(
+            db_session,
+            client=client,
+            shipment_id=shipment_id,
+            account_id=_account_id(effective_context),
+        )
     except (PermissionDenied, ShipmentNotFound) as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -820,6 +891,8 @@ async def cb_cancel_shipment(
             db_session,
             client=client,
             shipment_id=shipment_id,
+            account_id=_account_id(effective_context),
+            actor_user_id=client.id,
             np_client=np_client,
         )
     except ShipmentActionForbidden:
@@ -859,7 +932,12 @@ async def open_stats(
         await message.answer("Спочатку авторизуйтесь через /start.")
         return
     try:
-        snapshot = await get_client_stats(db_session, client=client)
+        snapshot = await get_client_stats(
+            db_session,
+            client=client,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
+        )
     except PermissionDenied as exc:
         await message.answer(str(exc))
         return
@@ -886,7 +964,12 @@ async def open_stats_home(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        snapshot = await get_client_stats(db_session, client=client)
+        snapshot = await get_client_stats(
+            db_session,
+            client=client,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
+        )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -919,7 +1002,13 @@ async def cb_stats(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        snapshot = await get_client_stats(db_session, client=client, period=period)
+        snapshot = await get_client_stats(
+            db_session,
+            client=client,
+            period=period,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
+        )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -952,7 +1041,13 @@ async def cb_stats_day(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        snapshot = await get_client_stats(db_session, client=client, day=day)
+        snapshot = await get_client_stats(
+            db_session,
+            client=client,
+            day=day,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
+        )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -997,7 +1092,12 @@ async def _apply_stats_range(
         return
     try:
         snapshot = await get_client_stats(
-            session, client=client, date_from=date_from, date_to=date_to
+            session,
+            client=client,
+            date_from=date_from,
+            date_to=date_to,
+            account_id=_account_id(context),
+            account=_account(context),
         )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -1103,7 +1203,12 @@ async def cb_calendar_cancel(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        snapshot = await get_client_stats(db_session, client=client)
+        snapshot = await get_client_stats(
+            db_session,
+            client=client,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
+        )
     except PermissionDenied as exc:
         await callback.answer(str(exc), show_alert=True)
         return
@@ -1188,13 +1293,15 @@ async def cb_settings_toggle(
         await callback.answer("Авторизуйтесь через /start.", show_alert=True)
         return
     try:
-        view = await client_settings.toggle_notification(db_session, client=client, key=key)
+        view = await client_settings.toggle_notification(
+            db_session, client=client, key=key, account_id=_account_id(effective_context)
+        )
     except (PermissionDenied, InvalidNotificationSetting) as exc:
         await callback.answer(str(exc), show_alert=True)
         return
     await callback.message.edit_text(
         settings_text(view),
-        reply_markup=build_settings_kb(view),
+        reply_markup=build_settings_kb(view, account_owner=_account_owner(effective_context)),
         parse_mode="HTML",
     )
     await remember_screen(state, callback.message)
@@ -1242,9 +1349,7 @@ async def receive_settings_profile(
         normalized = normalize_phone(value or "")
         if normalized is None:
             # Лишаємось у стані очікування — користувач введе номер ще раз.
-            await message.answer(
-                "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
-            )
+            await message.answer(invalid_phone_text())
             return
         value = normalized
     client = _effective_client(effective_context)
@@ -1256,6 +1361,8 @@ async def receive_settings_profile(
         view = await client_settings.update_self_profile(
             db_session,
             client=client,
+            account_id=_account_id(effective_context),
+            account=_account(effective_context),
             **{field: value},
         )
     except PhoneAlreadyTaken:
@@ -1269,7 +1376,7 @@ async def receive_settings_profile(
     if not await _edit_settings_screen(bot, state, view):
         await message.answer(
             settings_text(view),
-            reply_markup=build_settings_kb(view),
+            reply_markup=build_settings_kb(view, account_owner=_account_owner(effective_context)),
             parse_mode="HTML",
         )
 
@@ -1346,13 +1453,14 @@ async def cb_sender_profile_default(
             db_session,
             actor=client,
             profile_id=profile_id,
+            account_id=_account_id(effective_context),
         )
     except (PermissionDenied, SenderProfileNotFound) as exc:
         await callback.answer(str(exc), show_alert=True)
         return
     await callback.message.edit_text(
         sender_profile_text(profile),
-        reply_markup=build_sender_profile_kb(profile),
+        reply_markup=build_sender_profile_kb(profile, can_manage=_account_owner(effective_context)),
         parse_mode="HTML",
     )
     await remember_screen(state, callback.message)
@@ -1419,6 +1527,7 @@ async def receive_sender_profile_edit(
             db_session,
             actor=client,
             profile_id=profile_id,
+            account_id=_account_id(effective_context),
             **{field: value},
         )
     except (PermissionDenied, SenderProfileNotFound, SenderProfileIncomplete) as exc:
@@ -1429,7 +1538,9 @@ async def receive_sender_profile_edit(
     if not await _edit_sender_profile_screen(bot, state, profile):
         await message.answer(
             sender_profile_text(profile),
-            reply_markup=build_sender_profile_kb(profile),
+            reply_markup=build_sender_profile_kb(
+                profile, can_manage=_account_owner(effective_context)
+            ),
             parse_mode="HTML",
         )
 
@@ -1509,6 +1620,7 @@ async def receive_new_profile_phone(
             db_session,
             actor=client,
             client_id=client.id,
+            account_id=_account_id(effective_context),
             name=draft.get("name", ""),
             np_api_key=draft.get("np_api_key", ""),
             org_type=OrgType.fop,
@@ -1532,10 +1644,17 @@ async def receive_new_profile_phone(
         return
     await state.update_data(new_profile=None)
     await state.set_state(None)
-    profiles = await sender_profile.list_profiles(db_session, actor=client, client_id=client.id)
+    profiles = await sender_profile.list_profiles(
+        db_session,
+        actor=client,
+        client_id=client.id,
+        account_id=_account_id(effective_context),
+    )
     await message.answer(new_profile_created_text(profile))
     await message.answer(
         sender_profiles_text(profiles),
-        reply_markup=build_sender_profiles_kb(profiles),
+        reply_markup=build_sender_profiles_kb(
+            profiles, can_manage=_account_owner(effective_context)
+        ),
         parse_mode="HTML",
     )

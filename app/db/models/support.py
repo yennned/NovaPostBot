@@ -20,6 +20,7 @@ from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import SupportThreadStatus
 
 if TYPE_CHECKING:
+    from app.db.models.client_account import ClientAccount
     from app.db.models.shipment import Shipment
     from app.db.models.user import User
 
@@ -27,8 +28,13 @@ if TYPE_CHECKING:
 class SupportThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "support_threads"
 
-    client_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    # «Кто обратился», а не скоуп: компанию держит `account_id`. Переживает
+    # физическое удаление человека как NULL — см. `e5f6a7b8c1d3`.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("client_accounts.id", ondelete="CASCADE"), index=True, nullable=False
     )
     # Дежурный менеджер, на которого маршрутизирован тред. NULL, пока обращение
     # лежит в очереди (`waiting`) без дежурного.
@@ -48,7 +54,8 @@ class SupportThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    client: Mapped[User] = relationship(foreign_keys=[client_id])
+    client: Mapped[User | None] = relationship(foreign_keys=[client_id])
+    account: Mapped[ClientAccount] = relationship()
     assigned_manager: Mapped[User | None] = relationship(foreign_keys=[assigned_manager_id])
     shipment: Mapped[Shipment | None] = relationship()
     messages: Mapped[list[SupportMessage]] = relationship(
@@ -64,9 +71,13 @@ class SupportMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     thread_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("support_threads.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    sender_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     # Роль автора реплики: значения `UserRole` + "dev" (god-mode). Не enum —
     # набор закрытый, но "dev" не входит в `user_role`, поэтому храним строкой.
     sender_role: Mapped[str] = mapped_column(String(16), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
 
     thread: Mapped[SupportThread] = relationship(back_populates="messages")
+    sender_user: Mapped[User | None] = relationship(foreign_keys=[sender_user_id])

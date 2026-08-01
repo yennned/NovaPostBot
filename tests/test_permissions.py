@@ -73,7 +73,7 @@ def test_has_permission_manager_default_enabled(settings):
 def test_has_permission_manager_revoked(settings):
     manager = _user(UserRole.manager, 2, {"can_export_reports": False})
     assert not perm.has_permission(manager, "can_export_reports", settings)
-    assert perm.has_permission(manager, "can_edit_clients", settings)  # другой флаг — включён
+    assert perm.has_permission(manager, "can_handle_support", settings)  # другой флаг — включён
 
 
 def test_has_permission_owner_and_dev_always_true(settings):
@@ -88,6 +88,21 @@ def test_has_permission_client_denied(settings):
     assert not perm.has_permission(client, "can_export_reports", settings)
 
 
+def test_require_owner(settings):
+    owner = _user(UserRole.owner, 1)
+    manager = _user(UserRole.manager, 2)
+    dev_client = _user(UserRole.client, 900900)  # в dev-allowlist
+    inactive_owner = _user(UserRole.owner, 5)
+    inactive_owner.status = UserStatus.blocked
+
+    perm.require_owner(owner, settings)  # владелец — ок
+    perm.require_owner(dev_client, settings)  # dev обходит роль/статус
+    with pytest.raises(perm.PermissionDenied):
+        perm.require_owner(manager, settings)
+    with pytest.raises(perm.PermissionDenied):
+        perm.require_owner(inactive_owner, settings)
+
+
 def test_is_configured_owner(settings):
     assert perm.is_configured_owner(100100, settings)
     assert not perm.is_configured_owner(123, settings)
@@ -99,7 +114,6 @@ def test_permission_flags_registry_unique_and_canonical():
     # Все канонические ключи присутствуют в реестре.
     assert {
         perm.CAN_MANAGE_CLIENTS,
-        perm.CAN_EDIT_CLIENTS,
         perm.CAN_HANDLE_SUPPORT,
         perm.CAN_VIEW_REPORTS,
     } <= set(keys)

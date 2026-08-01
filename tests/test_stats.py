@@ -14,6 +14,8 @@ from app.services.stats import _bounds, get_client_stats
 from app.sheets.inventory import StockRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import account_of
+
 TZ = ZoneInfo("Europe/Kyiv")
 _KYIV_SETTINGS = SimpleNamespace(timezone="Europe/Kyiv")
 
@@ -119,7 +121,13 @@ async def test_client_stats_count_dispatched_and_returned_same_shipment(
     shipment.dispatched_at = now
     await db_session.flush()
 
-    stats = await get_client_stats(db_session, client=client, period="today", reader=_Reader())
+    stats = await get_client_stats(
+        db_session,
+        client=client,
+        account=await account_of(db_session, client),
+        period="today",
+        reader=_Reader(),
+    )
 
     assert stats.shipped_qty == 3
     assert stats.returns_qty == 3

@@ -70,3 +70,34 @@ async def test_services_middleware_np_defaults_to_none() -> None:
 
     assert captured["np_client"] is None
     assert captured["np_cache"] is None
+
+
+def test_router_order_is_the_documented_contract() -> None:
+    """Порядок роутеров — контракт, а не оформление.
+
+    `menu_escape` первым (снимает брошенный FSM-стейт и уходит дальше),
+    `fallback` предпоследним (отвечает на callback, который не подобрал никто —
+    иначе спиннер на кнопке), `errors` строго последним (обработчик без фильтра;
+    роутер после него остался бы без него). Каждый пункт уже стоил бага.
+    """
+    from app.bot.dispatcher import ROUTER_ORDER
+
+    names = [router.name for router in ROUTER_ORDER]
+
+    assert names[0] == "menu_escape"
+    assert names[-2:] == ["fallback", "errors"]
+    assert len(names) == len(set(names)), "роутер підключено двічі"
+
+
+def test_every_handler_router_is_wired() -> None:
+    """Новый роутер обязан попасть в сборку.
+
+    Забытый `include_router` — это молчание бота на целом разделе, а поймать его
+    иначе можно только прогоном живых апдейтов.
+    """
+    from app.bot import handlers
+    from app.bot.dispatcher import ROUTER_ORDER
+
+    exported = {getattr(handlers, name) for name in handlers.__all__ if name.endswith("_router")}
+
+    assert exported == set(ROUTER_ORDER)

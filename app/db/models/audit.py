@@ -1,7 +1,13 @@
 """Модель `audit_logs` — append-only журнал чувствительных действий.
 
-Записи не редактируются и не удаляются. `user_id` nullable — действие могло
-выполнить система или произойти до создания пользователя.
+Записи не удаляются. Не редактируются — **кроме одного случая**: при физическом
+удалении человека `AuditRepository.scrub_user_pii` вычищает из `before`/`after`
+его ПИБ/телефон/Telegram ID. Строка при этом остаётся: тип действия, время и
+`account_id` продолжают отвечать «что было», просто без персональных данных.
+Иначе ПИИ пережили бы удалённого человека в payload'ах.
+
+`user_id` nullable — действие могло выполнить система, произойти до создания
+пользователя либо его автора физически удалили (`ondelete=SET NULL`).
 """
 
 from __future__ import annotations
@@ -22,6 +28,9 @@ class AuditLog(UUIDPrimaryKeyMixin, Base):
 
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("client_accounts.id", ondelete="SET NULL"), index=True, nullable=True
     )
     # Тип действия, напр. "user_activated", "permission_changed", "dev_impersonate".
     action: Mapped[str] = mapped_column(String(64), index=True, nullable=False)

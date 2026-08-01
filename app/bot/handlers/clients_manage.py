@@ -20,22 +20,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.clients import (
     PAGE_SIZE,
     build_client_card_kb,
+    build_client_delete_confirm_kb,
     build_client_returns_kb,
     build_clients_list_kb,
+    build_deletion_blocked_kb,
     build_edit_fields_kb,
     build_return_card_kb,
     parse_status_token,
     status_token,
 )
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.notify import BotNotifier
 from app.bot.states import ClientManageState
 from app.bot.texts.clients import (
     EDIT_FIELD_LABELS,
     action_done_text,
     client_card_text,
+    client_delete_confirm_text,
+    client_deleted_text,
     client_error_text,
     client_returns_text,
     clients_header,
+    deletion_blocked_text,
     edit_prompt_text,
     empty_list_text,
     manager_return_card_text,
@@ -43,11 +49,14 @@ from app.bot.texts.clients import (
     return_received_text,
     search_prompt_text,
 )
+from app.bot.texts.common import invalid_phone_text
 from app.bot.types import EffectiveContext
+from app.db.models.enums import UserRole
 from app.db.models.user import User
 from app.db.repositories import UserRepository
+from app.novaposhta.client import NovaPoshtaClient
 from app.services import clients, manager_returns, notifications
-from app.services.exceptions import ClientServiceError, PermissionDenied
+from app.services.exceptions import ClientDeletionBlocked, ClientServiceError, PermissionDenied
 from app.utils.phone import normalize_phone
 
 router = Router(name="clients")
@@ -59,9 +68,27 @@ _ACTIONS = {
     "approve": clients.approve_client,
     "block": clients.block_client,
     "unblock": clients.unblock_client,
-    "archive": clients.archive_client,
+    # `archive` из карточки убран (объединили с блокировкой); `restore` оставлен
+    # для восстановления legacy-архивных клиентов.
     "restore": clients.restore_client,
 }
+
+
+def _can_edit_clients(ctx: EffectiveContext) -> bool:
+    """Правка профиля клиента — только владелец (учитывает impersonation dev'а).
+
+    Ориентируемся на эффективную роль: `/as manager` у dev'а тоже прячет кнопку,
+    чтобы можно было проверить менеджерский UX.
+    """
+    return ctx.effective_role is UserRole.owner
+
+
+def _is_owner(ctx: EffectiveContext) -> bool:
+    """Владелец/dev — гейт кнопки и колбэков физического удаления клиента.
+
+    Блокировка остаётся per-flag у менеджеров, а безвозвратное удаление — только
+    владельцу/dev, поэтому кнопку прячем и колбэк отбиваем (сервис гейтит тоже)."""
+    return ctx.effective_role is UserRole.owner or ctx.is_dev
 
 
 async def _list_payload(
@@ -179,7 +206,14 @@ async def cb_card(
         await callback.answer(client_error_text(exc), show_alert=True)
         return
     await _edit_or_ignore(
-        callback.message, client_card_text(card), build_client_card_kb(card, token)
+        callback.message,
+        client_card_text(card),
+        build_client_card_kb(
+            card,
+            token,
+            can_edit=_can_edit_clients(effective_context),
+            is_owner=_is_owner(effective_context),
+        ),
     )
     await callback.answer()
 
@@ -313,7 +347,9 @@ async def cb_action(
         return
     handler = _ACTIONS.get(action)
     if handler is None:
-        await callback.answer()
+        # Устаревшая кнопка (напр. «Архів» со старой карточки после объединения с
+        # блокировкой): не молчим, а подсказываем переоткрыть карточку.
+        await callback.answer(_STALE_BUTTON, show_alert=True)
         return
 
     try:
@@ -332,9 +368,98 @@ async def cb_action(
 
     token = status_token(card.status)
     await _edit_or_ignore(
-        callback.message, client_card_text(card), build_client_card_kb(card, token)
+        callback.message,
+        client_card_text(card),
+        build_client_card_kb(
+            card,
+            token,
+            can_edit=_can_edit_clients(effective_context),
+            is_owner=_is_owner(effective_context),
+        ),
     )
     await callback.answer(action_done_text(card))
+
+
+@router.callback_query(F.data.startswith("cl:del:"))
+async def cb_delete(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    """Двойное подтверждение удаления клиента (owner/dev): показать масштаб."""
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if not _is_owner(effective_context):
+        await callback.answer("Видалення клієнта доступне лише власнику.", show_alert=True)
+        return
+    actor = effective_context.actor_user
+    if actor is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        _, _, token, client_raw = callback.data.split(":")
+        client_id = uuid.UUID(client_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        preview = await clients.preview_client_deletion(
+            db_session, actor=actor, client_id=client_id
+        )
+    except ClientServiceError as exc:
+        await callback.answer(client_error_text(exc), show_alert=True)
+        return
+    await _edit_or_ignore(
+        callback.message,
+        client_delete_confirm_text(preview),
+        build_client_delete_confirm_kb(token, client_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cl:delok:"))
+async def cb_delete_ok(
+    callback: CallbackQuery,
+    effective_context: EffectiveContext,
+    db_session: AsyncSession,
+    np_client: NovaPoshtaClient,
+) -> None:
+    """Подтверждённое физическое удаление клиента и его команды (owner/dev)."""
+    if callback.message is None:
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if not _is_owner(effective_context):
+        await callback.answer("Видалення клієнта доступне лише власнику.", show_alert=True)
+        return
+    actor = effective_context.actor_user
+    if actor is None:
+        await callback.answer("Авторизуйтесь через /start.", show_alert=True)
+        return
+    try:
+        _, _, token, client_raw = callback.data.split(":")
+        client_id = uuid.UUID(client_raw)
+    except (ValueError, AttributeError):
+        await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    try:
+        result = await clients.delete_client(
+            db_session, actor=actor, client_id=client_id, np_client=np_client
+        )
+    except ClientDeletionBlocked as exc:
+        # Активные ТТН — ни одного изменения в БД; показываем список и путь к очереди.
+        await _edit_or_ignore(
+            callback.message,
+            deletion_blocked_text(exc.blocking),
+            build_deletion_blocked_kb(token, client_id),
+        )
+        await callback.answer("Є активні відправлення", show_alert=True)
+        return
+    except ClientServiceError as exc:
+        await callback.answer(client_error_text(exc), show_alert=True)
+        return
+    await callback.answer("Клієнта вже видалено" if result.already_done else client_deleted_text())
+    # Клиента больше нет — обратно в список, а не на мёртвую карточку.
+    text, kb = await _list_payload(db_session, actor, token, 0)
+    await _edit_or_ignore(callback.message, text, kb)
 
 
 @router.callback_query(F.data.startswith("cl:search:"))
@@ -353,7 +478,9 @@ async def cb_search(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(ClientManageState.waiting_for_search, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientManageState.waiting_for_search, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS)
+)
 async def receive_search(
     message: Message,
     state: FSMContext,
@@ -378,9 +505,12 @@ async def receive_search(
 
 
 @router.callback_query(F.data.startswith("cl:edit:"))
-async def cb_edit(callback: CallbackQuery) -> None:
+async def cb_edit(callback: CallbackQuery, effective_context: EffectiveContext) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if not _can_edit_clients(effective_context):
+        await callback.answer(client_error_text(PermissionDenied()), show_alert=True)
         return
     try:
         _, _, token, client_raw = callback.data.split(":")
@@ -393,9 +523,14 @@ async def cb_edit(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("cl:editf:"))
-async def cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_edit_field(
+    callback: CallbackQuery, effective_context: EffectiveContext, state: FSMContext
+) -> None:
     if callback.message is None:
         await callback.answer(_STALE_BUTTON, show_alert=True)
+        return
+    if not _can_edit_clients(effective_context):
+        await callback.answer(client_error_text(PermissionDenied()), show_alert=True)
         return
     try:
         _, _, field, token, client_raw = callback.data.split(":")
@@ -412,7 +547,9 @@ async def cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(ClientManageState.waiting_for_edit, F.text, ~F.text.startswith("/"))
+@router.message(
+    ClientManageState.waiting_for_edit, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS)
+)
 async def receive_edit(
     message: Message,
     state: FSMContext,
@@ -437,9 +574,7 @@ async def receive_edit(
         # поиск клиента по телефону разъедутся с сохранённым значением.
         normalized = normalize_phone(value)
         if normalized is None:
-            await message.answer(
-                "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
-            )
+            await message.answer(invalid_phone_text())
             return
         value = normalized
     try:
@@ -451,5 +586,12 @@ async def receive_edit(
         return
     await message.answer(profile_updated_text())
     await message.answer(
-        client_card_text(card), reply_markup=build_client_card_kb(card, token), parse_mode="HTML"
+        client_card_text(card),
+        reply_markup=build_client_card_kb(
+            card,
+            token,
+            can_edit=_can_edit_clients(effective_context),
+            is_owner=_is_owner(effective_context),
+        ),
+        parse_mode="HTML",
     )

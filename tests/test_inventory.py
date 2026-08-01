@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.repositories import ShipmentItemDraft, ShipmentRepository, UserRepository
 from app.services import inventory
 from app.sheets.inventory import StockRow
 from app.sheets.source import StockSheetNotFound
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.conftest import account_of
 
 
 class FakeReader:
@@ -53,6 +56,7 @@ async def test_inventory_available_equals_stock_minus_reserved(db_session: Async
     page = await inventory.list_inventory(
         db_session,
         client=client,
+        account=await account_of(db_session, client),
         reader=FakeReader(),
     )
 
@@ -69,6 +73,7 @@ async def test_inventory_search_and_category_filter(db_session: AsyncSession):
     by_query = await inventory.list_inventory(
         db_session,
         client=client,
+        account=await account_of(db_session, client),
         query="чай",
         reader=FakeReader(),
     )
@@ -77,6 +82,7 @@ async def test_inventory_search_and_category_filter(db_session: AsyncSession):
     by_category = await inventory.list_inventory(
         db_session,
         client=client,
+        account=await account_of(db_session, client),
         category="Кава",
         reader=FakeReader(),
     )
@@ -96,6 +102,7 @@ async def test_inventory_missing_sheet_degrades_to_empty(db_session: AsyncSessio
     page = await inventory.list_inventory(
         db_session,
         client=client,
+        account=await account_of(db_session, client),
         reader=MissingSheetReader(),
     )
     assert page.total == 0
@@ -106,9 +113,51 @@ async def test_inventory_missing_sheet_degrades_to_empty(db_session: AsyncSessio
 def test_stock_view_book_url_none_until_provisioned():
     from types import SimpleNamespace
 
-    client = SimpleNamespace(stock_view_book_id=None)
-    assert inventory.stock_view_book_url(client) is None
-    client = SimpleNamespace(stock_view_book_id="BOOK123")
-    assert inventory.stock_view_book_url(client) == (
+    account = SimpleNamespace(stock_view_book_id=None)
+    assert inventory.stock_view_book_url(account) is None
+    account = SimpleNamespace(stock_view_book_id="BOOK123")
+    assert inventory.stock_view_book_url(account) == (
         "https://docs.google.com/spreadsheets/d/BOOK123"
     )
+
+
+async def test_blocked_account_employee_is_told_so_not_shown_empty_stock(
+    db_session: AsyncSession,
+):
+    """Работник заблокированного аккаунта получает отказ, а не лживый пустой склад.
+
+    `clients._transition` гасит `account.status` и статус ВЛАДЕЛЬЦА, но статус
+    работника остаётся `active`. Проверки только пользователя не хватало: работник
+    проскакивал, `account` приходил `None`, и человек видел «склад порожній» —
+    хотя на деле аккаунт заблокирован. Это же и держало User-ветку резолвера
+    живой, мешая снести `users.stock_sheet_key`.
+    """
+    from app.bot.types import ClientAccountContext
+    from app.db.repositories import ClientAccountRepository
+    from app.services import account_team, clients
+    from app.services.exceptions import PermissionDenied
+
+    owner = await _active_client(db_session, telegram_id=380)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=owner.id)
+    invited = await account_team.invite_employee(
+        db_session,
+        context=ClientAccountContext(user=owner, account=membership.account, membership=membership),
+        phone="0990000401",
+    )
+    employee = await UserRepository(db_session).get_by_id(invited.user_id)
+    await account_team.activate_employee_contact(
+        db_session, user=employee, telegram_id=381, full_name="Працівник"
+    )
+    manager = await UserRepository(db_session).create(
+        telegram_id=382, role=UserRole.manager, status=UserStatus.active
+    )
+    await clients.block_client(db_session, actor=manager, client_id=owner.id, reason="тест")
+
+    # Мидлварь не отдаёт контекст неактивного аккаунта → account=None.
+    assert await ClientAccountRepository(db_session).get_context_for_user(employee.id) is None
+    assert employee.status is UserStatus.active, "статус работника блокировка не трогает"
+
+    with pytest.raises(PermissionDenied, match="заблоковано"):
+        await inventory.list_inventory(
+            db_session, client=employee, account=None, reader=FakeReader()
+        )

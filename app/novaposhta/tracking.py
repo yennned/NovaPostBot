@@ -17,9 +17,15 @@ _STATUS_HINTS: list[tuple[tuple[str, ...], ShipmentStatus]] = [
     (("створен", "зареєстрован"), ShipmentStatus.confirmed),
 ]
 
+#: Код 2 у НП — «Видалено», а не «створено». Раньше он вёл в `confirmed`, и
+#: накладная, удалённая в кабинете НП (клиентом или нашей же отменой, чья
+#: транзакция не доехала), навсегда оставалась «підтверджена»: висела в очереди
+#: менеджера и держала резерв склада под посылку, которой уже нет.
+_DELETED_STATUS_CODE = "2"
+
 _STATUS_CODES: dict[str, ShipmentStatus] = {
     "1": ShipmentStatus.confirmed,
-    "2": ShipmentStatus.confirmed,
+    _DELETED_STATUS_CODE: ShipmentStatus.cancelled,
     "3": ShipmentStatus.dispatched,
     "4": ShipmentStatus.in_transit,
     "5": ShipmentStatus.arrived,
@@ -31,6 +37,18 @@ _STATUS_CODES: dict[str, ShipmentStatus] = {
     "12": ShipmentStatus.lost,
     "13": ShipmentStatus.damaged,
 }
+
+
+def is_deleted_in_np(status: TrackingStatus) -> bool:
+    """Документ удалён в НП (`StatusCode=2`, «Видалено»).
+
+    Нужно отмене: НП на удаление уже удалённого документа отвечает не «не
+    знайдено», а `Error getting payment info …; No document changed DeletionMark`.
+    Классифицировать это по тексту ошибки нельзя — под ту же формулировку попадёт
+    и «удалить нельзя», а тогда мы пометили бы отменённой живую накладную, сняли
+    резерв, и посылка всё равно уехала бы. Поэтому спрашиваем НП про статус.
+    """
+    return status.status_code.strip() == _DELETED_STATUS_CODE
 
 
 def map_tracking_status(status: TrackingStatus) -> ShipmentStatus | None:

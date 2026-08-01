@@ -25,7 +25,8 @@ def queue_text(page: ManagerShipmentPage) -> str:
             deadline = _fmt(item.sla_deadline) if item.sla_deadline else "—"
             lines.append(
                 f"• <b>{item.ttn_number or 'без ТТН'}</b> — {item.client_name or '—'} / "
-                f"{item.recipient_name}\n  SLA: {item.sla_state} · дедлайн {deadline}"
+                f"{item.recipient_name}\n  Автор: {item.author_name or '—'} · "
+                f"SLA: {item.sla_state} · дедлайн {deadline}"
             )
     return "\n".join(lines)
 
@@ -64,6 +65,10 @@ def return_inspection_text(card: ManagerShipmentCard, decisions: dict[str, bool]
 
 def search_prompt_text() -> str:
     return "Введіть № ТТН, ПІБ клієнта, телефон або одержувача для пошуку."
+
+
+def cancel_reason_prompt_text() -> str:
+    return "Вкажіть причину скасування відправлення одним повідомленням:"
 
 
 def action_done_text(action: str) -> str:

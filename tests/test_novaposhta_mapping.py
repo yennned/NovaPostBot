@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
 from app.novaposhta.mapping import (
     PAYMENT_METHOD,
     money,
@@ -56,6 +57,7 @@ def test_save_props_base_fields():
     assert props["CargoType"] == "Cargo"
     assert props["SeatsAmount"] == "1"
     assert props["Weight"] == "2.5"  # строки, не числа
+    assert len(props["OptionsSeat"]) == 1
     assert props["Cost"] == "500"
     assert props["Description"] == "Кава мелена"
     # отправитель
@@ -97,11 +99,77 @@ def test_save_props_volume_optional():
         _draft(parcel=ParcelSpec(weight=Decimal("1"), volume_general=Decimal("0.004")))
     )
     assert props["VolumeGeneral"] == "0.004"
+    assert props["OptionsSeat"][0]["volumetricVolume"] == "0.004096"
+    assert props["OptionsSeat"][0]["volumetricLength"] == "16"
+
+
+def test_save_props_rejects_partial_dimensions():
+    with pytest.raises(ValueError, match="задані разом"):
+        to_save_props(
+            _draft(
+                parcel=ParcelSpec(
+                    weight=Decimal("1"),
+                    length_cm=20,
+                )
+            )
+        )
+
+
+def test_save_props_rejects_inconsistent_explicit_volume():
+    with pytest.raises(ValueError, match="не відповідає"):
+        to_save_props(
+            _draft(
+                parcel=ParcelSpec(
+                    weight=Decimal("1"),
+                    volume_general=Decimal("0.005"),
+                    length_cm=20,
+                    width_cm=20,
+                    height_cm=10,
+                )
+            )
+        )
+
+
+def test_save_props_rejects_non_positive_dimensions():
+    with pytest.raises(ValueError, match="більше 0"):
+        to_save_props(
+            _draft(
+                parcel=ParcelSpec(
+                    weight=Decimal("1"),
+                    length_cm=0,
+                    width_cm=20,
+                    height_cm=10,
+                )
+            )
+        )
+
+
+def test_save_props_always_includes_options_seat():
+    props = to_save_props(
+        _draft(
+            parcel=ParcelSpec(
+                weight=Decimal("4"),
+                seats_amount=2,
+                length_cm=20,
+                width_cm=30,
+                height_cm=10,
+            )
+        )
+    )
+    assert len(props["OptionsSeat"]) == 2
+    assert props["OptionsSeat"][0] == {
+        "volumetricVolume": "0.006",
+        "volumetricWidth": "30",
+        "volumetricLength": "20",
+        "volumetricHeight": "10",
+        "weight": "2",
+    }
 
 
 def test_save_props_seats_amount():
     props = to_save_props(_draft(parcel=ParcelSpec(weight=Decimal("10"), seats_amount=3)))
     assert props["SeatsAmount"] == "3"
+    assert props["OptionsSeat"][0]["weight"] == "3.333"
 
 
 def test_money_formats_decimal_as_string():
@@ -171,3 +239,34 @@ def test_price_props_with_cod_adds_redelivery():
         cod_amount=Decimal("250"),
     )
     assert props["RedeliveryCalculate"] == {"CargoType": "Money", "Amount": "250"}
+
+
+def test_status_code_two_is_deleted_not_confirmed():
+    """Код 2 у НП — «Видалено», а не «створено».
+
+    Раньше он вёл в `confirmed`: накладная, удалённая в кабинете НП, навсегда
+    оставалась «підтверджена» — висела в очереди менеджера и держала резерв
+    склада под посылку, которой уже нет.
+    """
+    from app.db.models.enums import ShipmentStatus
+    from app.novaposhta.schemas import TrackingStatus
+    from app.novaposhta.tracking import is_deleted_in_np, map_tracking_status
+
+    status = TrackingStatus(number="20451500870149", status="Видалено", status_code="2", raw={})
+
+    assert is_deleted_in_np(status) is True
+    assert map_tracking_status(status) is ShipmentStatus.cancelled
+
+
+def test_status_code_one_is_not_deleted():
+    from app.novaposhta.schemas import TrackingStatus
+    from app.novaposhta.tracking import is_deleted_in_np
+
+    status = TrackingStatus(
+        number="20451500871350",
+        status="Відправник самостійно створив цю накладну",
+        status_code="1",
+        raw={},
+    )
+
+    assert is_deleted_in_np(status) is False

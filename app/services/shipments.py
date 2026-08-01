@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.client_account import ClientAccount
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.models.shipment import Shipment, ShipmentItem
 from app.db.models.user import User
@@ -79,6 +80,10 @@ class ShipmentCard:
     fee_free: bool
     items: list[ShipmentItemView]
     can_cancel: bool
+    created_by_user_id: uuid.UUID | None = None
+    created_by_name: str | None = None
+    account_id: uuid.UUID | None = None
+    cancellation_reason: str | None = None
 
 
 def _require_active_client(client: User) -> None:
@@ -86,6 +91,22 @@ def _require_active_client(client: User) -> None:
         raise PermissionDenied("кабінет доступний тільки клієнту")
     if client.status is not UserStatus.active:
         raise PermissionDenied("кабінет клієнта доступний після підтвердження")
+
+
+def require_client_account(client: User, account: ClientAccount | None) -> ClientAccount:
+    """Гейт клиентских account-scoped данных: проверяет пользователя И аккаунт.
+
+    Проверки только пользователя не хватало. `clients._transition` при блокировке
+    гасит `account.status` и статус ВЛАДЕЛЬЦА, а статус работника остаётся
+    `active` — поэтому `_require_active_client` работника пропускал, мидлварь не
+    отдавала контекст неактивного аккаунта (`account=None`), и человек видел
+    лживое «склад порожній» вместо «акаунт заблоковано». Заодно этот гейт и делает
+    аккаунт гарантированным для складских путей.
+    """
+    _require_active_client(client)
+    if account is None:
+        raise PermissionDenied("клієнтський акаунт заблоковано або недоступний")
+    return account
 
 
 def statuses_for_bucket(bucket: str) -> set[ShipmentStatus]:
@@ -135,6 +156,10 @@ def _to_card(shipment: Shipment) -> ShipmentCard:
         fee_free=shipment.fee_free,
         items=[_to_item_view(item) for item in shipment.items],
         can_cancel=shipment.status in CANCELABLE_STATUSES,
+        created_by_user_id=shipment.created_by_user_id,
+        created_by_name=shipment.created_by_user.full_name if shipment.created_by_user else None,
+        account_id=shipment.account_id,
+        cancellation_reason=shipment.cancellation_reason,
     )
 
 
@@ -142,19 +167,29 @@ async def list_shipments(
     session: AsyncSession,
     *,
     client: User,
+    account_id: uuid.UUID | None = None,
     bucket: str = "created",
     query: str | None = None,
     limit: int = 8,
     offset: int = 0,
 ) -> ShipmentPage:
     _require_active_client(client)
-    rows, total = await ShipmentRepository(session).get_by_client_and_status(
-        client.id,
-        statuses=statuses_for_bucket(bucket),
-        query=query,
-        limit=limit,
-        offset=offset,
-    )
+    if account_id is None:
+        rows, total = await ShipmentRepository(session).get_by_client_and_status(
+            client.id,
+            statuses=statuses_for_bucket(bucket),
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+    else:
+        rows, total = await ShipmentRepository(session).get_by_account_and_status(
+            account_id,
+            statuses=statuses_for_bucket(bucket),
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
     return ShipmentPage(
         items=[_to_list_item(row) for row in rows],
         total=total,
@@ -164,32 +199,70 @@ async def list_shipments(
 
 
 async def get_shipment_card(
-    session: AsyncSession, *, client: User, shipment_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
 ) -> ShipmentCard:
     _require_active_client(client)
-    shipment = await ShipmentRepository(session).get_by_id(shipment_id)
-    if shipment is None or shipment.client_id != client.id:
+    shipment = (
+        await ShipmentRepository(session).get_by_id(shipment_id)
+        if account_id is None
+        else await ShipmentRepository(session).get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
         raise ShipmentNotFound(str(shipment_id))
     return _to_card(shipment)
 
 
-async def cancel_shipment(
-    session: AsyncSession, *, client: User, shipment_id: uuid.UUID
+async def apply_cancel(
+    session: AsyncSession,
+    *,
+    shipment: Shipment,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID,
 ) -> ShipmentCard:
-    _require_active_client(client)
-    repo = ShipmentRepository(session)
-    shipment = await repo.get_by_id(shipment_id)
-    if shipment is None or shipment.client_id != client.id:
-        raise ShipmentNotFound(str(shipment_id))
+    """Флип статуса ТТН в `cancelled` + аудит. **Без гейтов** — вызывающий уже
+    проверил доступ (активный клиент / удаление аккаунта).
+
+    Выделено, чтобы этим пользовались оба пути отмены: клиентский `cancel_shipment`
+    (после `_require_active_client`) и удаление клиента (`clients.delete_client`, где
+    клиент к этому моменту уже неактивен и гейт неприменим). Одна реализация флипа —
+    без риска, что пути разъедутся.
+    """
     if shipment.status not in CANCELABLE_STATUSES:
         raise ShipmentActionForbidden("cancel", shipment.status)
     before = {"status": shipment.status}
-    await repo.update_status(shipment, ShipmentStatus.cancelled)
+    await ShipmentRepository(session).update_status(shipment, ShipmentStatus.cancelled)
     await AuditRepository(session).log(
         "shipment_cancelled_by_client",
-        user_id=client.id,
+        user_id=actor_user_id,
+        account_id=account_id or shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         before=before,
         after={"status": shipment.status},
     )
     return _to_card(shipment)
+
+
+async def cancel_shipment(
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
+) -> ShipmentCard:
+    _require_active_client(client)
+    repo = ShipmentRepository(session)
+    shipment = (
+        await repo.get_by_id(shipment_id)
+        if account_id is None
+        else await repo.get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
+        raise ShipmentNotFound(str(shipment_id))
+    return await apply_cancel(
+        session, shipment=shipment, account_id=account_id, actor_user_id=actor_user_id or client.id
+    )

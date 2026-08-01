@@ -10,8 +10,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.config import Settings, get_settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import (
+    ClientAccountStatus,
+    MembershipRole,
+    MembershipStatus,
+    UserRole,
+    UserStatus,
+)
 from app.db.models.user import User
 from app.services.exceptions import PermissionDenied
 
@@ -26,7 +33,6 @@ _ROLE_RANK: dict[UserRole, int] = {
 # Единый источник правды — на них ссылаются сервисы (`services/clients`,
 # `services/staff`) и экран «👔 Персонал» (рендер тоглов из `PERMISSION_FLAGS`).
 CAN_MANAGE_CLIENTS = "can_manage_clients"
-CAN_EDIT_CLIENTS = "can_edit_clients"
 CAN_HANDLE_SUPPORT = "can_handle_support"
 CAN_VIEW_REPORTS = "can_view_reports"
 
@@ -45,12 +51,7 @@ PERMISSION_FLAGS: tuple[PermissionFlag, ...] = (
     PermissionFlag(
         CAN_MANAGE_CLIENTS,
         "Керування клієнтами",
-        "Підтвердження, блокування та архівування клієнтів",
-    ),
-    PermissionFlag(
-        CAN_EDIT_CLIENTS,
-        "Редагування клієнтів",
-        "Зміна ПІБ і телефону клієнта",
+        "Підтвердження та блокування клієнтів",
     ),
     PermissionFlag(
         CAN_HANDLE_SUPPORT,
@@ -143,3 +144,55 @@ def require_can_manage(
         raise PermissionDenied("немає прав керувати цим користувачем")
     if not has_permission(actor, flag, settings):
         raise PermissionDenied(f"право {flag} відкликано")
+
+
+def require_owner(actor: User, settings: Settings | None = None) -> None:
+    """Гейт действий уровня владельца (напр. правка профиля клиента).
+
+    Редактирование данных клиента — только владелец (per-flag убран, менеджерам
+    недоступно). dev обходит проверку; иначе актёр должен быть активным владельцем.
+    """
+    if is_dev(actor.telegram_id, settings):
+        return
+    if actor.status is not UserStatus.active:
+        raise PermissionDenied("обліковий запис неактивний")
+    if actor.role is not UserRole.owner:
+        raise PermissionDenied("потрібна роль власника")
+
+
+def require_account_member(context: EffectiveContext | ClientAccountContext) -> None:
+    """Перевірити активність користувача, акаунта та membership."""
+    if isinstance(context, EffectiveContext) and context.is_dev:
+        return
+    account_context = context.account_context if isinstance(context, EffectiveContext) else context
+    if account_context is None:
+        raise PermissionDenied("не вибрано клієнтський акаунт")
+    if account_context.user.status is not UserStatus.active:
+        raise PermissionDenied("обліковий запис неактивний")
+    if account_context.account.status is not ClientAccountStatus.active:
+        raise PermissionDenied("клієнтський акаунт заблоковано")
+    if account_context.membership.status is not MembershipStatus.active:
+        raise PermissionDenied("членство в акаунті неактивне")
+
+
+def is_account_owner(context: EffectiveContext) -> bool:
+    """Владелец ли клиентского аккаунта (предикат, ничего не кидает).
+
+    Для рендера меню: без membership владельца нет (соло-клиент команду не ведёт),
+    поэтому `None → False`. Не путать с `_account_owner` в `client_cabinet`, который
+    на тот же `None` отвечает `True` — там вопрос другой («соло-клиент может править
+    свой профиль»).
+    """
+    membership = context.membership
+    return membership is not None and membership.role is MembershipRole.account_owner
+
+
+def require_account_owner(context: EffectiveContext | ClientAccountContext) -> None:
+    """Доступ до команди, ФОП, реквізитів і ключів НП."""
+    require_account_member(context)
+    account_context = context.account_context if isinstance(context, EffectiveContext) else context
+    if (
+        account_context is None
+        or account_context.membership.role is not MembershipRole.account_owner
+    ):
+        raise PermissionDenied("потрібна роль головного клієнта")

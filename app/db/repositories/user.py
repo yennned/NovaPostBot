@@ -6,7 +6,8 @@ import uuid
 
 from sqlalchemy import func, or_, select
 
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.client_account import ClientAccountMembership
+from app.db.models.enums import MembershipRole, UserRole, UserStatus
 from app.db.models.user import User
 from app.db.repositories.base import BaseRepository
 
@@ -19,8 +20,19 @@ class UserRepository(BaseRepository):
         stmt = select(User).where(User.telegram_id == telegram_id)
         return await self.session.scalar(stmt)
 
-    async def get_by_phone(self, phone: str) -> User | None:
+    async def get_by_phone(self, phone: str, *, for_update: bool = False) -> User | None:
+        """Пользователь по телефону. `for_update` — блокировка строки до конца транзакции.
+
+        Блокировка нужна там, где по прочитанному состоянию принимается решение
+        о записи (`account_team.invite_employee`): UNIQUE по `user_id` в членстве
+        ловит только двойную вставку, а два параллельных приглашения одного
+        номера прочитали бы одно и то же членство, оба прошли бы проверки и
+        перезаписали `membership.account` — оба вернули бы успех, а человек
+        остался бы в аккаунте того, кто закоммитил последним.
+        """
         stmt = select(User).where(User.phone == phone)
+        if for_update:
+            stmt = stmt.with_for_update()
         return await self.session.scalar(stmt)
 
     async def create(
@@ -29,23 +41,26 @@ class UserRepository(BaseRepository):
         telegram_id: int | None = None,
         phone: str | None = None,
         full_name: str | None = None,
-        stock_sheet_key: str | None = None,
-        stock_view_book_id: str | None = None,
         role: UserRole = UserRole.client,
         status: UserStatus = UserStatus.pending,
         permissions: dict | None = None,
+        create_account: bool = True,
+        account_name: str | None = None,
     ) -> User:
         user = User(
             telegram_id=telegram_id,
             phone=phone,
             full_name=full_name,
-            stock_sheet_key=stock_sheet_key or full_name or phone or str(telegram_id),
-            stock_view_book_id=stock_view_book_id,
             role=role,
             status=status,
             permissions=permissions or {},
         )
         await self._add(user)
+        if create_account and role is UserRole.client:
+            from app.db.repositories.client_account import ClientAccountRepository
+
+            # Ключ листа склада — свойство АККАУНТА: у пользователя его больше нет.
+            await ClientAccountRepository(self.session).create_for_owner(user, name=account_name)
         return user
 
     async def update_status(self, user: User, status: UserStatus) -> User:
@@ -90,25 +105,46 @@ class UserRepository(BaseRepository):
         (регистронезависимо) по `full_name`/`phone`.
         """
         conditions = [User.role == role]
+        include = select(User)
+        count_from = select(func.count()).select_from(User)
+        if role is UserRole.client:
+            include = include.outerjoin(
+                ClientAccountMembership, ClientAccountMembership.user_id == User.id
+            )
+            count_from = count_from.outerjoin(
+                ClientAccountMembership, ClientAccountMembership.user_id == User.id
+            )
+            conditions.append(
+                or_(
+                    ClientAccountMembership.id.is_(None),
+                    ClientAccountMembership.role == MembershipRole.account_owner,
+                )
+            )
         if status is not None:
             conditions.append(User.status == status)
         if query:
             pattern = f"%{query.strip()}%"
             conditions.append(or_(User.full_name.ilike(pattern), User.phone.ilike(pattern)))
 
-        total = await self.session.scalar(select(func.count()).select_from(User).where(*conditions))
+        total = await self.session.scalar(count_from.where(*conditions))
         rows = await self.session.scalars(
-            select(User)
-            .where(*conditions)
-            .order_by(User.created_at.desc())
-            .limit(limit)
-            .offset(offset)
+            include.where(*conditions).order_by(User.created_at.desc()).limit(limit).offset(offset)
         )
         return list(rows), int(total or 0)
 
     async def count_by_status(self, *, role: UserRole = UserRole.client) -> dict[UserStatus, int]:
         """Счётчики по статусам для роли (вкладки/бейджи). Нулевые статусы — 0."""
-        stmt = select(User.status, func.count()).where(User.role == role).group_by(User.status)
+        stmt = select(User.status, func.count()).where(User.role == role)
+        if role is UserRole.client:
+            stmt = stmt.outerjoin(
+                ClientAccountMembership, ClientAccountMembership.user_id == User.id
+            ).where(
+                or_(
+                    ClientAccountMembership.id.is_(None),
+                    ClientAccountMembership.role == MembershipRole.account_owner,
+                )
+            )
+        stmt = stmt.group_by(User.status)
         rows = await self.session.execute(stmt)
         counts: dict[UserStatus, int] = dict.fromkeys(UserStatus, 0)
         for status, count in rows:

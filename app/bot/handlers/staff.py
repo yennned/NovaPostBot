@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards import staff as kb
+from app.bot.keyboards.menus import MENU_TEXTS
 from app.bot.notify import BotNotifier
 from app.bot.states import StaffState
 from app.bot.texts import staff as texts
@@ -190,6 +191,20 @@ async def _status_action(
     await callback.answer("Готово")
 
 
+@router.callback_query(F.data.startswith("stf:block:"))
+async def cb_block(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    await _status_action(callback, effective_context, db_session, staff.block_manager)
+
+
+@router.callback_query(F.data.startswith("stf:unblock:"))
+async def cb_unblock(
+    callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
+) -> None:
+    await _status_action(callback, effective_context, db_session, staff.unblock_manager)
+
+
 @router.callback_query(F.data.startswith("stf:delete:"))
 async def cb_delete(
     callback: CallbackQuery, effective_context: EffectiveContext, db_session: AsyncSession
@@ -289,7 +304,7 @@ async def cb_search(
     await callback.answer()
 
 
-@router.message(StaffState.waiting_for_search, F.text)
+@router.message(StaffState.waiting_for_search, F.text, ~F.text.in_(MENU_TEXTS))
 async def staff_search_input(
     message: Message,
     effective_context: EffectiveContext,
@@ -304,7 +319,7 @@ async def staff_search_input(
     )
 
 
-@router.message(StaffState.waiting_for_add, F.text)
+@router.message(StaffState.waiting_for_add, F.text, ~F.text.in_(MENU_TEXTS))
 async def staff_add_input(
     message: Message,
     effective_context: EffectiveContext,

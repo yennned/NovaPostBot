@@ -7,6 +7,7 @@
 """
 
 from app.db.repositories.audit import AuditRepository
+from app.db.repositories.client_account import ClientAccountRepository
 from app.db.repositories.low_stock_alert import LowStockAlertRepository
 from app.db.repositories.notification_setting import NotificationSettingRepository
 from app.db.repositories.reports import ReportsRepository
@@ -18,6 +19,7 @@ from app.db.repositories.user import UserRepository
 
 __all__ = [
     "AuditRepository",
+    "ClientAccountRepository",
     "LowStockAlertRepository",
     "NotificationSettingRepository",
     "ReportsRepository",

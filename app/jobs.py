@@ -9,7 +9,7 @@ from typing import Protocol
 from app.config import Settings, get_settings
 from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import LowStockAlertRepository, UserRepository
+from app.db.repositories import ClientAccountRepository, LowStockAlertRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
 from app.services import duty, notifications, tracking
 from app.services.inventory import InventoryItem, get_inventory_snapshot
@@ -73,11 +73,17 @@ async def _collect_low_stock_alerts(
     session,
     *,
     client,
+    account_id=None,
     threshold: int,
     items: list[InventoryItem],
 ) -> list[InventoryItem]:
     repo = LowStockAlertRepository(session)
-    known = {row.sku: row for row in await repo.list_for_client(client.id)}
+    known_rows = (
+        await repo.list_for_account(account_id)
+        if account_id is not None
+        else await repo.list_for_client(client.id)
+    )
+    known = {row.sku: row for row in known_rows}
     now = datetime.now(UTC)
     should_notify, updates = _plan_low_stock_updates(
         threshold=threshold,
@@ -88,6 +94,7 @@ async def _collect_low_stock_alerts(
     for update in updates:
         await repo.upsert_state(
             client_id=client.id,
+            account_id=account_id,
             sku=update.sku,
             is_low=update.is_low,
             last_available=update.last_available,
@@ -150,10 +157,19 @@ async def low_stock_job(
         )
         alerts = 0
         for client in clients:
-            items = await get_inventory_snapshot(session, client=client)
+            account_scope = await ClientAccountRepository(session).get_context_for_user(client.id)
+            account = account_scope[0] if account_scope is not None else None
+            account_id = account.id if account is not None else None
+            items = await get_inventory_snapshot(
+                session,
+                client=client,
+                account_id=account_id,
+                account=account,
+            )
             low = await _collect_low_stock_alerts(
                 session,
                 client=client,
+                account_id=account_id,
                 threshold=current_settings.low_stock_threshold,
                 items=items,
             )

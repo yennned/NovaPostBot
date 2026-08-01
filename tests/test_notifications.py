@@ -111,12 +111,7 @@ async def test_notify_shipment_status_changed_respects_client_toggle(db_session:
     )
     notifier = FakeNotifier()
 
-    await notifications.notify_shipment_status_changed(
-        db_session,
-        notifier,
-        client=client,
-        shipment=shipment,
-    )
+    await notifications.notify_shipment_status_changed(db_session, notifier, shipment=shipment)
 
     assert notifier.sent == []
 

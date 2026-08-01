@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from app.bot.keyboards.client import (
+    NOTIFICATION_CALLBACK_TOKENS,
     build_inventory_kb,
     build_sender_profile_kb,
     build_settings_kb,
     build_shipment_card_kb,
     build_shipments_kb,
 )
+from app.bot.texts.client_cabinet import products_text
 from app.db.models.enums import OrgType
-from app.services.client_settings import ClientSettingsView, NotificationSettingView
-from app.services.inventory import InventoryPage
+from app.services.client_settings import (
+    DEFAULT_NOTIFICATION_SETTINGS,
+    ClientSettingsView,
+    NotificationSettingView,
+)
+from app.services.inventory import InventoryItem, InventoryPage
 from app.services.sender_profile import SenderProfileView
 from app.services.shipments import ShipmentPage
 
@@ -28,26 +35,27 @@ def _all_callbacks(markup) -> list[str]:
     ]
 
 
+def test_every_notification_key_has_callback_token():
+    """Пропуск токена роняет весь экран настроек `KeyError` — молча, без ответа.
+
+    Так и было с `notify_all_account_shipments`: ключ добавили в дефолты, метку и
+    рассылку, а токен — нет. Экран настроек умер у всех клиентов, а тесты остались
+    зелёными, потому что ниже собирали `view` из трёх ключей вручную.
+    """
+    assert set(NOTIFICATION_CALLBACK_TOKENS) == set(DEFAULT_NOTIFICATION_SETTINGS)
+    tokens = list(NOTIFICATION_CALLBACK_TOKENS.values())
+    assert len(set(tokens)) == len(tokens), "токены обязаны быть уникальными"
+
+
 def test_settings_callbacks_fit_telegram_limit():
+    # Уведомления — из настоящих дефолтов, а не из ручного списка: иначе тест не
+    # видит ключи, добавленные в сервис (см. тест выше).
     view = ClientSettingsView(
         full_name="Клієнт",
         phone="+380001",
         notifications=[
-            NotificationSettingView(
-                key="notify_registration_approved",
-                label="Підтвердження реєстрації",
-                enabled=True,
-            ),
-            NotificationSettingView(
-                key="notify_shipment_status",
-                label="Статуси відправлень",
-                enabled=True,
-            ),
-            NotificationSettingView(
-                key="notify_low_stock",
-                label="Залишки та low-stock",
-                enabled=True,
-            ),
+            NotificationSettingView(key=key, label=key, enabled=True)
+            for key in DEFAULT_NOTIFICATION_SETTINGS
         ],
         sender_profiles_count=1,
         default_sender_name="ФОП-1",
@@ -125,14 +133,46 @@ def test_inventory_reset_button_only_with_active_filter():
     )
 
 
-def test_inventory_shows_sheet_link_only_when_url_present():
-    # Без книги-зеркала ссылки нет.
-    no_link = build_inventory_kb(_inventory_page())
-    urls = [b.url for row in no_link.inline_keyboard for b in row if b.url]
-    assert urls == []
-    # С url — появляется кнопка-ссылка.
-    with_link = build_inventory_kb(
-        _inventory_page(), sheet_url="https://docs.google.com/spreadsheets/d/BOOK"
+def test_inventory_product_rows_are_noop():
+    """Регрессия: строки товаров вели на `cab:products:{offset}` — перерисовку той же
+    страницы. Telegram отклонял её как «message is not modified», исключение уносило
+    хендлер мимо `callback.answer()`, и на кнопке оставался висеть спиннер.
+    """
+    page = InventoryPage(
+        items=[
+            InventoryItem(
+                sku="SKU1",
+                name="Кава",
+                category="Напої",
+                stock=5,
+                reserved=0,
+                available=5,
+                price=Decimal("100"),
+            )
+        ],
+        total=20,  # больше лимита → в клавиатуре появится ряд пагинации
+        limit=1,
+        offset=0,
+        categories=["Напої"],
     )
-    urls = [b.url for row in with_link.inline_keyboard for b in row if b.url]
-    assert urls == ["https://docs.google.com/spreadsheets/d/BOOK"]
+    kb = build_inventory_kb(page)
+    product_rows = [row for row in kb.inline_keyboard if row[0].text.startswith("Напої")]
+
+    assert [b.callback_data for row in product_rows for b in row] == ["cab:pnoop"]
+    # Пагинация остаётся живой — она действительно меняет содержимое экрана.
+    assert "cab:products:1" in _all_callbacks(kb)
+
+
+def test_inventory_no_sheet_link_button_in_keyboard():
+    # Ссылка на таблицу теперь живёт в тексте, а не кнопкой — url-кнопок нет.
+    kb = build_inventory_kb(_inventory_page(), active_category="Одяг", query="товар")
+    urls = [b.url for row in kb.inline_keyboard for b in row if b.url]
+    assert urls == []
+
+
+def test_products_text_shows_sheet_link_only_when_url_present():
+    # Без книги-зеркала ссылки в тексте нет.
+    assert "href" not in products_text(_inventory_page())
+    # С url — в тексте под заголовком появляется HTML-ссылка.
+    text = products_text(_inventory_page(), sheet_url="https://docs.google.com/spreadsheets/d/BOOK")
+    assert 'href="https://docs.google.com/spreadsheets/d/BOOK"' in text

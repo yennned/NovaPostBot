@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from app.bot.texts.common import invalid_phone_text
 from app.db.models.enums import ShipmentStatus
 from app.services.client_settings import ClientSettingsView
 from app.services.inventory import InventoryItem, InventoryPage
@@ -44,8 +46,16 @@ def _fmt_dt(value: datetime) -> str:
     return fmt_dt(value, "%d.%m.%Y %H:%M")
 
 
-def products_text(page: InventoryPage) -> str:
+def products_text(page: InventoryPage, *, sheet_url: str | None = None) -> str:
     parts = [f"📦 <b>Товари</b> · {page.total} позицій"]
+    if sheet_url:
+        # Ссылка на персональную read-only Google-таблицу склада — в тексте под
+        # заголовком, чтобы клиент мог свериться (web-preview у сообщения отключён).
+        # Экранируем URL: book_id мог прийти из сырого ввода оператора (--attach-book),
+        # неэкранированные `"`/`<`/`&` иначе ломают HTML → Telegram 400 на всём экране.
+        parts.append(
+            f'🔗 <a href="{html.escape(sheet_url, quote=True)}">Моя таблиця складу (перегляд)</a>'
+        )
     if page.categories:
         parts.append("Категорії: " + ", ".join(page.categories[:5]))
     if not page.items:
@@ -85,6 +95,11 @@ def shipment_card_text(card: ShipmentCard) -> str:
         "📬 <b>Картка відправлення</b>",
         f"ТТН: <b>{card.ttn_number or 'ще не присвоєно'}</b>",
         f"Статус: <b>{_STATUS_LABELS[card.status]}</b>",
+        *(
+            [f"Причина скасування: {html.escape(card.cancellation_reason)}"]
+            if card.cancellation_reason
+            else []
+        ),
         f"Одержувач: {card.recipient_name}",
         f"Телефон: {card.recipient_phone or '—'}",
         f"Місто: {card.recipient_city or '—'}",
@@ -92,6 +107,7 @@ def shipment_card_text(card: ShipmentCard) -> str:
         f"Оплата: {card.payment_method or '—'} / {card.payer_type or '—'}",
         f"COD: {_money(card.cod_amount)} · Оціночна: {_money(card.insured_amount)}",
         f"Створено: {_fmt_dt(card.created_at)}",
+        f"Автор ТТН: {card.created_by_name or '—'}",
         f"Оновлено: {_fmt_dt(card.status_changed_at)}",
         f"Відправлено: {_fmt_dt(card.dispatched_at) if card.dispatched_at else '—'}",
         f"SLA дедлайн: {_fmt_dt(card.sla_deadline) if card.sla_deadline else '—'}",
@@ -244,7 +260,7 @@ def new_profile_key_invalid_text() -> str:
 
 
 def new_profile_invalid_phone_text() -> str:
-    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."
+    return invalid_phone_text()
 
 
 def new_profile_np_unavailable_text() -> str:

@@ -15,6 +15,7 @@ from app.db.models.shipment import Shipment, ShipmentItem
 from app.db.models.stock_movement import StockMovement
 from app.db.models.user import User
 from app.db.repositories.base import BaseRepository
+from app.db.repositories.scope import resolve_account_scope
 
 RESERVING_STATUSES = {ShipmentStatus.created, ShipmentStatus.confirmed}
 TRACKABLE_STATUSES = {
@@ -42,6 +43,8 @@ class ShipmentRepository(BaseRepository):
             select(Shipment)
             .options(
                 joinedload(Shipment.client),
+                joinedload(Shipment.created_by_user),
+                joinedload(Shipment.account),
                 joinedload(Shipment.items),
                 joinedload(Shipment.sender_profile),
                 joinedload(Shipment.stock_movements),
@@ -50,11 +53,29 @@ class ShipmentRepository(BaseRepository):
         )
         return await self.session.scalar(stmt)
 
+    async def get_by_id_for_account(
+        self, shipment_id: uuid.UUID, account_id: uuid.UUID
+    ) -> Shipment | None:
+        stmt = (
+            select(Shipment)
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.account),
+                joinedload(Shipment.created_by_user),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+                joinedload(Shipment.stock_movements),
+            )
+            .where(Shipment.id == shipment_id, Shipment.account_id == account_id)
+        )
+        return await self.session.scalar(stmt)
+
     async def get_by_ttn_number(self, ttn_number: str) -> Shipment | None:
         stmt = (
             select(Shipment)
             .options(
                 joinedload(Shipment.client),
+                joinedload(Shipment.created_by_user),
                 joinedload(Shipment.items),
                 joinedload(Shipment.sender_profile),
                 joinedload(Shipment.stock_movements),
@@ -66,7 +87,9 @@ class ShipmentRepository(BaseRepository):
     async def create(
         self,
         *,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         recipient_name: str,
         items: list[ShipmentItemDraft],
         sender_profile_id: uuid.UUID | None = None,
@@ -86,9 +109,15 @@ class ShipmentRepository(BaseRepository):
         description: str | None = None,
         created_at: datetime | None = None,
         status_changed_at: datetime | None = None,
+        cancellation_reason: str | None = None,
     ) -> Shipment:
+        client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
         shipment = Shipment(
             client_id=client_id,
+            account_id=account_id,
+            created_by_user_id=created_by_user_id or client_id,
             sender_profile_id=sender_profile_id,
             ttn_number=ttn_number,
             np_ref=np_ref,
@@ -104,6 +133,7 @@ class ShipmentRepository(BaseRepository):
             size_preset=size_preset,
             weight=weight,
             status=status,
+            cancellation_reason=cancellation_reason,
             description=description,
         )
         if created_at is not None:
@@ -139,15 +169,7 @@ class ShipmentRepository(BaseRepository):
         if statuses:
             conditions.append(Shipment.status.in_(tuple(statuses)))
         if query:
-            stripped = query.strip()
-            text_filters = []
-            pattern = f"%{stripped}%"
-            text_filters.append(Shipment.ttn_number.ilike(pattern))
-            text_filters.append(Shipment.recipient_name.ilike(pattern))
-            parsed_date = _parse_query_date(stripped)
-            if parsed_date is not None:
-                text_filters.append(cast(Shipment.created_at, Date) == parsed_date)
-            conditions.append(or_(*text_filters))
+            conditions.append(or_(*_shipment_search_filters(query)))
 
         total = await self.session.scalar(
             select(func.count()).select_from(Shipment).where(*conditions)
@@ -169,25 +191,64 @@ class ShipmentRepository(BaseRepository):
         )
         return list(rows.unique()), int(total or 0)
 
+    async def get_by_account_and_status(
+        self,
+        account_id: uuid.UUID,
+        *,
+        statuses: set[ShipmentStatus] | None = None,
+        query: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[Shipment], int]:
+        conditions = [Shipment.account_id == account_id]
+        if statuses:
+            conditions.append(Shipment.status.in_(tuple(statuses)))
+        if query:
+            conditions.append(or_(*_shipment_search_filters(query)))
+        total = await self.session.scalar(
+            select(func.count()).select_from(Shipment).where(*conditions)
+        )
+        rows = await self.session.scalars(
+            select(Shipment)
+            .options(
+                joinedload(Shipment.client),
+                joinedload(Shipment.account),
+                joinedload(Shipment.created_by_user),
+                joinedload(Shipment.items),
+                joinedload(Shipment.sender_profile),
+            )
+            .where(*conditions)
+            .order_by(Shipment.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(rows.unique()), int(total or 0)
+
     async def list_status_changed_between(
         self,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
         *,
         start: datetime,
         end: datetime,
         statuses: set[ShipmentStatus] | None = None,
+        account_id: uuid.UUID | None = None,
     ) -> list[Shipment]:
         conditions = [
-            Shipment.client_id == client_id,
             Shipment.status_changed_at >= start,
             Shipment.status_changed_at < end,
         ]
+        conditions.append(
+            Shipment.account_id == account_id
+            if account_id is not None
+            else Shipment.client_id == client_id
+        )
         if statuses:
             conditions.append(Shipment.status.in_(tuple(statuses)))
         stmt = (
             select(Shipment)
             .options(
                 joinedload(Shipment.client),
+                joinedload(Shipment.account),
                 joinedload(Shipment.items),
                 joinedload(Shipment.sender_profile),
             )
@@ -199,20 +260,24 @@ class ShipmentRepository(BaseRepository):
 
     async def list_dispatched_between(
         self,
-        client_id: uuid.UUID,
+        client_id: uuid.UUID | None = None,
         *,
         start: datetime,
         end: datetime,
+        account_id: uuid.UUID | None = None,
     ) -> list[Shipment]:
         stmt = (
             select(Shipment)
             .options(
                 joinedload(Shipment.client),
+                joinedload(Shipment.created_by_user),
                 joinedload(Shipment.items),
                 joinedload(Shipment.sender_profile),
             )
             .where(
-                Shipment.client_id == client_id,
+                Shipment.account_id == account_id
+                if account_id is not None
+                else Shipment.client_id == client_id,
                 or_(
                     and_(
                         Shipment.dispatched_at.is_not(None),
@@ -252,11 +317,25 @@ class ShipmentRepository(BaseRepository):
         rows = await self.session.execute(stmt)
         return {sku: int(total) for sku, total in rows}
 
+    async def reserved_by_account(self, account_id: uuid.UUID) -> dict[str, int]:
+        stmt = (
+            select(ShipmentItem.sku, func.coalesce(func.sum(ShipmentItem.quantity), 0))
+            .join(Shipment, Shipment.id == ShipmentItem.shipment_id)
+            .where(
+                Shipment.account_id == account_id,
+                Shipment.status.in_(tuple(RESERVING_STATUSES)),
+            )
+            .group_by(ShipmentItem.sku)
+        )
+        rows = await self.session.execute(stmt)
+        return {sku: int(total) for sku, total in rows}
+
     async def list_for_tracking(self, *, limit: int = 200) -> list[Shipment]:
         stmt = (
             select(Shipment)
             .options(
                 joinedload(Shipment.client),
+                joinedload(Shipment.account),
                 joinedload(Shipment.items),
                 joinedload(Shipment.sender_profile),
                 joinedload(Shipment.stock_movements),
@@ -288,17 +367,12 @@ class ShipmentRepository(BaseRepository):
             select(func.count()).select_from(Shipment).join(User, User.id == Shipment.client_id)
         )
         if query:
-            stripped = query.strip()
-            pattern = f"%{stripped}%"
-            text_filters = [
-                Shipment.ttn_number.ilike(pattern),
-                Shipment.recipient_name.ilike(pattern),
-                User.full_name.ilike(pattern),
-                User.phone.ilike(pattern),
-            ]
-            parsed_date = _parse_query_date(stripped)
-            if parsed_date is not None:
-                text_filters.append(cast(Shipment.created_at, Date) == parsed_date)
+            # У персонала список чужой, поэтому к базовому фильтру добавляется поиск
+            # по самому клиенту.
+            pattern = f"%{query.strip()}%"
+            text_filters = _shipment_search_filters(query)
+            text_filters.append(User.full_name.ilike(pattern))
+            text_filters.append(User.phone.ilike(pattern))
             conditions.append(or_(*text_filters))
         if conditions:
             stmt = stmt.where(*conditions)
@@ -307,6 +381,7 @@ class ShipmentRepository(BaseRepository):
         rows = await self.session.scalars(
             stmt.options(
                 joinedload(Shipment.client),
+                joinedload(Shipment.created_by_user),
                 joinedload(Shipment.items),
                 joinedload(Shipment.sender_profile),
                 joinedload(Shipment.stock_movements),
@@ -365,3 +440,22 @@ def _parse_query_date(raw: str) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _shipment_search_filters(query: str) -> list:
+    """Базовый фильтр поиска отправления: ТТН, получатель, дата создания.
+
+    Единая точка — три реализации разъехались: account-путь потерял ветку даты, и
+    поиск по дате молча не работал у ВСЕХ клиентов (акаунт есть у каждого, значит
+    берётся именно он). `list_for_staff` дополняет список поиском по клиенту.
+    """
+    stripped = query.strip()
+    pattern = f"%{stripped}%"
+    filters = [
+        Shipment.ttn_number.ilike(pattern),
+        Shipment.recipient_name.ilike(pattern),
+    ]
+    parsed_date = _parse_query_date(stripped)
+    if parsed_date is not None:
+        filters.append(cast(Shipment.created_at, Date) == parsed_date)
+    return filters

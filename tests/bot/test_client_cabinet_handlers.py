@@ -9,9 +9,12 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+from aiogram.exceptions import TelegramBadRequest
 from app.bot.handlers.client_cabinet import (
     cb_calendar_day,
     cb_cancel_shipment,
+    cb_product_noop,
+    cb_products,
     cb_settings_toggle,
     cb_shipment_card,
     cb_stats,
@@ -24,9 +27,10 @@ from app.bot.handlers.client_cabinet import (
     receive_new_profile_sender_name,
 )
 from app.bot.states import SenderProfileCreateState
+from app.bot.types import ClientAccountContext, EffectiveContext
 from app.config import Settings
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
-from app.db.repositories import SenderProfileRepository, UserRepository
+from app.db.repositories import ClientAccountRepository, SenderProfileRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
 from app.services.client_settings import ClientSettingsView, NotificationSettingView
 from app.services.inventory import InventoryItem, InventoryPage
@@ -38,6 +42,29 @@ from app.services.shipments import (
 )
 from app.services.stats import ClientStatsSnapshot, TopSkuStat
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def _ctx(session, client) -> EffectiveContext:
+    """Настоящий EffectiveContext — как его собирает мидлварь.
+
+    Включая `account_context`: у клиента аккаунт есть всегда, и склад/ТТН
+    account-scoped. Контекст без аккаунта — сломанное состояние, которое сервисы
+    теперь отвергают (`shipments.require_client_account`), поэтому и в тестах его
+    строить нельзя: тест на несуществующем состоянии ничего не доказывает.
+    """
+    account_scope = await ClientAccountRepository(session).get_context_for_user(client.id)
+    context = EffectiveContext(
+        actor_user=client,
+        effective_user=client,
+        effective_role=UserRole.client,
+        is_dev=False,
+    )
+    if account_scope is not None:
+        account, membership = account_scope
+        context.account_context = ClientAccountContext(
+            user=client, account=account, membership=membership
+        )
+    return context
 
 
 class FakeState:
@@ -68,10 +95,10 @@ class FakeMessage:
         self.edits: list[dict] = []
         self.deleted = False
 
-    async def answer(self, text, reply_markup=None, parse_mode=None) -> None:
+    async def answer(self, text, reply_markup=None, parse_mode=None, **kwargs) -> None:
         self.answers.append({"text": text, "reply_markup": reply_markup, "parse_mode": parse_mode})
 
-    async def edit_text(self, text, reply_markup=None, parse_mode=None) -> None:
+    async def edit_text(self, text, reply_markup=None, parse_mode=None, **kwargs) -> None:
         self.edits.append({"text": text, "reply_markup": reply_markup, "parse_mode": parse_mode})
 
     async def delete(self) -> None:
@@ -128,7 +155,15 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
     msg = FakeMessage()
 
     async def fake_list_inventory(
-        session, *, client, query=None, category=None, limit=8, offset=0, reader=None
+        session,
+        *,
+        client,
+        query=None,
+        category=None,
+        limit=8,
+        offset=0,
+        reader=None,
+        **kwargs,
     ):
         return InventoryPage(
             items=[
@@ -152,7 +187,7 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
     await open_products(
         msg,
         FakeState(),
-        SimpleNamespace(actor_user=client, effective_user=client),
+        await _ctx(db_session, client),
         db_session,
     )
 
@@ -160,12 +195,49 @@ async def test_open_products_renders_inventory(db_session: AsyncSession, monkeyp
     assert "Товари" in msg.answers[0]["text"]
 
 
+async def test_products_pagination_acks_even_when_not_modified(
+    db_session: AsyncSession, monkeypatch
+):
+    """Регрессия: `edit_text` бросал «message is not modified», исключение уносило
+    хендлер мимо `callback.answer()`, и Telegram оставлял спиннер на кнопке —
+    для пользователя кнопка выглядела нерабочей, «оживая» лишь спустя минуты.
+    """
+    client = await _active_client(db_session, 741)
+
+    async def fake_list_inventory(session, *, client, **kwargs):
+        return InventoryPage(items=[], total=0, limit=6, offset=0, categories=[])
+
+    monkeypatch.setattr("app.bot.handlers.client_cabinet.list_inventory", fake_list_inventory)
+
+    cb = FakeCallback("cab:products:0")
+
+    async def raise_not_modified(*args, **kwargs):
+        raise TelegramBadRequest(
+            method=SimpleNamespace(), message="Bad Request: message is not modified"
+        )
+
+    cb.message.edit_text = raise_not_modified
+
+    await cb_products(cb, await _ctx(db_session, client), db_session, FakeState())
+
+    assert cb.acks, "callback остался без ответа → висящий спиннер на кнопке"
+
+
+async def test_product_row_tap_is_noop_and_acked():
+    """Строка товара — витрина: мгновенный ack, ноль чтений склада."""
+    cb = FakeCallback("cab:pnoop")
+
+    await cb_product_noop(cb)
+
+    assert cb.acks == [{"text": None, "show_alert": False}]
+
+
 async def test_open_shipments_renders_list(db_session: AsyncSession, monkeypatch):
     client = await _active_client(db_session, telegram_id=701)
     msg = FakeMessage()
 
     async def fake_list_shipments(
-        session, *, client, bucket="created", query=None, limit=8, offset=0
+        session, *, client, bucket="created", query=None, limit=8, offset=0, **kwargs
     ):
         return ShipmentPage(
             items=[
@@ -187,7 +259,7 @@ async def test_open_shipments_renders_list(db_session: AsyncSession, monkeypatch
     await open_shipments(
         msg,
         FakeState(),
-        SimpleNamespace(actor_user=client, effective_user=client),
+        await _ctx(db_session, client),
         db_session,
     )
 
@@ -200,7 +272,7 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
     shipment_id = uuid4()
     cb = FakeCallback(data=f"cab:shipment:created:0:{shipment_id}")
 
-    async def fake_get_shipment_card(session, *, client, shipment_id):
+    async def fake_get_shipment_card(session, *, client, shipment_id, **kwargs):
         return ShipmentCard(
             id=shipment_id,
             ttn_number="TTN-777",
@@ -235,7 +307,7 @@ async def test_cb_shipment_card_renders_card(db_session: AsyncSession, monkeypat
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_shipment_card", fake_get_shipment_card)
     await cb_shipment_card(
         cb,
-        SimpleNamespace(actor_user=client, effective_user=client),
+        await _ctx(db_session, client),
         db_session,
         FakeState(),
     )
@@ -249,14 +321,14 @@ async def test_cb_cancel_shipment_updates_card(db_session: AsyncSession, monkeyp
     shipment_id = uuid4()
     cb = FakeCallback(data=f"cab:cancel:created:0:{shipment_id}")
 
-    async def fake_cancel_shipment(session, *, client, shipment_id, np_client):
+    async def fake_cancel_shipment(session, *, client, shipment_id, np_client, **kwargs):
         # Хендлер не использует возврат — после отмены ререндерит список группы.
         return None
 
     monkeypatch.setattr("app.bot.handlers.client_cabinet.cancel_shipment", fake_cancel_shipment)
     await cb_cancel_shipment(
         cb,
-        SimpleNamespace(actor_user=client, effective_user=client),
+        await _ctx(db_session, client),
         db_session,
         object(),  # np_client (фейк — реальная отмена замокана)
         FakeState(),
@@ -272,7 +344,7 @@ async def test_open_settings_renders_view(db_session: AsyncSession, monkeypatch)
     client = await _active_client(db_session, telegram_id=705)
     msg = FakeMessage()
 
-    async def fake_get_client_settings(session, *, client):
+    async def fake_get_client_settings(session, *, client, **kwargs):
         return _settings_view()
 
     monkeypatch.setattr(
@@ -282,7 +354,7 @@ async def test_open_settings_renders_view(db_session: AsyncSession, monkeypatch)
     await open_settings(
         msg,
         FakeState(),
-        SimpleNamespace(actor_user=client, effective_user=client),
+        await _ctx(db_session, client),
         db_session,
     )
 
@@ -294,7 +366,7 @@ async def test_cb_settings_toggle_updates_view(db_session: AsyncSession, monkeyp
     client = await _active_client(db_session, telegram_id=706)
     cb = FakeCallback(data="cab:set:toggle:shp")
 
-    async def fake_toggle_notification(session, *, client, key):
+    async def fake_toggle_notification(session, *, client, key, **kwargs):
         assert key == "notify_shipment_status"
         return _settings_view(shipment_status=False)
 
@@ -304,7 +376,7 @@ async def test_cb_settings_toggle_updates_view(db_session: AsyncSession, monkeyp
     )
     await cb_settings_toggle(
         cb,
-        SimpleNamespace(actor_user=client, effective_user=client),
+        await _ctx(db_session, client),
         db_session,
         FakeState(),
     )
@@ -318,7 +390,7 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
     client = await _active_client(db_session, telegram_id=703)
     cb = FakeCallback(data="cab:stats:week")
 
-    async def fake_get_client_stats(session, *, client, period="today"):
+    async def fake_get_client_stats(session, *, client, period="today", **kwargs):
         now = datetime.now(UTC)
         return ClientStatsSnapshot(
             period=period,
@@ -333,9 +405,7 @@ async def test_cb_stats_renders_period(db_session: AsyncSession, monkeypatch):
         )
 
     monkeypatch.setattr("app.bot.handlers.client_cabinet.get_client_stats", fake_get_client_stats)
-    await cb_stats(
-        cb, SimpleNamespace(actor_user=client, effective_user=client), db_session, FakeState()
-    )
+    await cb_stats(cb, await _ctx(db_session, client), db_session, FakeState())
 
     assert cb.message.edits
     assert "Статистика" in cb.message.edits[0]["text"]
@@ -365,7 +435,7 @@ _VALID_KEY_ROUTES = {
 
 async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=710)
-    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
 
     await receive_new_profile_name(FakeMessage("ФОП Тест"), state)
@@ -390,7 +460,7 @@ async def test_add_fop_wizard_creates_validated_profile(db_session: AsyncSession
 
 async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=711)
-    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
     await receive_new_profile_name(FakeMessage("ФОП Х"), state)
     await receive_new_profile_key(FakeMessage("bad-key"), state)
@@ -415,7 +485,7 @@ async def test_add_fop_wizard_rejects_invalid_key(db_session: AsyncSession):
 async def test_add_fop_wizard_np_unavailable_keeps_phone_step(db_session: AsyncSession):
     """НП недоступна (5xx) при проверке ключа → черновик цел, шаг телефона держим."""
     client = await _active_client(db_session, telegram_id=712)
-    ctx = SimpleNamespace(effective_user=client, actor_user=client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
     await receive_new_profile_name(FakeMessage("ФОП Down"), state)
     await receive_new_profile_key(FakeMessage("np-secret-key"), state)
@@ -437,7 +507,7 @@ async def test_calendar_range_flow_passes_date_from_to(db_session: AsyncSession,
     from datetime import date
 
     client = await _active_client(db_session, telegram_id=730)
-    ctx = SimpleNamespace(actor_user=client, effective_user=client)
+    ctx = await _ctx(db_session, client)
     state = FakeState()
     captured: dict = {}
 

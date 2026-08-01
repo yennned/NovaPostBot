@@ -61,3 +61,8 @@ def dev_mode_banner(role: UserRole | None, impersonated: bool = False) -> str:
         return "🧪 dev god-mode"
     suffix = " · impersonation" if impersonated else ""
     return f"🧪 as {role.value}{suffix}"
+
+
+def invalid_phone_text() -> str:
+    """Единый текст отказа по телефону — на всех точках ввода (ТТН, ФОП, клиенты)."""
+    return "❌ Невірний номер. Введіть у форматі 0XXXXXXXXX або +380XXXXXXXXX."

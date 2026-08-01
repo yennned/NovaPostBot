@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiogram import Dispatcher
+from aiogram import Dispatcher, Router
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot.handlers import (
+    account_team_router,
     analytics_router,
     client_cabinet_router,
     clients_router,
     dev_router,
     duty_router,
     errors_router,
+    fallback_router,
     manager_shipments_router,
+    menu_escape_router,
     reports_router,
     staff_router,
     start_router,
@@ -29,6 +32,40 @@ from app.db.base import get_sessionmaker
 if TYPE_CHECKING:
     from app.novaposhta.cache import NPReferenceCache
     from app.novaposhta.client import NovaPoshtaClient
+
+
+#: Порядок подключения роутеров — часть контракта, а не оформление.
+#:
+#: * `menu_escape` **первым**: тап кнопки нижней панели снимает FSM-стейт брошенного
+#:   сценария и уходит дальше (`SkipHandler`). Хендлеры со свободным текстом
+#:   дополнительно исключают `MENU_TEXTS` — `raw_state` для фильтров вычисляется до
+#:   того, как этот роутер очистит состояние (см. `handlers/menu_escape.py`).
+#: * `fallback` **предпоследним**: отвечает на callback, который не подобрал ни один
+#:   хендлер выше. Без него такой тап уходит в тишину, а Telegram крутит спиннер на
+#:   кнопке — самая частая жалоба «кнопка зависла».
+#: * `errors` **строго последним**: внутри обработчик без фильтра на любое
+#:   неожиданное исключение; роутер, добавленный после, остался бы без него.
+#:
+#: Вынесено отдельной константой, чтобы порядок можно было проверить тестом, не
+#: собирая `Dispatcher`: роутеры — модульные синглтоны, и второй `build_dispatcher`
+#: в том же процессе падает с «Router is already attached».
+ROUTER_ORDER: tuple[Router, ...] = (
+    menu_escape_router,
+    start_router,
+    dev_router,
+    clients_router,
+    duty_router,
+    manager_shipments_router,
+    support_router,
+    staff_router,
+    reports_router,
+    analytics_router,
+    account_team_router,
+    client_cabinet_router,
+    ttn_router,
+    fallback_router,
+    errors_router,
+)
 
 
 def build_dispatcher(
@@ -53,16 +90,6 @@ def build_dispatcher(
     dp.update.outer_middleware(services_middleware)
     dp.update.outer_middleware(context_middleware)
 
-    dp.include_router(start_router)
-    dp.include_router(dev_router)
-    dp.include_router(clients_router)
-    dp.include_router(duty_router)
-    dp.include_router(manager_shipments_router)
-    dp.include_router(support_router)
-    dp.include_router(staff_router)
-    dp.include_router(reports_router)
-    dp.include_router(analytics_router)
-    dp.include_router(client_cabinet_router)
-    dp.include_router(ttn_router)
-    dp.include_router(errors_router)  # backstop: ключ ФОП (FERNET_KEY) + «message is not modified»
+    for router in ROUTER_ORDER:
+        dp.include_router(router)
     return dp

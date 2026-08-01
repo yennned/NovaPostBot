@@ -18,11 +18,13 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.db.models.enums import ShipmentStatus, StockMovementType
+from app.db.models.client_account import ClientAccount
+from app.db.models.enums import ClientAccountStatus, ShipmentStatus, StockMovementType
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.user import User
 from app.db.repositories import (
     AuditRepository,
+    ClientAccountRepository,
     SenderProfileRepository,
     ShipmentItemDraft,
     ShipmentRepository,
@@ -32,20 +34,23 @@ from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError, NovaPoshtaNotFound
 from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
+from app.novaposhta.tracking import is_deleted_in_np
 from app.services import inventory, notifications, shipments
 from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import (
     InsufficientStock,
+    PermissionDenied,
     SenderDispatchNotConfigured,
     SenderProfileIncomplete,
-    SenderProfileNotConfigured,
     SenderProfileNotValidated,
     ShipmentNotFound,
     TtnCancelFailed,
     TtnCreationFailed,
 )
 from app.services.notifications import Notifier
-from app.sheets import StockSource
+from app.services.sender_scope import resolve_scoped_profile
+from app.sheets import StockSource, invalidate_stock_cache
+from app.utils.phone import normalize_phone
 from app.utils.sla import shipment_sla_deadline
 
 logger = structlog.get_logger(__name__)
@@ -64,31 +69,51 @@ def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> No
     `contact_ref`/`phone`/`city_ref`/`warehouse_ref`, и НП отклонила бы ТТН уже на
     save. Порядок проверок — от «ключ» к «профиль» к «системный конфиг»:
     - нет `np_sender_ref` → `SenderProfileNotValidated` (ключ не подтверждён);
-    - нет `np_contact_ref`/`sender_phone` → `SenderProfileIncomplete` (дозаполнить ФОП);
+    - нет `np_contact_ref` / телефон пуст или некорректен → `SenderProfileIncomplete`
+      (дозаполнить ФОП);
     - пуст город/відділення отправителя → `SenderDispatchNotConfigured` (конфиг `.env`).
+
+    Телефон проверяем `normalize_phone`, а не на непустоту: в БД могли осесть
+    профили с мусором (`Тест ФОП`) от старого пути правки, где валидации не было.
+    Иначе мусор доходит до НП, и клиент видит её текст («Вкажіть коректний номер
+    телефону») вместо понятной ошибки бота.
     """
     if not profile.np_sender_ref:
         raise SenderProfileNotValidated("ключ ФОП не підтверджено в НП")
-    if not profile.np_contact_ref or not (profile.sender_phone or "").strip():
-        raise SenderProfileIncomplete("немає контакту/телефону відправника")
+    if not profile.np_contact_ref or normalize_phone(profile.sender_phone or "") is None:
+        raise SenderProfileIncomplete("немає контакту або коректного телефону відправника")
     warehouse_ref = profile.np_sender_warehouse or settings.np_sender_warehouse_ref
     if not settings.np_sender_city_ref or not warehouse_ref:
         raise SenderDispatchNotConfigured("склад відправника не налаштований")
 
 
+async def _refuse_if_account_frozen(session: AsyncSession, client: User) -> None:
+    """Отказать в создании/отмене ТТН, если аккаунт актора не `active`.
+
+    Дыра, которую это закрывает: при блокировке (и при удалении клиента, где мы
+    ставим `blocked`) `get_context_for_user` отдаёт `None`, хендлер зовёт сервис с
+    `account_id=None`, и путь молча падал в legacy client-скоуп — работник
+    замороженного аккаунта мог создавать/отменять свои ТТН в обход заморозки
+    (`_require_active_client` смотрит на статус пользователя, а у работника он
+    остаётся `active`). Проверяем аккаунт напрямую по членству: и владелец, и
+    работник неактивного аккаунта получают отказ. Соло-клиент без членства — без
+    изменений (`membership is None`)."""
+    membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
+    if membership is not None and membership.account.status is not ClientAccountStatus.active:
+        raise PermissionDenied("клієнтський акаунт заблоковано або видаляється")
+
+
 async def _resolve_sender(
-    session: AsyncSession, client: User, sender_profile_id: uuid.UUID | None, settings: Settings
+    session: AsyncSession,
+    client: User,
+    sender_profile_id: uuid.UUID | None,
+    settings: Settings,
+    account_id: uuid.UUID | None = None,
 ) -> SenderProfile:
     """Найти ФОП клиента (явный или дефолтный) и убедиться, что он готов к відправленню."""
-    repo = SenderProfileRepository(session)
-    if sender_profile_id is not None:
-        profile = await repo.get_by_id(sender_profile_id)
-        if profile is None or profile.client_id != client.id:
-            raise SenderProfileNotConfigured("ФОП не знайдено")
-    else:
-        profile = await repo.get_default_for_client(client.id)
-        if profile is None:
-            raise SenderProfileNotConfigured("ФОП ще не налаштований, зверніться до менеджера")
+    profile = await resolve_scoped_profile(
+        session, client=client, sender_profile_id=sender_profile_id, account_id=account_id
+    )
     ensure_sender_dispatchable(profile, settings)
     return profile
 
@@ -98,6 +123,7 @@ async def resolve_sender_id(
     *,
     client: User,
     profile_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
     settings: Settings | None = None,
 ) -> uuid.UUID:
     """ID ФОП клиента (явного или дефолтного), готового к відправленню — гейт UI.
@@ -105,7 +131,9 @@ async def resolve_sender_id(
     Бросает то же доменное исключение, что и `create_shipment` (NotConfigured /
     NotValidated / Incomplete / DispatchNotConfigured), чтобы вход в FSM, выбор ФОП
     и сабмит вели себя одинаково. Без побочных эффектов и обращений к НП."""
-    profile = await _resolve_sender(session, client, profile_id, settings or get_settings())
+    profile = await _resolve_sender(
+        session, client, profile_id, settings or get_settings(), account_id=account_id
+    )
     return profile.id
 
 
@@ -114,9 +142,22 @@ async def _resolve_items(
     client: User,
     items: list[tuple[str, int]],
     reader: StockSource | None,
+    account_id: uuid.UUID | None = None,
+    account: ClientAccount | None = None,
 ) -> list[ShipmentItemDraft]:
-    """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой."""
-    snapshot = await inventory.get_inventory_snapshot(session, client=client, reader=reader)
+    """Сверить корзину с остатком (`available`) и собрать позиции с названиями/ценой.
+
+    Читаем лист **принудительно свежим**: экраны выбора товара обслуживаются кэшем
+    с TTL (`app/sheets/cache.py`, иначе один сценарий ТТН съедал ~8 чтений из
+    60/мин квоты на весь бот), но решение «хватает ли остатка» по кэшу принимать
+    нельзя — это и была бы выдача разрешения продать чужое. Инвалидация идёт по
+    всей цепочке источников, включая мемо текущего апдейта.
+    """
+    scoped_account = shipments.require_client_account(client, account)
+    invalidate_stock_cache(inventory.stock_sheet_key(scoped_account), reader)
+    snapshot = await inventory.get_inventory_snapshot(
+        session, client=client, account_id=account_id, account=account, reader=reader
+    )
     by_sku = {item.sku: item for item in snapshot}
     # Агрегируем дубли строк корзины по sku — иначе две строки по 6 при остатке 10
     # обе прошли бы проверку (6≤10) и зарезервировали 12 (oversell).
@@ -162,9 +203,14 @@ async def create_shipment(
     recipient_edrpou: str | None = None,
     sender_profile_id: uuid.UUID | None = None,
     seats_amount: int = 1,
+    size_dimensions: tuple[Decimal | int | str, Decimal | int | str, Decimal | int | str]
+    | None = None,
     notifier: Notifier | None = None,
     reader: StockSource | None = None,
     settings: Settings | None = None,
+    account_id: uuid.UUID | None = None,
+    account: ClientAccount | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> shipments.ShipmentCard:
     """Создать ТТН (NP-first) и записать `Shipment` + резерв.
 
@@ -172,9 +218,14 @@ async def create_shipment(
     FSM на шаге накладеного платежу).
     """
     shipments._require_active_client(client)
+    await _refuse_if_account_frozen(session, client)
     settings = settings or get_settings()
-    profile = await _resolve_sender(session, client, sender_profile_id, settings)
-    drafts = await _resolve_items(session, client, items, reader)
+    profile = await _resolve_sender(
+        session, client, sender_profile_id, settings, account_id=account_id
+    )
+    drafts = await _resolve_items(
+        session, client, items, reader, account_id=account_id, account=account
+    )
 
     is_cod = payment_method == "cod"
     if is_cod and (cod_amount is None or cod_amount <= 0):
@@ -194,6 +245,7 @@ async def create_shipment(
             phone=recipient_phone,
             edrpou=recipient_edrpou,
         )
+        dimensions = size_dimensions or (10, 10, 10)
         draft = TTNDraft(
             sender=SenderIdentity(
                 counterparty_ref=profile.np_sender_ref,
@@ -212,7 +264,13 @@ async def create_shipment(
                 contact_ref=contact_ref or "",
                 edrpou=recipient_edrpou,
             ),
-            parcel=ParcelSpec(weight=weight, seats_amount=seats_amount),
+            parcel=ParcelSpec(
+                weight=weight,
+                seats_amount=seats_amount,
+                length_cm=Decimal(str(dimensions[0])),
+                width_cm=Decimal(str(dimensions[1])),
+                height_cm=Decimal(str(dimensions[2])),
+            ),
             description=description,
             cost=insured_amount,
             payer_type=payer_type,
@@ -221,11 +279,16 @@ async def create_shipment(
         result = await methods.save_ttn(np_client, api_key=api_key, draft=draft)
     except NovaPoshtaError as exc:
         raise TtnCreationFailed(str(exc)) from exc
+    except ValueError as exc:
+        # Некорректные/противоречивые габариты не должны просачиваться как 500.
+        raise TtnCreationFailed(str(exc)) from exc
 
     # Успех НП → запись в БД (последний awaited-шаг). status=created → резерв активен.
     repo = ShipmentRepository(session)
     shipment = await repo.create(
         client_id=client.id,
+        account_id=account_id,
+        created_by_user_id=actor_user_id or client.id,
         sender_profile_id=profile.id,
         recipient_name=recipient_name,
         recipient_phone=recipient_phone,
@@ -248,6 +311,7 @@ async def create_shipment(
     shipment.fee_amount = compute_shipment_fee(sum(item.quantity for item in drafts))
     await StockMovementRepository(session).record_for_items(
         client_id=client.id,
+        account_id=account_id,
         shipment_id=shipment.id,
         items=drafts,
         movement_type=StockMovementType.ttn_reserve,
@@ -256,7 +320,8 @@ async def create_shipment(
     )
     await AuditRepository(session).log(
         "shipment_created",
-        user_id=client.id,
+        user_id=actor_user_id or client.id,
+        account_id=account_id or shipment.account_id,
         affected_entity=f"shipment:{shipment.id}",
         after={
             "ttn_number": result.int_doc_number,
@@ -277,6 +342,7 @@ async def create_shipment(
     await best_effort_sync(
         session,
         client=client,
+        account=account,
         log_key="shipment_sheet_sync_failed",
         reader=reader,
         shipment_id=str(shipment.id),
@@ -295,25 +361,60 @@ async def _cancel_api_key(session: AsyncSession, shipment) -> str:
     return profile.np_api_key  # EncryptedString расшифровывает при чтении
 
 
-async def cancel_shipment(
+async def _is_deleted_in_np(np_client: NovaPoshtaClient, *, api_key: str, shipment) -> bool:
+    """Спросить у НП, не удалён ли документ уже (`StatusCode=2`, «Видалено»).
+
+    Зачем отдельный запрос. На удаление уже удалённого документа НП отвечает не
+    «не знайдено», а `Error getting payment info …; No document changed
+    DeletionMark`. Разбирать это по тексту нельзя: под ту же формулировку попадает
+    и «удалить нельзя», и тогда мы пометили бы отменённой ЖИВУЮ накладную и сняли
+    резерв — посылка всё равно уехала бы, а склад «вернул» бы товар.
+
+    Без этой проверки отправление становилось неотменяемым навсегда: каждая
+    попытка падала в `TtnCancelFailed`, статус оставался `confirmed`, а резерв
+    висел вечно. Найдено E2E-прогоном на боевом стенде.
+
+    Любой сбой самой проверки трактуем как «не удалён» — отмена честно
+    провалится, и её можно повторить, а вот ложный успех необратим.
+    """
+    if not shipment.ttn_number:
+        return False
+    try:
+        statuses = await methods.get_status_documents(
+            np_client, api_key=api_key, numbers=[shipment.ttn_number]
+        )
+    except Exception:
+        logger.warning(
+            "ttn_delete_status_probe_failed", shipment_id=str(shipment.id), exc_info=True
+        )
+        return False
+    return any(is_deleted_in_np(status) for status in statuses)
+
+
+async def cancel_shipment_np_first(
     session: AsyncSession,
     *,
+    shipment,
     client: User,
-    shipment_id: uuid.UUID,
     np_client: NovaPoshtaClient,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    sync: bool = True,
 ) -> shipments.ShipmentCard:
-    """Отменить ТТН **NP-first**: сначала `InternetDocument.delete` в НП, и только
-    при успехе снимаем статус в БД (резерв выводится из статуса → освободится).
+    """Ядро отмены ТТН **NP-first** без гейта активности клиента.
 
-    Иначе (сними мы резерв до удаления в НП) при сбое НП получили бы «живую» ТТН в
-    НП с освобождённым резервом → риск oversell. «Уже удалено» в НП
-    (`NovaPoshtaNotFound`) — идемпотентный успех. Прочие ошибки НП → `TtnCancelFailed`
-    (статус не трогаем, отмену можно повторить).
+    Сначала `InternetDocument.delete` в НП, и только при успехе флип статуса в БД
+    (резерв выводится из статуса → освободится). Иначе (сними мы резерв до удаления
+    в НП) при сбое НП была бы «живая» ТТН в НП с освобождённым резервом → oversell.
+    «Уже удалено» в НП (`NovaPoshtaNotFound`) — идемпотентный успех; прочие ошибки НП
+    → `TtnCancelFailed` (статус не трогаем, отмену можно повторить).
+
+    Вынесено из `cancel_shipment`, чтобы этим же путём отменял ТТН и `delete_client`,
+    где клиент к этому моменту уже неактивен: там `_require_active_client` неприменим,
+    а дублировать NP-first оркестрацию нельзя — она разъехалась бы. `sync=False`
+    отключает синк листа (при массовой отмене под удаление аккаунта лист всё равно
+    осиротеет, а N обращений к Sheets — лишняя латентность и риск).
     """
-    shipments._require_active_client(client)
-    shipment = await ShipmentRepository(session).get_by_id(shipment_id)
-    if shipment is None or shipment.client_id != client.id:
-        raise ShipmentNotFound(str(shipment_id))
     # Удаляем в НП только для отменяемых статусов с реальным np_ref; статус-гейт
     # (ShipmentActionForbidden для dispatched и далее) отдаём делегату ниже.
     if shipment.np_ref and shipment.status in shipments.CANCELABLE_STATUSES:
@@ -323,20 +424,63 @@ async def cancel_shipment(
         except NovaPoshtaNotFound:
             logger.info("ttn_already_deleted_in_np", shipment_id=str(shipment.id))
         except NovaPoshtaError as exc:
-            raise TtnCancelFailed(str(exc)) from exc
-    card = await shipments.cancel_shipment(session, client=client, shipment_id=shipment_id)
+            if not await _is_deleted_in_np(np_client, api_key=api_key, shipment=shipment):
+                raise TtnCancelFailed(str(exc)) from exc
+            logger.info(
+                "ttn_delete_errored_but_document_is_deleted",
+                shipment_id=str(shipment.id),
+                error=str(exc),
+            )
+    card = await shipments.apply_cancel(
+        session,
+        shipment=shipment,
+        account_id=account_id,
+        actor_user_id=actor_user_id or client.id,
+    )
     await StockMovementRepository(session).record_for_items(
         client_id=client.id,
+        account_id=account_id,
         shipment_id=shipment.id,
         items=shipment.items,
         movement_type=StockMovementType.ttn_cancel,
         sign=1,
         comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
     )
-    await best_effort_sync(
-        session,
-        client=client,
-        log_key="shipment_cancel_sheet_sync_failed",
-        shipment_id=str(shipment.id),
-    )
+    if sync:
+        await best_effort_sync(
+            session,
+            client=client,
+            account=shipment.account,
+            log_key="shipment_cancel_sheet_sync_failed",
+            shipment_id=str(shipment.id),
+        )
     return card
+
+
+async def cancel_shipment(
+    session: AsyncSession,
+    *,
+    client: User,
+    shipment_id: uuid.UUID,
+    np_client: NovaPoshtaClient,
+    account_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
+) -> shipments.ShipmentCard:
+    """Клиентская отмена ТТН: гейт активности + NP-first ядро."""
+    shipments._require_active_client(client)
+    await _refuse_if_account_frozen(session, client)
+    shipment = (
+        await ShipmentRepository(session).get_by_id(shipment_id)
+        if account_id is None
+        else await ShipmentRepository(session).get_by_id_for_account(shipment_id, account_id)
+    )
+    if shipment is None or (account_id is None and shipment.client_id != client.id):
+        raise ShipmentNotFound(str(shipment_id))
+    return await cancel_shipment_np_first(
+        session,
+        shipment=shipment,
+        client=client,
+        np_client=np_client,
+        account_id=account_id,
+        actor_user_id=actor_user_id,
+    )

@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from app.bot import permissions as perm
-from app.bot.handlers.staff import cb_delete_ok, cb_flag, staff_add_input, staff_open
+from app.bot.handlers.staff import (
+    cb_block,
+    cb_delete_ok,
+    cb_flag,
+    cb_unblock,
+    staff_add_input,
+    staff_open,
+)
 from app.bot.types import EffectiveContext
 from app.db.models.enums import SupportThreadStatus, UserRole, UserStatus
 from app.db.repositories import SupportRepository, UserRepository
@@ -147,6 +154,37 @@ async def test_cb_flag_toggles_permission(db_session: AsyncSession):
     assert cb.message.edits  # карточка перерисована
 
 
+async def test_cb_block_and_unblock_manager(db_session: AsyncSession):
+    """Обратимая альтернатива удалению доехала до UI.
+
+    `block_manager`/`unblock_manager` жили в сервисе с самого начала, но кнопок и
+    хендлеров не было — из бота они были недостижимы, и «убрать» менеджера можно
+    было только безвозвратно.
+    """
+    owner = await _owner(db_session)
+    manager = await _manager(db_session)
+
+    await cb_block(FakeCallback(data=f"stf:block:{manager.id}"), _owner_ctx(owner), db_session)
+    assert (await UserRepository(db_session).get_by_id(manager.id)).status is UserStatus.blocked
+
+    await cb_unblock(FakeCallback(data=f"stf:unblock:{manager.id}"), _owner_ctx(owner), db_session)
+    assert (await UserRepository(db_session).get_by_id(manager.id)).status is UserStatus.active
+
+
+async def test_cb_block_manager_denied_for_non_owner(db_session: AsyncSession):
+    manager = await _manager(db_session)
+    other = await _manager(db_session, telegram_id=42)
+    ctx = EffectiveContext(
+        actor_user=other, effective_user=other, effective_role=UserRole.manager, is_dev=False
+    )
+
+    cb = FakeCallback(data=f"stf:block:{manager.id}")
+    await cb_block(cb, ctx, db_session)
+
+    assert (await UserRepository(db_session).get_by_id(manager.id)).status is UserStatus.active
+    assert cb.acks[-1]["show_alert"] is True
+
+
 async def test_cb_delete_ok_removes_manager_from_staff(db_session: AsyncSession):
     owner = await _owner(db_session)
     manager = await _manager(db_session)
@@ -162,15 +200,15 @@ async def test_cb_delete_ok_removes_manager_from_staff(db_session: AsyncSession)
         assigned_manager_id=manager.id,
         status=SupportThreadStatus.open,
     )
+    manager_id = manager.id
     cb = FakeCallback(data=f"stf:deleteok:{manager.id}")
 
     await cb_delete_ok(cb, _owner_ctx(owner), db_session)
 
-    refreshed = await UserRepository(db_session).get_by_id(manager.id)
+    # Удаление физическое: раньше здесь оставался «клиент» role=client/blocked.
+    # Освобождение номера проверяет сервисный тест — здешний `_manager` без телефона.
+    assert await UserRepository(db_session).get_by_id(manager_id) is None
     thread_refreshed = await SupportRepository(db_session).get_with_messages(thread.id)
-    assert refreshed.role is UserRole.client
-    assert refreshed.status is UserStatus.blocked
-    assert refreshed.on_duty is False
     assert thread_refreshed.status is SupportThreadStatus.waiting
     assert thread_refreshed.assigned_manager_id is None
     assert cb.message.edits

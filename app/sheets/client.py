@@ -15,13 +15,19 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
-from app.sheets.source import StockSheetNotFound
+from app.sheets.source import StockSheetNotFound, StockSourceUnavailable
 
 # Канонические колонки листа «Склад» (см. scripts/provision_sheets.STOCK_HEADERS[:5]).
 # Передаём как expected_headers в get_all_records: иначе панель-итог справа и любой
 # контент за таблицей добавляют пустые ячейки в строку-шапку, и gspread падает на
 # дублирующихся пустых заголовках.
 _STOCK_EXPECTED_HEADERS = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна"]
+
+
+def _api_error_status(exc: Exception) -> int | None:
+    """HTTP-код из `gspread.APIError`, если он там есть (для лога и решения о ретрае)."""
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None)
 
 
 class SheetsClient:
@@ -63,20 +69,32 @@ class SheetsClient:
 
         Нет листа с таким именем → доменный `StockSheetNotFound` (а не сырой
         `gspread.WorksheetNotFound`), чтобы сервис-слой не зависел от gspread.
+        Недоступность API (квота 429, 5xx) → `StockSourceUnavailable`: границу с
+        gspread держим здесь, выше о нём знать не должны.
         """
         if not self._settings.sheets_stock_book_id:
             raise RuntimeError("SHEETS_STOCK_BOOK_ID не настроен")
-        from gspread.exceptions import WorksheetNotFound
+        from gspread.exceptions import APIError, WorksheetNotFound
 
-        book = self._authorize().open_by_key(self._settings.sheets_stock_book_id)
         try:
-            return book.worksheet(client_key)
-        except WorksheetNotFound as exc:
-            raise StockSheetNotFound(client_key) from exc
+            book = self._authorize().open_by_key(self._settings.sheets_stock_book_id)
+            try:
+                return book.worksheet(client_key)
+            except WorksheetNotFound as exc:
+                raise StockSheetNotFound(client_key) from exc
+        except APIError as exc:
+            raise StockSourceUnavailable(client_key, _api_error_status(exc)) from exc
 
     def read_rows(self, client_key: str) -> list[dict[str, Any]]:
         """Прочитать строки остатков клиента (артикул/назва/кількість/ціна)."""
         worksheet = self.get_stock_worksheet(client_key)
-        return list(
-            worksheet.get_all_records(default_blank="", expected_headers=_STOCK_EXPECTED_HEADERS)
-        )
+        from gspread.exceptions import APIError
+
+        try:
+            return list(
+                worksheet.get_all_records(
+                    default_blank="", expected_headers=_STOCK_EXPECTED_HEADERS
+                )
+            )
+        except APIError as exc:
+            raise StockSourceUnavailable(client_key, _api_error_status(exc)) from exc

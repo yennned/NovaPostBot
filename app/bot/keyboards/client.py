@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.keyboards.common import category_chips
 from app.services.client_settings import (
+    NOTIFY_ALL_ACCOUNT_SHIPMENTS,
     NOTIFY_APPROVED,
     NOTIFY_LOW_STOCK,
     NOTIFY_SHIPMENT_STATUS,
@@ -21,10 +22,21 @@ from app.services.shipments import ShipmentPage
 PRODUCTS_PAGE_SIZE = 6
 SHIPMENTS_PAGE_SIZE = 6
 
+# Неинтерактивная строка товара на экране «📦 Товари» (см. `build_inventory_kb`).
+PRODUCT_NOOP = "cab:pnoop"
+
+# Короткие токены вместо полных ключей: callback_data у Telegram — максимум 64 байта.
+# ИНВАРИАНТ: здесь обязан быть ключ на КАЖДУЮ запись `DEFAULT_NOTIFICATION_SETTINGS` —
+# `build_settings_kb` идёт по списку из `_settings_view`, и пропущенный ключ роняет
+# весь экран настроек с `KeyError`. Для пользователя это выглядит как «кнопка не
+# работает»: aiogram пишет трейс в лог и молча ничего не отвечает. Ровно так и
+# случилось с `notify_all_account_shipments` (добавлен в 76e48af без токена).
+# Инвариант держит `test_every_notification_key_has_callback_token`.
 NOTIFICATION_CALLBACK_TOKENS = {
     NOTIFY_APPROVED: "apr",
     NOTIFY_SHIPMENT_STATUS: "shp",
     NOTIFY_LOW_STOCK: "stk",
+    NOTIFY_ALL_ACCOUNT_SHIPMENTS: "acc",
 }
 SENDER_PROFILE_FIELD_TOKENS = {
     "name": "nm",
@@ -60,7 +72,6 @@ def build_inventory_kb(
     *,
     active_category: str | None = None,
     query: str | None = None,
-    sheet_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     # «🧹 Скинути» показываем только при активном фильтре (поиск или категория) —
     # иначе сброс был бы no-op-редактированием (Telegram «message is not modified»)
@@ -69,19 +80,21 @@ def build_inventory_kb(
     if query or active_category:
         search_row.append(InlineKeyboardButton(text="🧹 Скинути", callback_data="cab:pclear"))
     rows: list[list[InlineKeyboardButton]] = [search_row]
-    # Ссылка на персональную Google-таблицу склада (если книга заведена провижином).
-    if sheet_url:
-        rows.append([InlineKeyboardButton(text="📊 Відкрити таблицю складу", url=sheet_url)])
     rows.extend(category_chips(page.categories, prefix="cab:pcat", active=active_category))
     for item in page.items:
         price = f"{item.price:.2f} ₴" if item.price is not None else "—"
         name = item.name[:18]
         category = f"{item.category[:10]} · " if item.category else ""
+        # Строка товара — витрина, а не действие: всё, что о нём известно на этом
+        # экране, уже написано на самой кнопке. Раньше сюда шёл `cab:products:{offset}`,
+        # то есть перерисовка ТОЙ ЖЕ страницы: Telegram отклонял её как «message is
+        # not modified», исключение уносило хендлер мимо `callback.answer()`, и на
+        # кнопке оставался висеть спиннер — она выглядела сломанной.
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"{category}{name} · {price} · {item.available} шт",
-                    callback_data=f"cab:products:{page.offset}",
+                    callback_data=PRODUCT_NOOP,
                 )
             ]
         )
@@ -191,7 +204,9 @@ def build_stats_kb(selected: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_settings_kb(view: ClientSettingsView) -> InlineKeyboardMarkup:
+def build_settings_kb(
+    view: ClientSettingsView, *, account_owner: bool = True
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for item in view.notifications:
         marker = "🟢" if item.enabled else "⚪"
@@ -215,19 +230,20 @@ def build_settings_kb(view: ClientSettingsView) -> InlineKeyboardMarkup:
                     callback_data="cab:set:edit:phone",
                 ),
             ],
-            [
-                InlineKeyboardButton(
-                    text="🏢 Мої ФОП",
-                    callback_data="cab:set:profiles",
-                )
-            ],
             [InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")],
         ]
     )
+    if account_owner:
+        rows.insert(
+            -1,
+            [InlineKeyboardButton(text="🏢 Мої ФОП", callback_data="cab:set:profiles")],
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_sender_profiles_kb(profiles: list[SenderProfileView]) -> InlineKeyboardMarkup:
+def build_sender_profiles_kb(
+    profiles: list[SenderProfileView], *, can_manage: bool = True
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -237,7 +253,8 @@ def build_sender_profiles_kb(profiles: list[SenderProfileView]) -> InlineKeyboar
         ]
         for profile in profiles
     ]
-    rows.append([InlineKeyboardButton(text="➕ Додати ФОП", callback_data="cab:set:padd")])
+    if can_manage:
+        rows.append([InlineKeyboardButton(text="➕ Додати ФОП", callback_data="cab:set:padd")])
     rows.append([InlineKeyboardButton(text="◀ До налаштувань", callback_data="cab:set:back")])
     rows.append([InlineKeyboardButton(text="⌂ Головна", callback_data="home:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -258,7 +275,9 @@ def build_sender_pick_kb(profiles: list[SenderProfileView]) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_sender_profile_kb(profile: SenderProfileView) -> InlineKeyboardMarkup:
+def build_sender_profile_kb(
+    profile: SenderProfileView, *, can_manage: bool = True
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -287,7 +306,9 @@ def build_sender_profile_kb(profile: SenderProfileView) -> InlineKeyboardMarkup:
             ),
         ],
     ]
-    if not profile.is_default:
+    if not can_manage:
+        rows = []
+    if can_manage and not profile.is_default:
         rows.append(
             [
                 InlineKeyboardButton(

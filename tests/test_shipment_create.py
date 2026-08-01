@@ -30,6 +30,8 @@ from app.services.exceptions import (
 from app.sheets.inventory import StockRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.conftest import account_of
+
 
 class _FakeReader:
     def read_stock(self, client_key: str):
@@ -118,6 +120,8 @@ async def _validated_profile(session: AsyncSession, client):
 async def _create(session, client, np_client, *, items=None, notifier=None, **over):
     kwargs = {
         "client": client,
+        # Аккаунт есть у каждого клиента — как в проде (мидлварь отдаёт его хендлеру).
+        "account": await account_of(session, client),
         "items": items if items is not None else [("COF-1", 3)],
         "recipient_kind": "person",
         "recipient_name": "Іван Петренко",
@@ -265,6 +269,25 @@ async def test_create_shipment_incomplete_profile_no_contact_raises(db_session: 
     assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
 
 
+async def test_create_shipment_garbage_sender_phone_raises(db_session: AsyncSession):
+    # Легаси-профиль с мусором в телефоне (старый путь правки писал его без валидации).
+    # Гейт обязан отбить ДО НП: иначе НП ответит своим «Вкажіть коректний номер
+    # телефону», и клиент увидит его вместо понятной ошибки бота.
+    client = await _active_client(db_session, telegram_id=512)
+    await SenderProfileRepository(db_session).create(
+        client_id=client.id,
+        name="ФОП",
+        np_api_key="k",
+        np_sender_ref="sender-cp",
+        np_contact_ref="sender-ct",
+        sender_phone="Тест ФОП",
+        is_default=True,
+    )
+    with pytest.raises(SenderProfileIncomplete):
+        await _create(db_session, client, _exploding_np_client())  # НП не должна вызываться
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
+
+
 async def test_create_shipment_sender_dispatch_unconfigured_raises(db_session: AsyncSession):
     client = await _active_client(db_session, telegram_id=511)
     await _validated_profile(db_session, client)  # профиль полный
@@ -336,3 +359,167 @@ async def test_cancel_already_deleted_idempotent(db_session: AsyncSession, monke
         db_session, client=client, shipment_id=card.id, np_client=_np_client(_OK_ROUTES)
     )
     assert cancelled.status == ShipmentStatus.cancelled  # «уже удалено» = успех
+
+
+class _MutableStockReader:
+    """Источник, у которого остаток можно изменить между чтениями."""
+
+    def __init__(self, quantity: int) -> None:
+        self.quantity = quantity
+        self.reads = 0
+
+    def read_stock(self, client_key: str):
+        self.reads += 1
+        return [
+            StockRow(
+                sku="COF-1",
+                name="Кава",
+                category="Кава",
+                quantity=self.quantity,
+                price=Decimal("100"),
+            )
+        ]
+
+    def apply_deltas(self, client_key: str, deltas) -> None:  # pragma: no cover — не зовём
+        raise AssertionError("apply_deltas у цьому тесті не потрібен")
+
+
+async def test_create_shipment_ignores_cached_stock_and_rereads(db_session: AsyncSession):
+    """Гейт от oversell обязан сверять корзину со СВЕЖИМ листом, а не с кэшем.
+
+    Экраны выбора товара обслуживаются кэшем с TTL (`app/sheets/cache.py`) — иначе
+    один сценарий ТТН съедает ~8 чтений из 60/мин квоты на весь бот. Но если по
+    этому же кэшу принимать решение «хватает ли остатка», бот разрешит продать
+    то, чего уже нет: здесь склад между отрисовкой и сабмитом опустел с 10 до 1.
+    """
+    from app.sheets import PerUpdateStockSource, TtlStockSource
+
+    client = await _active_client(db_session, telegram_id=931)
+    await _validated_profile(db_session, client)
+    await db_session.commit()
+
+    upstream = _MutableStockReader(quantity=10)
+    reader = PerUpdateStockSource(TtlStockSource(upstream, ttl_seconds=60))
+
+    # Пользователь «нарисовал экран» — снапшот с остатком 10 осел в кэше.
+    reader.read_stock("Клієнт")
+    assert upstream.reads == 1
+
+    # Пока он заполнял ТТН, товар разобрали.
+    upstream.quantity = 1
+
+    with pytest.raises(InsufficientStock):
+        await _create(
+            db_session,
+            client,
+            _exploding_np_client(),
+            items=[("COF-1", 3)],
+            reader=reader,
+        )
+    # Именно перечитали, а не поверили кэшу.
+    assert upstream.reads == 2
+
+
+async def test_create_shipment_still_succeeds_when_fresh_stock_is_enough(
+    db_session: AsyncSession,
+):
+    """Обратная сторона: принудительное перечитывание не ломает нормальный путь."""
+    from app.sheets import PerUpdateStockSource, TtlStockSource
+
+    client = await _active_client(db_session, telegram_id=932)
+    await _validated_profile(db_session, client)
+    await db_session.commit()
+
+    upstream = _MutableStockReader(quantity=10)
+    reader = PerUpdateStockSource(TtlStockSource(upstream, ttl_seconds=60))
+    reader.read_stock("Клієнт")
+
+    card = await _create(
+        db_session,
+        client,
+        _np_client(_OK_ROUTES),
+        items=[("COF-1", 3)],
+        reader=reader,
+    )
+
+    assert card.ttn_number == "59000999"
+
+
+def _deleted_status(number: str) -> list[dict]:
+    """Ответ НП про удалённый документ: `StatusCode=2`, «Видалено»."""
+    return [{"Number": number, "StatusCode": "2", "Status": "Видалено"}]
+
+
+def _alive_status(number: str) -> list[dict]:
+    return [
+        {
+            "Number": number,
+            "StatusCode": "1",
+            "Status": "Відправник самостійно створив цю накладну",
+        }
+    ]
+
+
+async def test_cancel_succeeds_when_np_errors_but_document_is_deleted(db_session: AsyncSession):
+    """ТТН, уже удалённая в НП, обязана отменяться — иначе она неотменяема НАВСЕГДА.
+
+    НП на повторное удаление отвечает не «не знайдено», а `Error getting payment
+    info …; No document changed DeletionMark` → раньше это падало в
+    `TtnCancelFailed`, статус оставался `confirmed`, а резерв висел вечно.
+    """
+    client, card = await _created_for_cancel(db_session, 523)
+    fail = httpx.Response(
+        200,
+        json={
+            "success": False,
+            "data": [],
+            "errors": ["Error getting payment info; No document changed DeletionMark"],
+            "errorCodes": [],
+        },
+    )
+    cancelled = await shipment.cancel_shipment(
+        db_session,
+        client=client,
+        shipment_id=card.id,
+        np_client=_np_client(
+            {
+                ("InternetDocument", "delete"): fail,
+                ("TrackingDocument", "getStatusDocuments"): _deleted_status(card.ttn_number),
+            }
+        ),
+    )
+
+    assert cancelled.status == ShipmentStatus.cancelled
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {}
+
+
+async def test_cancel_still_fails_when_document_is_alive(db_session: AsyncSession):
+    """Обратная сторона: живую накладную нельзя пометить отменённой.
+
+    Иначе клиент увидел бы «скасовано», резерв вернулся бы на склад, а посылка
+    всё равно уехала бы — это хуже, чем честный отказ с возможностью повторить.
+    """
+    client, card = await _created_for_cancel(db_session, 524)
+    fail = httpx.Response(
+        200,
+        json={
+            "success": False,
+            "data": [],
+            "errors": ["No document changed DeletionMark"],
+            "errorCodes": [],
+        },
+    )
+    with pytest.raises(TtnCancelFailed):
+        await shipment.cancel_shipment(
+            db_session,
+            client=client,
+            shipment_id=card.id,
+            np_client=_np_client(
+                {
+                    ("InternetDocument", "delete"): fail,
+                    ("TrackingDocument", "getStatusDocuments"): _alive_status(card.ttn_number),
+                }
+            ),
+        )
+
+    assert await ShipmentRepository(db_session).reserved_by_sku(client.id) == {"COF-1": 3}

@@ -59,6 +59,22 @@ def is_open(at: datetime, schedule: WorkingSchedule) -> bool:
     return start <= at < end
 
 
+def is_open_or_recently_closed(at: datetime, schedule: WorkingSchedule, grace: timedelta) -> bool:
+    """Открыто сейчас ИЛИ окно дня закрылось не более `grace` назад.
+
+    Для пост-закрывающих задач воркера (авто-снятие дежурства): им нужно отработать
+    один раз после закрытия отделения, но молчать всю ночь — чтобы БД (Neon со
+    scale-to-zero) успевала уснуть и не тарифицировалась круглосуточно.
+    """
+    if is_open(at, schedule):
+        return True
+    window = window_for_day(at, schedule)
+    if window is None:
+        return False
+    _, end = window
+    return end <= at < end + grace
+
+
 def current_window_end(at: datetime, schedule: WorkingSchedule) -> datetime | None:
     """Конец текущего рабочего окна, если в `at` открыто; иначе `None`."""
     window = window_for_day(at, schedule)

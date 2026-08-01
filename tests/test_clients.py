@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from app.bot.types import ClientAccountContext
 from app.db.models.audit import AuditLog
-from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import UserRepository
-from app.services import client_sheet_sync, clients
+from app.db.models.enums import ClientAccountStatus, UserRole, UserStatus
+from app.db.repositories import ClientAccountRepository, UserRepository
+from app.services import account_team, client_sheet_sync, clients
 from app.services.exceptions import (
     AlreadyInStatus,
     ClientNotFound,
@@ -27,6 +28,14 @@ async def _manager(session: AsyncSession, telegram_id: int = 10, permissions: di
         role=UserRole.manager,
         status=UserStatus.active,
         permissions=permissions,
+    )
+
+
+async def _owner(session: AsyncSession, telegram_id: int = 11):
+    return await UserRepository(session).create(
+        telegram_id=telegram_id,
+        role=UserRole.owner,
+        status=UserStatus.active,
     )
 
 
@@ -56,6 +65,65 @@ async def test_approve_pending_client(db_session: AsyncSession):
     assert "client_approved" in await _audit_actions(db_session)
 
 
+async def test_approve_audits_client_account_not_actor(db_session: AsyncSession):
+    """Субъект аудита — аккаунт клиента, а не актора.
+
+    Регрессия: `log()` выводил `account_id` из членства актора, поэтому у
+    менеджера (членства нет) все `client_approved` уезжали в NULL — то есть поле
+    пустовало ровно там, где оно и нужно.
+    """
+    actor = await _manager(db_session)
+    client = await _client(db_session)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    assert membership is not None
+
+    await clients.approve_client(db_session, actor=actor, client_id=client.id)
+
+    entry = await db_session.scalar(select(AuditLog).where(AuditLog.action == "client_approved"))
+    assert entry is not None
+    assert entry.user_id == actor.id, "актор — менеджер"
+    assert entry.account_id == membership.account_id, "субъект — аккаунт клиента"
+
+
+async def test_every_transition_audits_client_account(db_session: AsyncSession):
+    """Каждый переход `_transition` пишет аккаунт-субъект — без исключений.
+
+    Регрессия: ремонтная миграция `b2c3d4e5f6a7` перечисляла переходы вручную и
+    потеряла `client_unblocked`. Перечисление, которое надо руками держать в
+    синхроне с кодом, разъезжается — этот тест ловит любой новый/забытый переход
+    целиком, а не по одному.
+    """
+    actor = await _manager(db_session)
+    client = await _client(db_session, telegram_id=170)
+    membership = await ClientAccountRepository(db_session).get_membership(user_id=client.id)
+    assert membership is not None
+
+    # Все пять переходов из `_transition`, по валидной цепочке статусов.
+    await clients.approve_client(db_session, actor=actor, client_id=client.id)
+    await clients.block_client(db_session, actor=actor, client_id=client.id, reason="тест")
+    await clients.unblock_client(db_session, actor=actor, client_id=client.id)
+    await clients.archive_client(db_session, actor=actor, client_id=client.id)
+    await clients.restore_client(db_session, actor=actor, client_id=client.id)
+
+    rows = (
+        await db_session.execute(
+            select(AuditLog.action, AuditLog.account_id).where(
+                AuditLog.affected_entity == f"user:{client.id}"
+            )
+        )
+    ).all()
+    actions = {r.action for r in rows}
+    assert actions == {
+        "client_approved",
+        "client_blocked",
+        "client_unblocked",
+        "client_archived",
+        "client_restored",
+    }, "изменился набор переходов — проверь, что новый тоже пишет account_id"
+    orphans = [r.action for r in rows if r.account_id != membership.account_id]
+    assert not orphans, f"переходы без аккаунта-субъекта: {orphans}"
+
+
 async def test_approve_non_pending_raises(db_session: AsyncSession):
     actor = await _manager(db_session)
     active = await _client(db_session, telegram_id=101, status=UserStatus.active)
@@ -78,6 +146,44 @@ async def test_block_then_unblock(db_session: AsyncSession):
 
     restored = await clients.unblock_client(db_session, actor=actor, client_id=client.id)
     assert restored.status is UserStatus.active
+
+
+async def _account_context(session: AsyncSession, user):
+    membership = await ClientAccountRepository(session).get_membership(user_id=user.id)
+    assert membership is not None and membership.account is not None
+    return ClientAccountContext(user=user, account=membership.account, membership=membership)
+
+
+async def test_restore_client_keeps_employees_cut_off(db_session: AsyncSession):
+    # Регрессия: `restore_client` возвращает archived→pending именно чтобы не снять
+    # блок молча, но карта в `_transition` не знала про `pending` и ставила акаунт
+    # `active` — вся команда получала доступ к складу/ФОП/ТТН раньше, чем менеджер
+    # повторно подтвердит владельца (а сам владелец при этом войти не мог).
+    actor = await _manager(db_session)
+    owner = await _client(db_session, telegram_id=150, status=UserStatus.active)
+    invited = await account_team.invite_employee(
+        db_session, context=await _account_context(db_session, owner), phone="0507000055"
+    )
+    employee = await UserRepository(db_session).get_by_id(invited.user_id)
+    await account_team.activate_employee_contact(
+        db_session, user=employee, telegram_id=151, full_name="Працівник"
+    )
+    accounts = ClientAccountRepository(db_session)
+    assert await accounts.get_context_for_user(employee.id) is not None
+
+    await clients.archive_client(db_session, actor=actor, client_id=owner.id)
+    assert await accounts.get_context_for_user(employee.id) is None
+
+    restored = await clients.restore_client(db_session, actor=actor, client_id=owner.id)
+    assert restored.status is UserStatus.pending
+    account = await accounts.get_by_id(owner.id)
+    assert account is not None and account.status is ClientAccountStatus.blocked
+    assert await accounts.get_context_for_user(employee.id) is None
+
+    # Подтверждение владельца — и только оно — возвращает команду в строй.
+    await clients.approve_client(db_session, actor=actor, client_id=owner.id)
+    assert account.status is ClientAccountStatus.active
+    assert await accounts.get_context_for_user(employee.id) is not None
 
 
 async def test_archive_then_restore(db_session: AsyncSession):
@@ -114,7 +220,7 @@ async def test_blocked_manager_cannot_manage(db_session: AsyncSession):
 
 
 async def test_update_profile_phone_collision(db_session: AsyncSession):
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     a = await _client(db_session, telegram_id=400)
     b = await _client(db_session, telegram_id=401)
     with pytest.raises(PhoneAlreadyTaken):
@@ -166,18 +272,25 @@ async def test_get_client_card(db_session: AsyncSession):
     assert card.default_sender_name is None
 
 
-async def test_update_profile_requires_edit_flag(db_session: AsyncSession):
-    actor = await _manager(db_session, permissions={clients.CAN_EDIT_CLIENTS: False})
+async def test_update_profile_requires_owner(db_session: AsyncSession):
+    """Правка профиля клиента — только владелец; менеджеру запрещено."""
+    manager = await _manager(db_session)
     client = await _client(db_session)
     with pytest.raises(PermissionDenied):
         await clients.update_client_profile(
-            db_session, actor=actor, client_id=client.id, full_name="New"
+            db_session, actor=manager, client_id=client.id, full_name="New"
         )
+
+    owner = await _owner(db_session)
+    card = await clients.update_client_profile(
+        db_session, actor=owner, client_id=client.id, full_name="New"
+    )
+    assert card.full_name == "New"
 
 
 async def test_update_profile_sheets_error_is_swallowed(db_session: AsyncSession, monkeypatch):
     """Сбой Sheets (не БД) best-effort: переименование клиента сохраняется."""
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     client = await _client(db_session)
 
     async def boom(*args, **kwargs):
@@ -195,7 +308,7 @@ async def test_update_profile_sheets_error_is_swallowed(db_session: AsyncSession
 async def test_update_profile_db_error_in_sync_propagates(db_session: AsyncSession, monkeypatch):
     """Ошибку БД из синка НЕ глотаем — иначе сессия в rollback-required, а
     последующий запрос/commit тихо потеряет уже сфлашенное переименование."""
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     client = await _client(db_session)
 
     async def boom(*args, **kwargs):
@@ -210,7 +323,7 @@ async def test_update_profile_db_error_in_sync_propagates(db_session: AsyncSessi
 
 
 async def test_update_profile_writes_audit(db_session: AsyncSession):
-    actor = await _manager(db_session)
+    actor = await _owner(db_session)
     client = await _client(db_session)
     await clients.update_client_profile(
         db_session, actor=actor, client_id=client.id, full_name="Оновлене Імʼя"
