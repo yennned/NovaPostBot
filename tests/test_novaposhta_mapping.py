@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 from app.novaposhta.mapping import (
     PAYMENT_METHOD,
+    billable_weight_kg,
     money,
     split_full_name,
     to_price_props,
@@ -172,6 +173,24 @@ def test_save_props_seats_amount():
     assert props["OptionsSeat"][0]["weight"] == "3.333"
 
 
+def test_save_props_seat_weight_never_rounds_to_zero():
+    """Вес места квантуется до 0.001 — очень лёгкая посылка не должна дать 0.
+
+    `OptionsSeat[].weight = 0` при непустом верхнеуровневом `Weight` НП отклоняет,
+    поэтому вес места клемпится к минимуму, а не округляется вниз.
+    """
+    props = to_save_props(_draft(parcel=ParcelSpec(weight=Decimal("0.0004"))))
+    assert props["OptionsSeat"][0]["weight"] == "0.001"
+    assert props["Weight"] == "0.0004"  # верхнеуровневый вес — как заявлен
+
+
+def test_save_props_seat_weight_floor_applies_per_seat():
+    # 0.002 / 3 = 0.000666… → квантование дало бы 0.001, но на грани делимости
+    # важно, что ни одно место не уходит в 0.
+    props = to_save_props(_draft(parcel=ParcelSpec(weight=Decimal("0.001"), seats_amount=3)))
+    assert all(seat["weight"] == "0.001" for seat in props["OptionsSeat"])
+
+
 def test_money_formats_decimal_as_string():
     assert money(Decimal("500.00")) == "500.00"
     assert money(Decimal("0.5")) == "0.5"
@@ -228,6 +247,56 @@ def test_recipient_counterparty_props_organization():
     assert props["CounterpartyType"] == "Organization"
     assert props["CounterpartyProperty"] == "Recipient"
     assert props["EDRPOU"] == "12345678"
+
+
+def test_billable_weight_uses_volumetric_when_box_is_bulky():
+    """Пресет «Велика» 40×40×30 = 0.048 м³ → 12 кг об'ємних (коэффициент НП 250).
+
+    Клиент ставит 2 кг вручную — НП посчитает по 12, значит и оценка обязана.
+    """
+    assert billable_weight_kg(
+        Decimal("2"), length_cm="40", width_cm="40", height_cm="30"
+    ) == Decimal("12")
+
+
+def test_billable_weight_keeps_actual_when_it_is_heavier():
+    # Дефолтные веса пресетов (2/10/30) заведомо больше объёмных (1/4.5/12) —
+    # на них поведение не меняется.
+    assert billable_weight_kg(
+        Decimal("30"), length_cm="40", width_cm="40", height_cm="30"
+    ) == Decimal("30")
+
+
+def test_billable_weight_without_dimensions_is_actual():
+    assert billable_weight_kg(Decimal("2.5")) == Decimal("2.5")
+
+
+def test_billable_weight_scales_with_seats():
+    # Каждое место — своя коробка тех же габаритов, объёмный вес суммируется.
+    assert billable_weight_kg(
+        Decimal("2"), length_cm="40", width_cm="40", height_cm="30", seats_amount=2
+    ) == Decimal("24")
+
+
+def test_billable_weight_rejects_partial_dimensions():
+    with pytest.raises(ValueError, match="разом"):
+        billable_weight_kg(Decimal("2"), length_cm="40")
+
+
+def test_price_props_uses_volumetric_weight():
+    props = to_price_props(
+        city_sender_ref="A",
+        city_recipient_ref="B",
+        weight_kg=Decimal("2"),
+        cost=Decimal("300"),
+        length_cm="40",
+        width_cm="40",
+        height_cm="30",
+    )
+    assert props["Weight"] == "12"
+    # Габариты влияют только на вес — сами в getDocumentPrice не уходят.
+    assert "OptionsSeat" not in props
+    assert "VolumeGeneral" not in props
 
 
 def test_price_props_with_cod_adds_redelivery():

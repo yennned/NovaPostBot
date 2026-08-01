@@ -136,7 +136,9 @@ def _parse_weight(raw: str) -> str | None:
         weight = Decimal(raw.strip().replace(",", "."))
     except InvalidOperation:
         return None
-    if weight <= 0 or weight > _MAX_WEIGHT:
+    # NaN обязателен отдельной проверкой: сравнения с NaN всегда False, поэтому
+    # `nan` проскочил бы обе границы и позже уронил бы quantize в маппере НП.
+    if not weight.is_finite() or weight <= 0 or weight > _MAX_WEIGHT:
         return None
     return f"{weight.normalize():f}"
 
@@ -475,9 +477,9 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
 def _price_key(data: dict) -> str:
     """Хэш влияющих на ориентировочный тариф полей.
 
-    Размер пресета входит в ключ, даже если `getDocumentPrice` принимает только
-    вес: создаваемая ТТН отправляет реальные габариты, поэтому смена пресета
-    должна инвалидировать прежнюю оценку.
+    Размер пресета входит в ключ, потому что габариты влияют на цену напрямую:
+    тариф считается по максимуму из фактического и объёмного веса, а объёмный
+    берётся из габаритов коробки. Смена пресета обязана инвалидировать оценку.
     """
     parts = (
         data.get("sender_profile_id"),
@@ -521,6 +523,7 @@ async def _card_price(
             weight=Decimal(data["weight"]),
             cost=Decimal(data["insured_amount"]),
             cod_amount=Decimal(cod) if cod else None,
+            dimensions_cm=SIZE_DIMENSIONS.get(data.get("size_token", "")),
             np_client=np_client,
         )
         result["cost"] = f"{quote.cost:f}"
@@ -528,6 +531,10 @@ async def _card_price(
             f"{quote.cost_redelivery:f}" if quote.cost_redelivery is not None else None
         )
         result["eta"] = quote.estimated_delivery_date
+        # Тарифный вес показываем только когда объёмный перебил фактический —
+        # иначе клиент не поймёт, почему цена выше, чем он ждал по весу коробки.
+        if quote.billable_weight is not None and quote.billable_weight > Decimal(data["weight"]):
+            result["billable_weight"] = f"{quote.billable_weight:f}"
     except (ClientServiceError, NovaPoshtaError):
         # НП не дала Cost / недоступна — не блокируем оформление (подтвердит менеджер).
         result["unavailable"] = True

@@ -164,7 +164,7 @@ class TTNDraft:
     description: str
     cost: Decimal  # страховая (оцінкова) сумма → NP `Cost`
     payer_type: str = "Recipient"  # `Recipient` (по умолч.) / `Sender`
-    cod_amount: Decimal | None = None  # задано → COD (BackwardDeliveryData)
+    cod_amount: Decimal | None = None  # задано → COD (AfterpaymentOnGoodsCost)
     cargo_type: str = "Cargo"
     service_type: str = "WarehouseWarehouse"
 
@@ -186,6 +186,9 @@ class PriceQuote:
     cost: Decimal
     cost_redelivery: Decimal | None = None  # комиссия COD
     estimated_delivery_date: str | None = None
+    # Вес, по которому посчитана цена: max(фактический, объёмный по габаритам).
+    # Нужен UI, чтобы объяснить клиенту цену выше ожидаемой по весу коробки.
+    billable_weight: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
