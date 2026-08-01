@@ -65,6 +65,41 @@ def _reset_shared_sheets_client():
     reset_sheets_runtime()
 
 
+@pytest_asyncio.fixture
+async def redis_client() -> AsyncIterator[object]:
+    """Redis для тестов кэша: настоящий, если задан `REDIS_URL`, иначе fakeredis.
+
+    Прод и compose работают на `redis:8-alpine`, а тесты до этого шли только на
+    `fakeredis` — команды и семантика Redis 8 не проверялись ни на одном этапе,
+    и расхождение эмулятора с сервером всплыло бы уже в проде. В CI поднимаем
+    сервис-контейнер и подставляем его сюда; локальный прогон без Redis остаётся
+    рабочим на прежнем фолбэке.
+    """
+    url = os.getenv("REDIS_URL", "").strip()
+    if not url:
+        import fakeredis.aioredis
+
+        client = fakeredis.aioredis.FakeRedis()
+        try:
+            yield client
+        finally:
+            await client.aclose()
+        return
+
+    from redis.asyncio import from_url as redis_from_url
+
+    client = redis_from_url(url)
+    # Ключи кэша НП глобальные, без пространства имён на тест: без очистки
+    # соседний тест видел бы чужой прогрев и «попадание в кэш» стало бы
+    # недоказуемым.
+    await client.flushdb()
+    try:
+        yield client
+    finally:
+        await client.flushdb()
+        await client.aclose()
+
+
 def _assert_safe_test_database(url: str) -> None:
     if not url.strip():
         raise RuntimeError("DATABASE_URL is empty. Configure a dedicated test database first.")

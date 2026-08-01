@@ -25,9 +25,20 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U novapost -d novapostbot_test"
           --health-interval 5s --health-timeout 3s --health-retries 10
+      # Тот же образ, что в compose и проде. Без него тесты кэша НП шли только на
+      # fakeredis, и расхождение эмулятора с настоящим Redis 8 всплыло бы в проде.
+      redis:
+        image: redis:8-alpine
+        ports:
+          - "6379:6379"
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       DATABASE_URL: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
       DATABASE_URL_DIRECT: postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test
+      # Пустой REDIS_URL = фолбэк на fakeredis (см. фикстуру redis_client).
+      REDIS_URL: redis://localhost:6379/0
       FERNET_KEY: 8LriREApni0MjqknuIDohQH6rnNVIOknKJ6Kl4tuVQ4=
     steps:
       - uses: actions/checkout@v7
