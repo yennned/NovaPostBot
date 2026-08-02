@@ -11,7 +11,7 @@ from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import ClientAccountRepository, LowStockAlertRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
-from app.services import duty, notifications, stock_ingest, tracking
+from app.services import duty, notifications, stock_ingest, stock_mirror, tracking
 from app.services.inventory import InventoryItem, get_inventory_snapshot
 from app.services.notifications import Notifier
 from app.sheets import StockSource
@@ -171,6 +171,37 @@ async def stock_ingest_job(
                     session, notifier, reason=result.halted_reason, settings=current_settings
                 )
         return result
+
+
+async def stock_mirror_job(
+    *,
+    notifier: Notifier | None = None,
+    settings: Settings | None = None,
+) -> list[stock_mirror.AccountMirrorResult]:
+    """Зеркало PG → лист «Склад» + приём ручных правок количества.
+
+    Порядок в цикле воркера важен: сначала ингест приёмки, потом зеркало. Приёмка,
+    попавшая между ними, доедет следующим циклом; обратный порядок означал бы, что
+    зеркало пишет в лист остаток, ещё не знающий о только что внесённой приёмке.
+    """
+    current_settings = settings or get_settings()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        results = await stock_mirror.mirror_all_accounts(session, settings=current_settings)
+        await session.commit()
+        if notifier is not None:
+            for result in results:
+                applied = [(e.sku, e.was, e.now) for e in result.edits if e.applied]
+                rejected = [(e.sku, e.was, e.now, e.reason) for e in result.edits if not e.applied]
+                await notifications.notify_stock_manual_edits(
+                    session,
+                    notifier,
+                    account_label=result.key,
+                    applied=applied,
+                    rejected=rejected,
+                    settings=current_settings,
+                )
+        return results
 
 
 async def clear_expired_duty_job(
