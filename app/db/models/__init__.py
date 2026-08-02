@@ -19,6 +19,9 @@ from app.db.models.low_stock_alert import LowStockAlert
 from app.db.models.notification_setting import NotificationSetting
 from app.db.models.sender_profile import SenderProfile
 from app.db.models.shipment import Shipment, ShipmentItem
+from app.db.models.stock_balance import StockBalance
+from app.db.models.stock_hold import StockHold
+from app.db.models.stock_intake_cursor import StockIntakeCursor
 from app.db.models.stock_movement import StockMovement
 from app.db.models.support import SupportMessage, SupportThread
 from app.db.models.user import User
@@ -37,6 +40,9 @@ __all__ = [
     "Shipment",
     "ShipmentItem",
     "ShipmentStatus",
+    "StockBalance",
+    "StockHold",
+    "StockIntakeCursor",
     "StockMovement",
     "StockMovementType",
     "SupportMessage",
