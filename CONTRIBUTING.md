@@ -184,20 +184,34 @@ docker run --rm --platform linux/amd64 -v "$PWD:/w" -w /w python:3.14-slim sh -c
 `requirements-dev.in` — он тянет «unsafe» pip/setuptools, которые pip отказывается
 ставить в hash-режиме.
 
-**Тесты требуют Postgres** (часть тестов гоняет репозитории/миграции на живой БД,
-а не на моках). Локально:
+**Тесты требуют живых Postgres и Redis** (часть гоняет репозитории/миграции и FSM
+на настоящей БД, а не на моках):
 
 ```bash
-docker compose --profile dev up -d postgres   # postgres:18 на localhost:5432
-cp .env.example .env                           # выставить DATABASE_URL(_DIRECT)
-                                               # на localhost и FERNET_KEY
-pytest -q
+docker compose --profile dev up -d postgres redis   # PG 18 :5432, Redis 8 :6379
+cp .env.example .env                                # рабочая база + FERNET_KEY
+createdb novapostbot_test                           # один раз
+
+U="postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot_test"
+env DATABASE_URL="$U" DATABASE_URL_DIRECT="$U" pytest -q
 ```
 
-`DATABASE_URL`/`DATABASE_URL_DIRECT` для локальной БД:
-`postgresql+asyncpg://novapost:novapost@localhost:5432/novapostbot`. `FERNET_KEY`
-сгенерировать: `python -c "from app.utils.crypto import generate_key; print(generate_key())"`.
-В CI Postgres поднимается автоматически (service-container в `ci.yml`).
+**База для тестов обязана содержать `test` в имени, и это не формальность.**
+`tests/conftest.py` делает `drop_all`, поэтому там стоит гейт
+`_assert_safe_test_database`: на рабочей `…/novapostbot` он откажется стартовать
+(снимается только явным `PYTEST_ALLOW_DB_RESET=1` — не делайте так). Прежняя
+редакция этого раздела велела ставить рабочую базу прямо в `.env`, то есть
+предлагала команду, которая либо не запускается, либо стирает вашу разработочную
+БД. Переменных окружения достаточно — `.env` не трогаем.
+
+Без Redis тесты FSM и пульса живости **пропускаются, а не падают**. Пропущенный
+тест ничего не проверяет, поэтому поднимать его надо, а не игнорировать
+`s`-ки в выводе.
+
+`FERNET_KEY` сгенерировать:
+`python -c "from app.utils.crypto import generate_key; print(generate_key())"`.
+В CI Postgres и Redis поднимаются автоматически (service-containers в `ci.yml`,
+база `novapostbot_test`).
 
 CI (GitHub Actions, `.github/workflows/ci.yml`, job `lint-test`) гоняет layer-check,
 `ruff` + `ruff format --check`, `compileall` и `pytest` (с Postgres-сервисом) и является
