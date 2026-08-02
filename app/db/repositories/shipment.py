@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import joinedload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.config import get_settings
 from app.db.models.enums import ShipmentStatus, StockMovementType
@@ -235,7 +236,33 @@ class ShipmentRepository(BaseRepository):
         )
         return list(rows.unique()), int(total or 0)
 
-    async def list_status_changed_between(
+    def _scope_condition(
+        self, client_id: uuid.UUID | None, account_id: uuid.UUID | None
+    ) -> ColumnElement[bool]:
+        """Скоуп статистики: аккаунт, если он задан, иначе конкретный человек."""
+        return (
+            Shipment.account_id == account_id
+            if account_id is not None
+            else Shipment.client_id == client_id
+        )
+
+    async def _units_by_sku(self, *conditions) -> dict[str, int]:
+        """Единицы товара по SKU за окно — `GROUP BY`, а не `Counter` в Python.
+
+        Раньше статистика клиента выгружала все отправления периода вместе с
+        позициями (`joinedload`) и складывала их в памяти процесса. У аккаунта с
+        1600 позициями и месячным периодом это тысячи объектов ORM на каждый тап
+        «Статистика» — ради пяти строк топа и трёх сумм.
+        """
+        rows = await self.session.execute(
+            select(ShipmentItem.sku, func.coalesce(func.sum(ShipmentItem.quantity), 0))
+            .join(Shipment, Shipment.id == ShipmentItem.shipment_id)
+            .where(*conditions)
+            .group_by(ShipmentItem.sku)
+        )
+        return {sku: int(units) for sku, units in rows}
+
+    async def units_by_sku_status_changed(
         self,
         client_id: uuid.UUID | None = None,
         *,
@@ -243,77 +270,37 @@ class ShipmentRepository(BaseRepository):
         end: datetime,
         statuses: set[ShipmentStatus] | None = None,
         account_id: uuid.UUID | None = None,
-    ) -> list[Shipment]:
+    ) -> dict[str, int]:
         conditions = [
             Shipment.status_changed_at >= start,
             Shipment.status_changed_at < end,
+            self._scope_condition(client_id, account_id),
         ]
-        conditions.append(
-            Shipment.account_id == account_id
-            if account_id is not None
-            else Shipment.client_id == client_id
-        )
         if statuses:
             conditions.append(Shipment.status.in_(tuple(statuses)))
-        stmt = (
-            select(Shipment)
-            .options(
-                joinedload(Shipment.client),
-                joinedload(Shipment.account),
-                joinedload(Shipment.items),
-                joinedload(Shipment.sender_profile),
-            )
-            .where(*conditions)
-            .order_by(Shipment.status_changed_at.desc())
-        )
-        rows = await self.session.scalars(stmt)
-        return list(rows.unique())
+        return await self._units_by_sku(*conditions)
 
-    async def list_dispatched_between(
+    async def units_by_sku_dispatched(
         self,
         client_id: uuid.UUID | None = None,
         *,
         start: datetime,
         end: datetime,
         account_id: uuid.UUID | None = None,
-    ) -> list[Shipment]:
-        stmt = (
-            select(Shipment)
-            .options(
-                joinedload(Shipment.client),
-                joinedload(Shipment.created_by_user),
-                joinedload(Shipment.items),
-                joinedload(Shipment.sender_profile),
-            )
-            .where(
-                Shipment.account_id == account_id
-                if account_id is not None
-                else Shipment.client_id == client_id,
-                or_(
-                    and_(
-                        Shipment.dispatched_at.is_not(None),
-                        Shipment.dispatched_at >= start,
-                        Shipment.dispatched_at < end,
-                    ),
-                    and_(
-                        Shipment.dispatched_at.is_(None),
-                        Shipment.status.in_(
-                            (
-                                ShipmentStatus.dispatched,
-                                ShipmentStatus.in_transit,
-                                ShipmentStatus.arrived,
-                                ShipmentStatus.delivered,
-                            )
-                        ),
-                        Shipment.status_changed_at >= start,
-                        Shipment.status_changed_at < end,
-                    ),
-                ),
-            )
-            .order_by(Shipment.dispatched_at.desc())
+    ) -> dict[str, int]:
+        """Отправленные за окно, единиц по SKU.
+
+        Условие — чистый диапазон по `dispatched_at`. Прежняя ветка
+        `OR (dispatched_at IS NULL AND status IN (…) AND status_changed_at …)`
+        была фолбэком для строк, заведённых до появления поля, и делала запрос
+        неиндексируемым: пока она в `WHERE`, планировщик обязан проверять её на
+        каждой строке. Поле забэкфилено миграцией `e5f8a1b2c3d4`.
+        """
+        return await self._units_by_sku(
+            self._scope_condition(client_id, account_id),
+            Shipment.dispatched_at >= start,
+            Shipment.dispatched_at < end,
         )
-        rows = await self.session.scalars(stmt)
-        return list(rows.unique())
 
     async def reserved_by_sku(self, client_id: uuid.UUID) -> dict[str, int]:
         stmt = (

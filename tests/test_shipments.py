@@ -137,13 +137,17 @@ async def test_stats_snapshot_aggregates_by_status(db_session: AsyncSession, mon
     repo = ShipmentRepository(db_session)
     now = datetime.now(UTC)
 
-    await repo.create(
+    # `dispatched_at` обязателен: трекинг ставит его тем же переходом, которым
+    # уводит ТТН за `confirmed`. Без него статистика раньше подбирала строку
+    # legacy-фолбэком по `status_changed_at` — фолбэк снят вместе с бэкфилом.
+    dispatched = await repo.create(
         client_id=client.id,
         recipient_name="Іван",
         status=ShipmentStatus.dispatched,
         status_changed_at=now,
         items=[ShipmentItemDraft(sku="SKU-A", name="A", quantity=5)],
     )
+    dispatched.dispatched_at = now
     await repo.create(
         client_id=client.id,
         recipient_name="Петро",

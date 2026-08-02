@@ -118,38 +118,31 @@ async def period_report(
     cfg = settings or get_settings()
     start, end = _bounds(period, day=day, settings=cfg)
     repo = ReportsRepository(session)
-    dispatched = await repo.shipments_dispatched(start=start, end=end)
-    returns_and_losses = await repo.shipments_status_changed(
-        start=start,
-        end=end,
-        statuses=RETURN_STATUSES | LOSS_STATUSES,
-    )
-
-    acc: dict[uuid.UUID, dict] = {}
-    event_batches = [
-        (dispatched, "shipped"),
+    # Три агрегата вместо трёх полных выгрузок периода. Считает Postgres: на
+    # 15k ТТН/мес прежняя форма тянула в память десятки тысяч строк (joinedload
+    # по позициям — декартово произведение) ради трёх чисел на экране.
+    buckets = [
+        ("shipped", await repo.dispatched_units_by_client(start=start, end=end)),
         (
-            [shipment for shipment in returns_and_losses if shipment.status in RETURN_STATUSES],
             "returns",
+            await repo.status_changed_units_by_client(
+                start=start, end=end, statuses=RETURN_STATUSES
+            ),
         ),
         (
-            [shipment for shipment in returns_and_losses if shipment.status in LOSS_STATUSES],
             "losses",
+            await repo.status_changed_units_by_client(start=start, end=end, statuses=LOSS_STATUSES),
         ),
     ]
-    for shipments_batch, bucket in event_batches:
-        for shipment in shipments_batch:
-            units = sum(item.quantity for item in shipment.items)
+
+    acc: dict[uuid.UUID | None, dict] = {}
+    for bucket, rows in buckets:
+        for row in rows:
             rec = acc.setdefault(
-                shipment.client_id,
-                {
-                    "shipped": 0,
-                    "returns": 0,
-                    "losses": 0,
-                    "name": (shipment.client.full_name if shipment.client else None) or "—",
-                },
+                row.client_id,
+                {"shipped": 0, "returns": 0, "losses": 0, "name": row.client_name or "—"},
             )
-            rec[bucket] += units
+            rec[bucket] += row.units
 
     clients = [
         ClientBreakdown(
@@ -184,28 +177,26 @@ async def financial_report(
     _require_owner(actor, settings)
     cfg = settings or get_settings()
     start, end = _bounds(period, day=day, settings=cfg)
-    shipments = await ReportsRepository(session).shipments_dispatched(start=start, end=end)
-
-    fee_total = sum(
-        (s.fee_amount for s in shipments if not s.fee_free and s.fee_amount is not None),
-        Decimal("0"),
-    )
+    repo = ReportsRepository(session)
+    # Раньше эта функция выгружала период вторым разом — ровно те же строки, что
+    # уже прочитал `period_report` на том же экране. Теперь оба считают агрегатами,
+    # и вторая выгрузка исчезает вместе с первой.
+    totals = await repo.dispatch_totals(start=start, end=end)
     late = [
         LateTtn(
             ttn_number=s.ttn_number,
             client_name=(s.client.full_name if s.client else None) or "—",
             dispatched_at=s.dispatched_at,
         )
-        for s in shipments
-        if s.sla_met is False
+        for s in await repo.late_dispatched(start=start, end=end)
     ]
     return FinancialReport(
         period="day" if day is not None else period,
         start=start,
         end=end,
-        dispatched_count=len(shipments),
-        fee_total=fee_total,
-        free_count=sum(1 for s in shipments if s.fee_free),
+        dispatched_count=totals.count,
+        fee_total=totals.fee_total,
+        free_count=totals.free_count,
         late=late,
     )
 
