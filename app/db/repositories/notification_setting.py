@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import select
 
@@ -37,3 +38,25 @@ class NotificationSettingRepository(BaseRepository):
         setting.enabled = enabled
         await self.session.flush()
         return setting
+
+    async def map_for_users(
+        self, user_ids: Sequence[uuid.UUID], keys: Sequence[str]
+    ) -> dict[tuple[uuid.UUID, str], bool]:
+        """Настройки сразу по всем получателям веера — одним запросом.
+
+        Статус-пуш обходил участников аккаунта циклом и на каждого делал один-два
+        `get_by_user_and_key`. Это `1 + (1..2)×N` запросов **подряд**, то есть
+        задержка росла как N × RTT до Neon, а не как max(RTT). На аккаунте с
+        владельцем и пятью работниками — до тринадцати round-trip'ов ради одного
+        уведомления, и всё это внутри прохода трекинга, который таких вееров
+        выдаёт сотню за раз.
+        """
+        if not user_ids or not keys:
+            return {}
+        rows = await self.session.scalars(
+            select(NotificationSetting).where(
+                NotificationSetting.user_id.in_(tuple(user_ids)),
+                NotificationSetting.key.in_(tuple(keys)),
+            )
+        )
+        return {(row.user_id, row.key): row.enabled for row in rows}
