@@ -51,7 +51,10 @@ async def main() -> None:
     redis_client = redis_from_url(settings.redis_url)
     np_cache = NPReferenceCache(redis_client, settings=settings)
 
-    dispatcher = build_dispatcher(settings, np_client=np_client, np_cache=np_cache)
+    # redis-клиент создан выше — он же обслуживает FSM и изоляцию апдейтов.
+    dispatcher = build_dispatcher(
+        settings, np_client=np_client, np_cache=np_cache, redis=redis_client
+    )
     bot = Bot(token=settings.bot_token)
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())

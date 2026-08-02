@@ -13,7 +13,14 @@ services:
   redis:
     image: redis:8-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Персистентность включена вместе с переездом FSM в Redis: без неё
+    # незавершённые формы ТТН переживают редеплой бота (основной сценарий),
+    # но не рестарт самого Redis — то есть переезд был бы наполовину
+    # бутафорией. AOF с посекундным fsync: терять секунду ввода при падении
+    # хоста приемлемо, четырнадцать экранов формы — нет.
+    command: ["redis-server", "--save", "60 1", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -68,3 +75,6 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+
+volumes:
+  redisdata:

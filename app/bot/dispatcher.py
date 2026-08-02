@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiogram import Dispatcher, Router
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.base import BaseEventIsolation, BaseStorage
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
+from aiogram.fsm.storage.redis import RedisEventIsolation, RedisStorage
+from redis.asyncio import Redis
 
 from app.bot.handlers import (
     account_team_router,
@@ -68,16 +71,49 @@ ROUTER_ORDER: tuple[Router, ...] = (
 )
 
 
+def build_fsm_storage(redis: Redis | None) -> tuple[BaseStorage, BaseEventIsolation]:
+    """Хранилище FSM и изоляция апдейтов. Вынесено, чтобы это можно было проверить.
+
+    Собрать второй `Dispatcher` в процессе нельзя — роутеры в `app/bot/handlers`
+    модульные синглтоны, — поэтому тест «с Redis и без» через `build_dispatcher`
+    невозможен в принципе. Развилка отвечает за то, переживёт ли незавершённая
+    форма ТТН редеплой, и оставлять её непроверяемой нельзя.
+
+    Изоляция идёт **парой** с хранилищем, а не отдельно: `SimpleEventIsolation`
+    живёт в памяти процесса, и при второй реплике она снова стала бы per-process,
+    то есть никакой, — а ради второй реплики переезд и затевался.
+    """
+    if redis is not None:
+        return RedisStorage(redis), RedisEventIsolation(redis)
+    return MemoryStorage(), SimpleEventIsolation()
+
+
 def build_dispatcher(
     settings: Settings,
     *,
     np_client: NovaPoshtaClient | None = None,
     np_cache: NPReferenceCache | None = None,
+    redis: Redis | None = None,
 ) -> Dispatcher:
-    # FSM-хранилище — MemoryStorage (решение владельца): redis-клиент служит только
-    # кэшу справочников НП, бот не зависит от Redis для FSM/`/start`.
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
+    """Диспетчер с роутерами и мидлварями. Один на процесс: роутеры — синглтоны.
+
+    **FSM в Redis, если redis-клиент передан.** Прежде здесь стоял `MemoryStorage`
+    (решение владельца от 19.06.2026); решение изменено, потому что цена его —
+    три вещи сразу: каждый редеплой терял незавершённые формы ТТН (а форма это
+    четырнадцать экранов), вторая реплика бота была невозможна по построению, и
+    анти-дабл-тап `_SUBMITTING` в `handlers/ttn.py` оставался множеством в памяти
+    процесса, то есть защищал ровно одну реплику.
+
+    Фолбэк на `MemoryStorage` при `redis=None` сохранён намеренно: на нём держатся
+    тесты и харнесс `scripts/e2e`, которым Redis не нужен, — и он же оставляет
+    бота работоспособным, если Redis не поднялся.
+
+    `events_isolation` идёт вместе с хранилищем, а не отдельно: без него два
+    быстрых тапа одного пользователя обрабатываются параллельно (`handle_as_tasks`
+    у aiogram включён по умолчанию), и FSM видит гонку внутри одного диалога.
+    """
+    storage, isolation = build_fsm_storage(redis)
+    dp = Dispatcher(storage=storage, events_isolation=isolation)
     services_middleware = ServicesMiddleware(
         get_sessionmaker(),
         dev_ids=frozenset(settings.dev_telegram_ids),
