@@ -13,7 +13,7 @@ from app.bot.handlers.manager_shipments import _warehouse_text
 from app.bot.types import ClientAccountContext
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import ClientAccountRepository, UserRepository
-from app.services import account_team, inventory
+from app.services import account_team, inventory_backend
 from app.sheets.source import StockRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,7 +64,9 @@ async def test_employee_does_not_get_a_phantom_warehouse_row(db_session: AsyncSe
     # Зовём НАСТОЯЩИЙ билдер экрана, а не копию его запроса: иначе откат хендлера
     # на выборку по `User` тест бы не заметил. Фейкается только адаптер Sheets.
     source = _KeyedSource()
-    monkeypatch.setattr(inventory, "current_stock_source", lambda *a, **kw: source)
+    # Подменяем резолвер источника там, где он теперь живёт, — у Sheets-бэкенда
+    # (`inventory_backend`), а не в сервисе: сервис ходит за остатком через порт.
+    monkeypatch.setattr(inventory_backend, "current_stock_source", lambda *a, **kw: source)
     text = await _warehouse_text(db_session)
 
     assert "Магазин — 1 поз. / 7 од." in text

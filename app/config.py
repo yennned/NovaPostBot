@@ -118,7 +118,11 @@ class Settings(BaseSettings):
     sheets_retry_attempts: int = Field(default=3, alias="SHEETS_RETRY_ATTEMPTS")
     sheets_retry_backoff: float = Field(default=0.5, alias="SHEETS_RETRY_BACKOFF")
 
-    inventory_source: Literal["sheets", "crm"] = Field(
+    # Откуда берётся КОЛИЧЕСТВО на складе. `sheets` — книга «Склад» (как было);
+    # `pg` — таблица `stock_balances`. Переключатель существует, чтобы откат был
+    # сменой переменной окружения и рестартом, без пересборки и без миграции вниз.
+    # `crm` — контракт-заглушка Фазы 7, честно падает «ще не реалізовано».
+    inventory_source: Literal["sheets", "crm", "pg"] = Field(
         default="sheets",
         alias="INVENTORY_SOURCE",
     )

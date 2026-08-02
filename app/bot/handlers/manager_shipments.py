@@ -97,7 +97,7 @@ async def _warehouse_text(db_session: AsyncSession) -> str:
 
     total_positions = total_units = 0
     read_ok = False
-    for account, totals in await inventory.stock_summary(list(accounts)):
+    for account, totals in await inventory.stock_summary(db_session, list(accounts)):
         # name приходит из ПІБ клиента (Telegram/ввод) → экранируем под parse_mode=HTML.
         label = html.escape(account.name or str(account.id))
         if totals is None:
