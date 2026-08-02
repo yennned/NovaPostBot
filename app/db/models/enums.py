@@ -79,8 +79,19 @@ class ShipmentStatus(StrEnum):
 
 
 class StockMovementType(StrEnum):
-    """Тип движения склада (append-only журнал)."""
+    """Тип движения склада (append-only журнал).
 
+    Физически двигают `stock_balances.quantity` только `intake`, `ttn_dispatch`,
+    `ttn_return` и `manual`. `ttn_reserve`/`ttn_cancel` — про бронь, а она
+    выводится из статуса ТТН, поэтому у них `quantity_before == quantity_after`.
+    На этом стоит инвариант сверки: сумма дельт по физическим типам равна
+    остатку — он ловит баг в нашем коде, чего сравнение с Google не даёт.
+    """
+
+    #: Приёмка товара. Отдельно от `manual` намеренно: `manual` — «человек
+    #: поправил ошибку», `intake` — «товар физически приехал». Смешать их значит
+    #: потерять возможность отличить коррекцию от прихода в отчётах и в сверке.
+    intake = "intake"
     ttn_reserve = "ttn_reserve"
     ttn_dispatch = "ttn_dispatch"
     ttn_cancel = "ttn_cancel"

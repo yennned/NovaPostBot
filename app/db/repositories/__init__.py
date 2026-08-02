@@ -13,6 +13,7 @@ from app.db.repositories.notification_setting import NotificationSettingReposito
 from app.db.repositories.reports import ReportsRepository
 from app.db.repositories.sender_profile import SenderProfileRepository
 from app.db.repositories.shipment import ShipmentItemDraft, ShipmentRepository
+from app.db.repositories.stock_balance import StockBalanceRepository
 from app.db.repositories.stock_movement import StockMovementRepository
 from app.db.repositories.support import SupportRepository
 from app.db.repositories.user import UserRepository
@@ -26,6 +27,7 @@ __all__ = [
     "SenderProfileRepository",
     "ShipmentItemDraft",
     "ShipmentRepository",
+    "StockBalanceRepository",
     "StockMovementRepository",
     "SupportRepository",
     "UserRepository",
