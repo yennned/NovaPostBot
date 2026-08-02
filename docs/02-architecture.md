@@ -127,6 +127,13 @@ tests/                   pytest на **реальном Postgres** + харне�
 - Phase 7 уже вынесла seam `app/sheets/`: сейчас дефолтный источник —
   `GoogleSheetsStockSource`, переключение идёт через `INVENTORY_SOURCE`, а
   будущий CRM/WMS REST adapter подключается без правок handler/service слоя.
+- Поверх него — порт `InventoryBackend` (`app/services/inventory_backend.py`):
+  `sheets` читает книгу, `pg` читает `stock_balances`. **Пока только чтение**:
+  списание при отправке и гейт от oversell по-прежнему идут в Sheets. Развилка
+  поднята над `StockSource` намеренно — тот синхронный, адресуется именем вкладки
+  и пишет мимо транзакции вызывающего, а Postgres-реализации нужны `AsyncSession`,
+  адресация по `account_id` и мутация в общей транзакции с `stock_movements`;
+  на этом и строится будущий путь записи.
 
 ## Сквозные параметры
 

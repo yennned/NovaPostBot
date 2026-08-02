@@ -1,7 +1,8 @@
 """Тесты сводки склада по аккаунтам (`inventory.stock_totals/stock_summary`).
 
-Без БД: читаем через фейковый `StockSource`, считаем позиции/единицы, проверяем
-устойчивость к падению чтения листа отдельного аккаунта.
+Читаем через фейковый `StockSource`, считаем позиции/единицы, проверяем
+устойчивость к падению чтения листа отдельного аккаунта. Сессия здесь нужна
+только чтобы удовлетворить сигнатуру порта: Sheets-бэкенд в БД не ходит.
 
 Сводка идёт по `ClientAccount`, а не по `User`: лист склада принадлежит аккаунту.
 DB-регрессия на работников (они не должны давать отдельных строк) — в
@@ -16,6 +17,7 @@ from app.db.models.client_account import ClientAccount
 from app.services import inventory
 from app.services.inventory import StockTotals
 from app.sheets.source import StockRow
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class _FakeSource:
@@ -35,17 +37,17 @@ def _account(name: str = "Тест Клієнт") -> ClientAccount:
     return ClientAccount(name=name, stock_sheet_key=name)
 
 
-async def test_stock_totals_counts_positions_and_units() -> None:
+async def test_stock_totals_counts_positions_and_units(db_session: AsyncSession) -> None:
     rows = [
         StockRow(sku="A", name="a", category="c", quantity=3, price=None),
         StockRow(sku="B", name="b", category="c", quantity=2, price=None),
     ]
-    totals = await inventory.stock_totals(_account(), reader=_FakeSource(rows))
+    totals = await inventory.stock_totals(db_session, _account(), reader=_FakeSource(rows))
     assert totals == StockTotals(positions=2, units=5)
 
 
-async def test_stock_totals_none_on_read_error() -> None:
-    totals = await inventory.stock_totals(_account(), reader=_BoomSource())
+async def test_stock_totals_none_on_read_error(db_session: AsyncSession) -> None:
+    totals = await inventory.stock_totals(db_session, _account(), reader=_BoomSource())
     assert totals is None
 
 
@@ -58,9 +60,9 @@ class _SelectiveSource:
         return [StockRow(sku="A", name="a", category=None, quantity=4, price=None)]
 
 
-async def test_stock_summary_pairs_accounts_with_totals() -> None:
+async def test_stock_summary_pairs_accounts_with_totals(db_session: AsyncSession) -> None:
     accounts = [_account("Аліса"), _account("Боб")]
-    summary = await inventory.stock_summary(accounts, reader=_SelectiveSource())
+    summary = await inventory.stock_summary(db_session, accounts, reader=_SelectiveSource())
     assert [a.name for a, _ in summary] == ["Аліса", "Боб"]
     assert summary[0][1] == StockTotals(positions=1, units=4)
     assert summary[1][1] is None  # недоступный лист → None, сводка не падает
@@ -82,7 +84,7 @@ def test_stock_sheet_key_whitespace_name_falls_back_to_id() -> None:
     assert inventory.stock_sheet_key(named) == "Магазин"
 
 
-async def test_stock_totals_reads_account_key_not_owner_name() -> None:
+async def test_stock_totals_reads_account_key_not_owner_name(db_session: AsyncSession) -> None:
     """Ключ берётся из `account.stock_sheet_key`, а не из имени аккаунта.
 
     Иначе переименование аккаунта увело бы чтение на несуществующий лист.
@@ -95,5 +97,5 @@ async def test_stock_totals_reads_account_key_not_owner_name() -> None:
             return []
 
     account = ClientAccount(name="Нове Імʼя", stock_sheet_key="Старий Ключ")
-    await inventory.stock_totals(account, reader=_Spy())
+    await inventory.stock_totals(db_session, account, reader=_Spy())
     assert seen == ["Старий Ключ"]

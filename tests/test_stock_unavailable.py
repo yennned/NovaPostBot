@@ -161,4 +161,4 @@ async def test_manager_summary_still_swallows_unavailable(db_session: AsyncSessi
     get_settings.cache_clear()
     _, account = await _account_owner(db_session, 8401)
 
-    assert await stock_totals(account, reader=_UnavailableSource()) is None
+    assert await stock_totals(db_session, account, reader=_UnavailableSource()) is None

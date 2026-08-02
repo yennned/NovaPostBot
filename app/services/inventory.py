@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -13,15 +12,29 @@ from app.db.models.client_account import ClientAccount
 from app.db.models.user import User
 from app.db.repositories import ShipmentRepository
 from app.services import shipments
-from app.sheets import (
-    StockRow,
-    StockSheetNotFound,
-    StockSource,
-    current_stock_source,
-    run_sheets_read,
+from app.services.inventory_backend import (
+    InventoryBackend,
+    resolve_inventory_backend,
+    stock_sheet_key,
 )
+from app.sheets import StockRow, StockSource
 
 logger = structlog.get_logger(__name__)
+
+# Реэкспорт: `stock_sheet_key` переехал к Sheets-бэкенду (это его способ адресации),
+# но продолжает импортироваться отсюда — `tracking`, `returns`, `shipment`.
+__all__ = [
+    "InventoryItem",
+    "InventoryPage",
+    "StockTotals",
+    "find_inventory_item",
+    "get_inventory_snapshot",
+    "list_inventory",
+    "stock_sheet_key",
+    "stock_summary",
+    "stock_totals",
+    "stock_view_book_url",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,23 +55,6 @@ class InventoryPage:
     limit: int
     offset: int
     categories: list[str]
-
-
-def stock_sheet_key(account: ClientAccount) -> str:
-    """Ключ листа склада аккаунта.
-
-    Предпочитаем персистентное поле `stock_sheet_key`, чтобы переименование не
-    ломало связь с Sheets между чтением и следующей синхронизацией. Fallback —
-    для данных, заведённых до миграции ключей.
-
-    Лист принадлежит аккаунту, а не человеку: у работника своего листа нет.
-
-    `.strip()`, а не голый `or`: имя из пробелов — непустая строка, и она прошла бы
-    мимо фолбэка. Синк (`client_sheet_sync`) на таком имени берёт `account.id`, и
-    расхождение читателя с синком означало бы чтение несуществующей вкладки, то
-    есть молча пустой склад.
-    """
-    return account.stock_sheet_key or account.name.strip() or str(account.id)
 
 
 def stock_view_book_url(account: ClientAccount) -> str | None:
@@ -96,31 +92,11 @@ async def get_inventory_snapshot(
     account_id=None,
     account: ClientAccount | None = None,
     reader: StockSource | None = None,
+    backend: InventoryBackend | None = None,
 ) -> list[InventoryItem]:
     account = shipments.require_client_account(client, account)
-    key = stock_sheet_key(account)
-    source = reader or current_stock_source()
-    started = time.monotonic()
-    try:
-        # Через выделенный single-worker executor, а не `asyncio.to_thread`: клиент
-        # gspread теперь один на процесс, и общий пул потоков означал бы гонку по
-        # непотокобезопасной сессии. Заодно чтения не конкурируют с записями склада.
-        # `StockSourceUnavailable` НЕ глотаем — см. комментарий у самого исключения.
-        rows = await run_sheets_read(source.read_stock, key)
-    except StockSheetNotFound:
-        # Лист склада ещё не заведён/переименован — это пустой остаток, а не сбой:
-        # клиент видит «склад порожній», а не падение хендлера створення ТТН.
-        # Manager-сводка (`stock_totals`) проглатывает это отдельно → None.
-        logger.warning("inventory.sheet_missing", client_id=str(client.id), key=key)
-        rows = []
-    logger.info(
-        "inventory.sheet_read",
-        key=key,
-        rows=len(rows),
-        duration_ms=round((time.monotonic() - started) * 1000),
-        # Сколько РЕАЛЬНЫХ обращений к Sheets сделал источник этого апдейта: по нему
-        # видно, что рендер+синк укладываются в одно чтение, и считается расход квоты.
-        source_reads=getattr(source, "reads", None),
+    rows = await resolve_inventory_backend(reader=reader, backend=backend).read_rows(
+        session, account
     )
     reserved = (
         await ShipmentRepository(session).reserved_by_sku(client.id)
@@ -149,9 +125,15 @@ async def list_inventory(
     limit: int = 8,
     offset: int = 0,
     reader: StockSource | None = None,
+    backend: InventoryBackend | None = None,
 ) -> InventoryPage:
     items = await get_inventory_snapshot(
-        session, client=client, account_id=account_id, account=account, reader=reader
+        session,
+        client=client,
+        account_id=account_id,
+        account=account,
+        reader=reader,
+        backend=backend,
     )
     categories = sorted({item.category for item in items if item.category})
     if query:
@@ -183,6 +165,7 @@ async def find_inventory_item(
     account_id=None,
     account: ClientAccount | None = None,
     reader: StockSource | None = None,
+    backend: InventoryBackend | None = None,
 ) -> InventoryItem | None:
     """Позиция склада по ТОЧНОМУ `sku` из свежего снапшота (`None` — позиции нет).
 
@@ -192,7 +175,12 @@ async def find_inventory_item(
     вызывающий тихо получил бы «товара нет» вместо остатка.
     """
     items = await get_inventory_snapshot(
-        session, client=client, account_id=account_id, account=account, reader=reader
+        session,
+        client=client,
+        account_id=account_id,
+        account=account,
+        reader=reader,
+        backend=backend,
     )
     return next((item for item in items if item.sku == sku), None)
 
@@ -206,32 +194,44 @@ class StockTotals:
 
 
 async def stock_totals(
-    account: ClientAccount, *, reader: StockSource | None = None
+    session: AsyncSession,
+    account: ClientAccount,
+    *,
+    reader: StockSource | None = None,
+    backend: InventoryBackend | None = None,
 ) -> StockTotals | None:
-    """Свод по листу склада аккаунта (позиции/единицы). `None` — лист недоступен.
+    """Свод по складу аккаунта (позиции/единицы). `None` — источник недоступен.
 
     Именно аккаунта, а не пользователя: лист склада принадлежит аккаунту, а не
     конкретному человеку. Работник аккаунта своего листа не имеет — раньше
     сводка звалась по `User` и показывала каждого работника отдельной строкой
     «лист недоступний».
 
-    Чтение Sheets синхронно (gspread) → уводим в поток, чтобы не блокировать луп.
-    Ошибку одного аккаунта (нет листа, блип НП/Sheets) глотаем — сводка по
-    остальным не должна падать целиком.
+    Что именно глотается, решает бэкенд (`transient_read_errors`), а не эта
+    функция. У Sheets отсутствие листа и блип квоты — штатная жизнь, и сводка по
+    остальным аккаунтам из-за них падать не должна. У Postgres таких ошибок нет:
+    сбой БД обязан быть виден, а не притворяться недоступным листом.
     """
-    source = reader or current_stock_source()
+    chosen = resolve_inventory_backend(reader=reader, backend=backend)
     try:
-        rows = await run_sheets_read(source.read_stock, stock_sheet_key(account))
-    except Exception:
-        # Устойчивость сводки важнее: лист одного аккаунта может отсутствовать или
-        # Sheets/НП блипнуть — это не должно валить сводку по остальным.
-        logger.warning("inventory.stock_totals_failed", account_id=str(account.id), exc_info=True)
+        rows = await chosen.read_rows(session, account)
+    except chosen.transient_read_errors:
+        logger.warning(
+            "inventory.stock_totals_failed",
+            account_id=str(account.id),
+            backend=chosen.name,
+            exc_info=True,
+        )
         return None
     return StockTotals(positions=len(rows), units=sum(row.quantity for row in rows))
 
 
 async def stock_summary(
-    accounts: list[ClientAccount], *, reader: StockSource | None = None
+    session: AsyncSession,
+    accounts: list[ClientAccount],
+    *,
+    reader: StockSource | None = None,
+    backend: InventoryBackend | None = None,
 ) -> list[tuple[ClientAccount, StockTotals | None]]:
     """Свод склада по аккаунтам — лист на аккаунт (для экрана менеджера «📦 Склад»).
 
@@ -240,5 +240,5 @@ async def stock_summary(
     аккаунтов сильно вырастет — заводить отдельный источник на поток + ограничитель
     конкуренции, а не делить одну сессию.
     """
-    source = reader or current_stock_source()
-    return [(account, await stock_totals(account, reader=source)) for account in accounts]
+    chosen = resolve_inventory_backend(reader=reader, backend=backend)
+    return [(account, await stock_totals(session, account, backend=chosen)) for account in accounts]

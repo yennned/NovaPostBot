@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from app.config import Settings, get_settings, parse_ids, parse_work_schedule
+from pydantic import ValidationError
 
 
 def test_parse_ids_variants():
@@ -68,3 +69,20 @@ def test_inventory_source_can_switch_to_crm(monkeypatch):
     monkeypatch.setenv("INVENTORY_SOURCE", "crm")
     settings = Settings(_env_file=None)
     assert settings.inventory_source == "crm"
+
+
+def test_inventory_source_accepts_pg(monkeypatch):
+    """`pg` — путь отката с Postgres обратно на лист одной переменной окружения.
+
+    Если бы `Literal` его не принимал, переключение потребовало бы релиза, а откат
+    под инцидентом — второго релиза.
+    """
+    monkeypatch.setenv("INVENTORY_SOURCE", "pg")
+    assert Settings(_env_file=None).inventory_source == "pg"
+
+
+def test_inventory_source_rejects_typos(monkeypatch):
+    """Опечатка обязана падать на старте, а не тихо оставлять прежний источник."""
+    monkeypatch.setenv("INVENTORY_SOURCE", "postgres")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
