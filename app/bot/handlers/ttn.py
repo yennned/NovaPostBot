@@ -931,7 +931,12 @@ async def cb_qty_num(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(CreateTtnState.entering_qty, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_qty,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_qty(message: Message, bot: Bot, state: FSMContext) -> None:
     pending = (await state.get_data()).get("pending")
     if pending is None:
@@ -1191,7 +1196,12 @@ async def cb_weight_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(CreateTtnState.entering_weight, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_weight,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_weight(message: Message, bot: Bot, state: FSMContext) -> None:
     weight = _parse_weight(message.text or "")
     if weight is None:
@@ -1254,7 +1264,12 @@ async def cb_recipient_kind(callback: CallbackQuery, state: FSMContext) -> None:
 # ----------------------------------------------------------- дані отримувача (текст)
 
 
-@router.message(CreateTtnState.entering_recipient_name, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_recipient_name,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_recipient_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     kind = (await state.get_data()).get("recipient_kind", "person")
@@ -1274,7 +1289,12 @@ async def receive_recipient_name(message: Message, state: FSMContext) -> None:
         )
 
 
-@router.message(CreateTtnState.entering_recipient_edrpou, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_recipient_edrpou,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_recipient_edrpou(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not _valid_edrpou(raw):
@@ -1287,7 +1307,12 @@ async def receive_recipient_edrpou(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(CreateTtnState.entering_recipient_phone, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_recipient_phone,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_recipient_phone(message: Message, state: FSMContext) -> None:
     phone = _normalize_phone(message.text or "")
     if phone is None:
@@ -1303,7 +1328,12 @@ async def receive_recipient_phone(message: Message, state: FSMContext) -> None:
 # ------------------------------------------------------------------ місто (пошук НП)
 
 
-@router.message(CreateTtnState.entering_city_query, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_city_query,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_city_query(
     message: Message,
     bot: Bot,
@@ -1604,7 +1634,12 @@ async def cb_wh_find(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(CreateTtnState.entering_warehouse_query, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.entering_warehouse_query,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_warehouse_query(
     message: Message,
     bot: Bot,
@@ -1946,7 +1981,12 @@ async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(CreateTtnState.editing_field, F.text, ~F.text.startswith("/"))
+@router.message(
+    CreateTtnState.editing_field,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_edit(
     message: Message,
     bot: Bot,

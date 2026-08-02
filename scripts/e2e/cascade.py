@@ -336,13 +336,35 @@ async def run_cascade(
     budget: int,
     run_id: str,
     global_limit: int = 10,
+    pace_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Создавать ТТН встык, пока не кончится личный или общий бюджет."""
+    """Создавать ТТН, пока не кончится личный или общий бюджет.
+
+    `pace_seconds` — минимальный интервал между началами ТТН у ЭТОЙ персоны;
+    0 (дефолт) сохраняет прежнее поведение «встык».
+
+    Ритм держится от старта прогона, а не «поспать после ТТН»: иначе фактическая
+    интенсивность падала бы вместе с латентностью НП, и заявленные «2,5 ТТН/мин»
+    превращались бы в «сколько выйдет». Ровно та же ошибка была в первой версии
+    нагрузочного `submit.py` и там же оплачена переделкой sweep'а.
+
+    Зачем это на живом НП: темп прогона — согласованная величина, а не побочный
+    эффект latency чужого API. Без ритма одна персона выдаёт 6–8 ТТН/мин, то есть
+    втрое выше того, о чём договаривались.
+    """
     shared = TtnBudget(ARTIFACTS / run_id / "ttn_budget.json", global_limit)
     created: list[dict[str, Any]] = []
     dry_runs: list[dict[str, Any]] = []
+    started_at = time.monotonic()
+    sent = 0
 
     for index in range(budget):
+        if pace_seconds > 0:
+            due = started_at + sent * pace_seconds
+            delay = due - time.monotonic()
+            if delay > 0:
+                await persona.idle(delay)
+        sent += 1
         slot = shared.claim(persona.name)
         if slot is None:
             # Бюджет исчерпан другими персонами — доходим до карточки без отправки.

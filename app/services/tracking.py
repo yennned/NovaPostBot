@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment
-from app.db.repositories import AuditRepository, ShipmentRepository
+from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
 from app.logging_config import get_logger
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
@@ -276,6 +276,9 @@ async def apply_tracking_status(
             )
         await _apply_dispatch_stock(session, shipment=shipment, mutator=mutator)
 
+    if target_status is ShipmentStatus.cancelled:
+        await _release_reserve_in_ledger(session, shipment=shipment)
+
     await AuditRepository(session).log(
         "shipment_tracking_status_updated",
         account_id=shipment.account_id,
@@ -301,6 +304,40 @@ async def apply_tracking_status(
                 note=tracking.status,
             )
     return True, pushed
+
+
+async def _release_reserve_in_ledger(session: AsyncSession, *, shipment: Shipment) -> None:
+    """Снять бронь в журнале, когда ТТН удалили в кабинете НП.
+
+    Все ЧЕЛОВЕЧЕСКИЕ пути отмены пишут `ttn_cancel` (клиент, менеджер, удаление
+    аккаунта). Этот — нет: НП отдаёт код 2 «Видалено», трекинг переводит ТТН в
+    `cancelled`, и `ttn_reserve` остаётся в журнале без пары навсегда.
+
+    Доступный остаток при этом верен: он считается по СТАТУСУ ТТН, а не по
+    движениям, — поэтому дефект и был невидим полтора года. Цена другая: журнал
+    перестаёт сходиться, а именно по нему разбирают инцидент «куда делся товар».
+    Найдено живым прогоном по проду 2026-08-03: ТТН 20451492663031 от 21.07,
+    `ttn_reserve` −8 по `Ide00011` без парного движения.
+
+    `movement_exists` обязателен: трекинг идемпотентен и может увидеть «Видалено»
+    несколько раз подряд, а второй `ttn_cancel` завысил бы журнал ровно так же,
+    как его отсутствие занижало.
+    """
+    repo = ShipmentRepository(session)
+    if await repo.movement_exists(shipment.id, StockMovementType.ttn_cancel):
+        return
+    if not await repo.movement_exists(shipment.id, StockMovementType.ttn_reserve):
+        return
+    await StockMovementRepository(session).record_for_items(
+        client_id=shipment.client_id,
+        account_id=shipment.account_id,
+        shipment_id=shipment.id,
+        actor_user_id=None,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_cancel,
+        sign=1,
+        comment=f"ТТН {shipment.ttn_number or '—'} видалено в кабінеті НП",
+    )
 
 
 async def _apply_dispatch_stock(

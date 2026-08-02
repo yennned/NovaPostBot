@@ -45,6 +45,12 @@ async def main() -> int:
         default=10,
         help="общий на все процессы лимит реальных документов НП; 0 — только вхолостую",
     )
+    parser.add_argument(
+        "--pace-seconds",
+        type=float,
+        default=0.0,
+        help="мин. интервал между началами ТТН у этой персоны (0 — встык, как раньше)",
+    )
     parser.add_argument("--max-taps", type=int, default=200)
     parser.add_argument("--allow-destructive", action="store_true")
     parser.add_argument(
@@ -95,6 +101,7 @@ async def main() -> int:
                 budget=args.ttn_budget,
                 run_id=args.run_id,
                 global_limit=args.global_limit,
+                pace_seconds=args.pace_seconds,
             )
     finally:
         summary["steps"] = persona.steps
