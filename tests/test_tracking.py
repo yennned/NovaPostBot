@@ -199,3 +199,96 @@ async def test_receive_returned_shipment_rejects_overstocking_decisions(db_sessi
             decisions=[ReturnDecision(sku="SKU-3", accepted_quantity=2, rejected_quantity=1)],
             mutator=FakeMutator(),
         )
+
+
+async def test_np_deleted_ttn_releases_reserve_in_ledger(db_session: AsyncSession):
+    """ТТН удалили в кабинете НП — бронь снимается и в журнале.
+
+    Все человеческие пути отмены пишут `ttn_cancel`; этот — единственный, где
+    статус меняет НП, а не человек. Доступный остаток при этом верен всегда (он
+    считается по СТАТУСУ ТТН), поэтому дефект был невидим: нашёлся живым прогоном
+    по проду 2026-08-03 — ТТН 20451492663031 от 21.07 держала `ttn_reserve` −8 без
+    парного движения. Журнал — то, по чему разбирают «куда делся товар».
+
+    Мутация: убрать вызов `_release_reserve_in_ledger` — сумма движений станет −2.
+    """
+    from app.db.models.stock_movement import StockMovement
+    from app.db.repositories import StockMovementRepository
+    from sqlalchemy import select
+
+    client = await _active_client(db_session, telegram_id=931)
+    created = await ShipmentRepository(db_session).create(
+        client_id=client.id,
+        recipient_name="Іван",
+        ttn_number="59000931",
+        status=ShipmentStatus.confirmed,
+        items=[ShipmentItemDraft(sku="SKU-1", name="Кава", quantity=2, unit_price=Decimal("100"))],
+    )
+    shipment = await ShipmentRepository(db_session).get_by_id(created.id)
+    # Бронь, как её пишет создание ТТН.
+    await StockMovementRepository(db_session).record_for_items(
+        client_id=client.id,
+        account_id=shipment.account_id,
+        shipment_id=shipment.id,
+        actor_user_id=client.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_reserve,
+        sign=-1,
+        comment="Резерв під ТТН 59000931",
+    )
+
+    deleted = TrackingStatus(number="59000931", status="Видалено", status_code="2", raw={})
+    changed, _ = await apply_tracking_status(db_session, shipment=shipment, tracking=deleted)
+
+    assert changed is True
+    assert shipment.status is ShipmentStatus.cancelled
+    rows = list(
+        await db_session.scalars(
+            select(StockMovement).where(StockMovement.shipment_id == created.id)
+        )
+    )
+    assert sorted(row.movement_type.value for row in rows) == ["ttn_cancel", "ttn_reserve"]
+    assert sum(row.quantity_delta for row in rows) == 0
+
+
+async def test_np_deleted_ttn_does_not_double_release(db_session: AsyncSession):
+    """Повторное «Видалено» второго `ttn_cancel` не пишет.
+
+    Трекинг идемпотентен и видит один и тот же ответ НП сколько угодно раз; второй
+    возврат брони завысил бы журнал ровно так же, как его отсутствие занижало.
+    """
+    from app.db.models.stock_movement import StockMovement
+    from app.db.repositories import StockMovementRepository
+    from app.services.tracking import _release_reserve_in_ledger
+    from sqlalchemy import select
+
+    client = await _active_client(db_session, telegram_id=932)
+    created = await ShipmentRepository(db_session).create(
+        client_id=client.id,
+        recipient_name="Іван",
+        ttn_number="59000932",
+        status=ShipmentStatus.confirmed,
+        items=[ShipmentItemDraft(sku="SKU-1", name="Кава", quantity=2, unit_price=Decimal("100"))],
+    )
+    shipment = await ShipmentRepository(db_session).get_by_id(created.id)
+    # Бронь, как её пишет создание ТТН.
+    await StockMovementRepository(db_session).record_for_items(
+        client_id=client.id,
+        account_id=shipment.account_id,
+        shipment_id=shipment.id,
+        actor_user_id=client.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_reserve,
+        sign=-1,
+        comment="Резерв",
+    )
+
+    await _release_reserve_in_ledger(db_session, shipment=shipment)
+    await _release_reserve_in_ledger(db_session, shipment=shipment)
+
+    rows = list(
+        await db_session.scalars(
+            select(StockMovement).where(StockMovement.shipment_id == created.id)
+        )
+    )
+    assert sorted(row.movement_type.value for row in rows) == ["ttn_cancel", "ttn_reserve"]

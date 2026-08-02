@@ -115,3 +115,76 @@ def test_ttn_budget_release_returns_slot(tmp_path) -> None:
     budget.release(first)
 
     assert budget.claim("b") == 1
+
+
+async def test_cascade_pace_holds_rhythm_from_start(monkeypatch, tmp_path) -> None:
+    """Ритм считается от старта прогона, а не «поспать после ТТН».
+
+    Иначе фактическая интенсивность падает вместе с латентностью НП, и заявленные
+    «2,5 ТТН/хв» превращаются в «сколько выйдет» — на живом прогоне это значит,
+    что темп задаёт чужой API, а не мы. Ровно эту ошибку уже оплатили переделкой
+    sweep'а в `scripts/load/submit.py`.
+
+    Мутация: считать паузу от конца предыдущей ТТН — суммарное ожидание станет
+    полным `pace × N` вместо `pace × N − потраченное`, и тест покраснеет.
+    """
+    from scripts.e2e import cascade
+
+    clock = {"now": 1000.0}
+    slept: list[float] = []
+
+    monkeypatch.setattr(cascade.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(cascade, "ARTIFACTS", tmp_path)
+
+    class _Persona:
+        name = "p"
+
+        async def idle(self, seconds: float) -> None:
+            slept.append(seconds)
+            clock["now"] += seconds
+
+    class _Human:
+        async def pause(self) -> None:
+            return None
+
+    async def fake_one_ttn(persona, human, *, index, submit):
+        clock["now"] += 8.0  # ТТН в живом НП стоит около восьми секунд
+        return {"submitted": True}
+
+    monkeypatch.setattr(cascade, "_one_ttn", fake_one_ttn)
+
+    await cascade.run_cascade(
+        _Persona(), human=_Human(), budget=3, run_id="pace", global_limit=10, pace_seconds=20.0
+    )
+
+    # Первая — сразу, дальше досыпаем ТОЛЬКО остаток интервала: 20 − 8 = 12.
+    assert slept == [12.0, 12.0]
+
+
+async def test_cascade_without_pace_keeps_old_behaviour(monkeypatch, tmp_path) -> None:
+    """`pace_seconds=0` — прежний режим «встык»: ни одного лишнего ожидания."""
+    from scripts.e2e import cascade
+
+    slept: list[float] = []
+    monkeypatch.setattr(cascade, "ARTIFACTS", tmp_path)
+
+    class _Persona:
+        name = "p"
+
+        async def idle(self, seconds: float) -> None:
+            slept.append(seconds)
+
+    class _Human:
+        async def pause(self) -> None:
+            return None
+
+    async def fake_one_ttn(persona, human, *, index, submit):
+        return {"submitted": True}
+
+    monkeypatch.setattr(cascade, "_one_ttn", fake_one_ttn)
+
+    await cascade.run_cascade(
+        _Persona(), human=_Human(), budget=3, run_id="nopace", global_limit=10
+    )
+
+    assert slept == []

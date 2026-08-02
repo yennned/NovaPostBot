@@ -1327,6 +1327,7 @@ async def cb_settings_edit_prompt(callback: CallbackQuery, state: FSMContext) ->
     ClientCabinetState.waiting_for_settings_profile,
     F.text,
     ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
 )
 async def receive_settings_profile(
     message: Message,
@@ -1496,6 +1497,7 @@ async def cb_sender_profile_edit_prompt(callback: CallbackQuery, state: FSMConte
     ClientCabinetState.waiting_for_sender_profile_edit,
     F.text,
     ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
 )
 async def receive_sender_profile_edit(
     message: Message,
@@ -1563,7 +1565,12 @@ async def _new_profile_data(state: FSMContext) -> dict:
     return (await state.get_data()).get("new_profile") or {}
 
 
-@router.message(SenderProfileCreateState.entering_name, F.text, ~F.text.startswith("/"))
+@router.message(
+    SenderProfileCreateState.entering_name,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_new_profile_name(message: Message, state: FSMContext) -> None:
     draft = await _new_profile_data(state)
     draft["name"] = message.text.strip()
@@ -1575,7 +1582,12 @@ async def receive_new_profile_name(message: Message, state: FSMContext) -> None:
     await message.answer(new_profile_key_prompt(), parse_mode="HTML")
 
 
-@router.message(SenderProfileCreateState.entering_api_key, F.text, ~F.text.startswith("/"))
+@router.message(
+    SenderProfileCreateState.entering_api_key,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_new_profile_key(message: Message, state: FSMContext) -> None:
     draft = await _new_profile_data(state)
     draft["np_api_key"] = message.text.strip()
@@ -1588,7 +1600,12 @@ async def receive_new_profile_key(message: Message, state: FSMContext) -> None:
     await message.answer(new_profile_sender_name_prompt(), parse_mode="HTML")
 
 
-@router.message(SenderProfileCreateState.entering_sender_full_name, F.text, ~F.text.startswith("/"))
+@router.message(
+    SenderProfileCreateState.entering_sender_full_name,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_new_profile_sender_name(message: Message, state: FSMContext) -> None:
     draft = await _new_profile_data(state)
     draft["sender_full_name"] = message.text.strip()
@@ -1597,7 +1614,12 @@ async def receive_new_profile_sender_name(message: Message, state: FSMContext) -
     await message.answer(new_profile_phone_prompt(), parse_mode="HTML")
 
 
-@router.message(SenderProfileCreateState.entering_sender_phone, F.text, ~F.text.startswith("/"))
+@router.message(
+    SenderProfileCreateState.entering_sender_phone,
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_TEXTS),
+)
 async def receive_new_profile_phone(
     message: Message,
     state: FSMContext,
