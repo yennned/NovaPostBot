@@ -440,7 +440,7 @@ async def notify_stock_manual_edits(
     notifier: Notifier,
     *,
     account_label: str,
-    applied: list[tuple[str, int, int]],
+    applied: list[tuple[str, int, int, str]],
     rejected: list[tuple[str, int, int, str]],
     settings: Settings | None = None,
 ) -> None:
@@ -450,12 +450,17 @@ async def notify_stock_manual_edits(
     остатка мимо приёмки и отгрузки обязано быть видимым; отклонённые — потому что
     иначе человек будет считать, что поправил, а число вернётся обратно, и это
     выглядит как сбой бота.
+
+    Автор берётся из журнала `_Правки` книги «Склад» и может быть пуст: Apps
+    Script в книге не установлен либо Google не отдал адрес правившего. Пустого
+    «хто» в тексте не показываем — строка «правив ―» не сообщает ничего.
     """
     if not applied and not rejected:
         return
     lines = [f"✏️ <b>Ручні правки залишку</b> · {html.escape(account_label)}"]
-    for sku, was, now in applied:
-        lines.append(f"• {html.escape(sku)}: {was} → {now}")
+    for sku, was, now, author in applied:
+        who = f" · {html.escape(author)}" if author else ""
+        lines.append(f"• {html.escape(sku)}: {was} → {now}{who}")
     for sku, was, now, reason in rejected:
         lines.append(
             f"• ⛔ {html.escape(sku)}: {was} → {now} — не застосовано ({html.escape(reason)}), "

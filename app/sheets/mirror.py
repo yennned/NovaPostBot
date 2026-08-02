@@ -26,6 +26,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.sheets.client import SheetsClient
+from app.sheets.source import StockSheetNotFound
+
+#: Лист-журнал ручных правок «Кількість». Заполняет Apps Script книги «Склад»
+#: (`scripts/stock_apps_script.gs`), один на всю книгу — колонка «Лист» говорит,
+#: чей это склад. Должно совпадать с `EDITS_TAB` в скрипте.
+EDITS_TAB = "_Правки"
 
 _SKU_HEADERS = ("артикул", "sku")
 _NAME_HEADERS = ("назва", "name")
@@ -111,6 +117,44 @@ class StockSheetMirror:
                 )
             )
         return SheetSnapshot(rows=rows, quantity_col=quantity_col, reserve_col=reserve_col)
+
+    def read_edit_authors(self, client_key: str) -> dict[tuple[str, int], str]:
+        """Кто правил количество в этом листе: `{(артикул, новое значение): хто}`.
+
+        Ключ включает само значение, а не только артикул: между циклами зеркала
+        человек мог поправить одну позицию дважды, и приписать движению автора
+        первой правки было бы хуже, чем не приписать никого.
+
+        Листа нет — Apps Script в книге не установлен. Это не сбой: зеркало
+        работало без него всегда, автор просто останется неизвестным.
+        """
+        try:
+            worksheet = self.client.get_stock_worksheet(EDITS_TAB)
+        except StockSheetNotFound:
+            return {}
+        values = worksheet.get_values()
+        if len(values) < 2:
+            return {}
+
+        header = [str(cell).strip().lower() for cell in values[0]]
+        tab_col = _column(header, ("лист",))
+        sku_col = _column(header, _SKU_HEADERS)
+        now_col = _column(header, ("стало",))
+        who_col = _column(header, ("хто",))
+        if not (tab_col and sku_col and now_col and who_col):
+            return {}
+
+        authors: dict[tuple[str, int], str] = {}
+        for raw in values[1:]:
+            if _cell(raw, tab_col) != client_key:
+                continue
+            sku = _cell(raw, sku_col)
+            who = _cell(raw, who_col)
+            if not sku or not who or who == "—":
+                continue
+            # Позже по журналу — вернее: перезаписываем, а не пропускаем.
+            authors[(sku, _to_int(_cell(raw, now_col)))] = who
+        return authors
 
     def write_columns(self, client_key: str, updates: list[tuple[int, int, int]]) -> None:
         """Записать ячейки `(строка, колонка, значение)` одним batch-запросом.

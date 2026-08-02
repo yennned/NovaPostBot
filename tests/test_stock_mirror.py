@@ -17,9 +17,12 @@ from typing import Any
 
 from app.config import get_settings
 from app.db.models.enums import StockMovementType, UserRole, UserStatus
+from app.db.models.stock_movement import StockMovement
 from app.db.repositories import StockBalanceRepository, UserRepository
 from app.services import stock_mirror
-from app.sheets.mirror import StockSheetMirror
+from app.sheets.mirror import EDITS_TAB, StockSheetMirror
+from app.sheets.source import StockSheetNotFound
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import account_of
@@ -49,16 +52,31 @@ class _FakeWorksheet:
 
 
 class _FakeClient:
-    def __init__(self, worksheet: _FakeWorksheet) -> None:
+    def __init__(self, worksheet: _FakeWorksheet, edits: _FakeWorksheet | None = None) -> None:
         self.worksheet = worksheet
+        self.edits = edits
+        #: Какие вкладки запрашивали. Нужен, чтобы проверить, что журнал правок
+        #: читается только когда есть что приписывать, — это обещание про квоту.
+        self.asked: list[str] = []
 
     def get_stock_worksheet(self, client_key: str) -> _FakeWorksheet:
+        self.asked.append(client_key)
+        if client_key == EDITS_TAB:
+            if self.edits is None:
+                raise StockSheetNotFound(client_key)
+            return self.edits
         return self.worksheet
 
 
-def _mirror(rows: list[list[Any]]) -> tuple[StockSheetMirror, _FakeWorksheet]:
+def _mirror(
+    rows: list[list[Any]], edits: list[list[Any]] | None = None
+) -> tuple[StockSheetMirror, _FakeWorksheet]:
     worksheet = _FakeWorksheet(rows)
-    return StockSheetMirror(client=_FakeClient(worksheet)), worksheet
+    edits_sheet = None
+    if edits is not None:
+        edits_sheet = _FakeWorksheet([])
+        edits_sheet.values = [["Час", "Лист", "Артикул", "Було", "Стало", "Хто"], *edits]
+    return StockSheetMirror(client=_FakeClient(worksheet, edits_sheet)), worksheet
 
 
 async def _account(session: AsyncSession, telegram_id: int, *, sheet_key: str = "Магазин"):
@@ -252,3 +270,80 @@ async def test_reserve_column_mirrors_postgres(db_session: AsyncSession, monkeyp
 
     # Броней в PG нет — значит и в листе их быть не должно.
     assert worksheet.values[1][5] == 0
+
+
+async def test_manual_edit_carries_author_from_edits_log(db_session: AsyncSession, monkeypatch):
+    """Автора правки зеркало узнать само не может — только из журнала `_Правки`.
+
+    Оно приходит в лист через пять минут и видит одно новое число: кто его ввёл и
+    когда, в ячейке не написано. Автора пишет Apps Script книги «Склад» в момент
+    правки, зеркало забирает его оттуда.
+
+    Мутация: не читать `read_edit_authors` — комментарий движения и текст пуша
+    останутся анонимными, оба assert покраснеют.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1520)
+    await _seed(db_session, account.id, "A", 5, mirrored=5)
+    mirror, _ = _mirror(
+        [["A", "Кава", "", 7, "", 0, 7]],
+        edits=[["01.08.2026 10:00", "Магазин", "A", 5, 7, "ivan@example.com"]],
+    )
+
+    result = await stock_mirror.mirror_account(
+        db_session, account, mirror=mirror, settings=settings
+    )
+
+    assert [(e.sku, e.applied, e.author) for e in result.edits] == [("A", True, "ivan@example.com")]
+    manual = list(
+        await db_session.scalars(
+            select(StockMovement).where(
+                StockMovement.account_id == account.id,
+                StockMovement.movement_type == StockMovementType.manual,
+            )
+        )
+    )
+    assert len(manual) == 1 and "ivan@example.com" in (manual[0].comment or "")
+
+
+async def test_edits_log_is_not_read_when_nothing_was_edited(db_session: AsyncSession, monkeypatch):
+    """Журнал правок читается только когда есть кого приписывать.
+
+    Правка ячейки — редкое событие, а зеркало ходит раз в 5 минут по каждому
+    аккаунту. Безусловное чтение стоило бы второго запроса Google на каждый цикл
+    ради пустого листа — то есть удвоило бы цену прохода на ровном месте.
+
+    Мутация: читать `read_edit_authors` безусловно — `_Правки` окажется в
+    запрошенных вкладках, и assert покраснеет.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1521)
+    await _seed(db_session, account.id, "A", 5, mirrored=5)
+    mirror, _ = _mirror([["A", "Кава", "", 5, "", 0, 5]], edits=[])
+
+    await stock_mirror.mirror_account(db_session, account, mirror=mirror, settings=settings)
+
+    assert EDITS_TAB not in mirror.client.asked
+
+
+async def test_missing_edits_log_does_not_block_the_edit(db_session: AsyncSession, monkeypatch):
+    """Apps Script в книге не установлен — правка применяется как и раньше.
+
+    Журнал авторов появился позже самого зеркала: сделать его обязательным значило
+    бы сломать приём ручных правок у всех, у кого скрипт ещё не стоит.
+
+    Мутация: убрать перехват `StockSheetNotFound` в `read_edit_authors` — проход
+    упадёт, и правка не применится вовсе.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1522)
+    await _seed(db_session, account.id, "A", 5, mirrored=5)
+    mirror, _ = _mirror([["A", "Кава", "", 7, "", 0, 7]])  # edits=None → листа нет
+
+    result = await stock_mirror.mirror_account(
+        db_session, account, mirror=mirror, settings=settings
+    )
+
+    assert [(e.sku, e.applied, e.author) for e in result.edits] == [("A", True, "")]
+    balance = await StockBalanceRepository(db_session).get(account_id=account.id, sku="A")
+    assert balance is not None and balance.quantity == 7
