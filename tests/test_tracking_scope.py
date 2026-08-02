@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import httpx
 from app.config import Settings
@@ -29,6 +31,8 @@ class _NpStub:
         self._status_code = status_code
         #: номера, про которые НП сознательно промолчит (не вернёт строку)
         self.silent: set[str] = set()
+        #: доп. поля, подмешиваемые в строку ответа (напр. DateScan)
+        self.extra: dict[str, str] = {}
 
     def client(self, settings: Settings) -> NovaPoshtaClient:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -37,7 +41,12 @@ class _NpStub:
             self.asked.append(numbers)
             self.calls += 1
             data = [
-                {"Number": number, "Status": self._status, "StatusCode": self._status_code}
+                {
+                    "Number": number,
+                    "Status": self._status,
+                    "StatusCode": self._status_code,
+                    **self.extra,
+                }
                 for number in numbers
                 if number not in self.silent
             ]
@@ -50,6 +59,16 @@ class _NpStub:
     @property
     def asked_numbers(self) -> set[str]:
         return {number for chunk in self.asked for number in chunk}
+
+
+class _FakeMutator:
+    """Списание при `dispatched` иначе ушло бы в настоящий Google Sheets."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[tuple[str, int]]] = []
+
+    def apply_deltas(self, client_key: str, deltas) -> None:
+        self.calls.append([(delta.sku, delta.quantity_delta) for delta in deltas])
 
 
 def _settings(**overrides) -> Settings:
@@ -311,3 +330,70 @@ async def test_return_watch_detects_return(db_session: AsyncSession):
 
     assert result.updated == 1
     assert shipment.status is ShipmentStatus.returning
+
+
+async def test_late_detection_does_not_zero_the_fee(db_session: AsyncSession):
+    """Отправлена вовремя, замечена после дедлайна — комиссия остаётся.
+
+    Раньше вердикт считался от момента обнаружения, и задержка нашего же опроса
+    ставила `fee_free=True`. При 15k ТТН/мес это прямая потеря выручки за чужую
+    (нашу) медлительность.
+    """
+    client, profile = await _client_with_profile(db_session, 956)
+    now = datetime.now(UTC)
+    shipment = await _shipment(
+        db_session, client, profile, number="in-time", status=ShipmentStatus.confirmed
+    )
+    shipment.sla_deadline = now - timedelta(hours=2)
+    shipment.fee_amount = Decimal("21.00")
+    await db_session.flush()
+
+    # НП говорит: отсканировано за три часа до сейчас, то есть ДО дедлайна.
+    scanned = (now - timedelta(hours=3)).astimezone(ZoneInfo("Europe/Kyiv"))
+    stub = _NpStub(status="Відправлено", status_code="3")
+    stub.extra = {"DateScan": scanned.strftime("%d.%m.%Y %H:%M:%S")}
+    np_client = stub.client(_settings())
+    try:
+        await poll_shipments(
+            db_session, np_client=np_client, mutator=_FakeMutator(), settings=_settings()
+        )
+    finally:
+        await np_client.aclose()
+
+    assert shipment.status is ShipmentStatus.dispatched
+    assert shipment.sla_met is True
+    assert shipment.fee_free is False
+    assert shipment.fee_amount == Decimal("21.00")
+
+
+async def test_missing_np_time_inside_polling_gap_leaves_verdict_unknown(
+    db_session: AsyncSession,
+):
+    """Дедлайн попал между опросами, НП даты не дала — ни промах, ни успех."""
+    client, profile = await _client_with_profile(db_session, 957)
+    now = datetime.now(UTC)
+    shipment = await _shipment(
+        db_session,
+        client,
+        profile,
+        number="ambiguous",
+        status=ShipmentStatus.confirmed,
+        tracking_updated_at=now - timedelta(minutes=3),
+    )
+    shipment.sla_deadline = now - timedelta(minutes=1)
+    shipment.fee_amount = Decimal("21.00")
+    await db_session.flush()
+
+    stub = _NpStub(status="Відправлено", status_code="3")  # без DateScan
+    np_client = stub.client(_settings())
+    try:
+        await poll_shipments(
+            db_session, np_client=np_client, mutator=_FakeMutator(), settings=_settings()
+        )
+    finally:
+        await np_client.aclose()
+
+    assert shipment.status is ShipmentStatus.dispatched
+    assert shipment.sla_met is None, "неизвестность не должна становиться промахом"
+    assert shipment.fee_free is False
+    assert shipment.fee_amount == Decimal("21.00")

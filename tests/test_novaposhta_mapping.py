@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -18,7 +19,14 @@ from app.novaposhta.mapping import (
     to_recipient_counterparty_props,
     to_save_props,
 )
-from app.novaposhta.schemas import ParcelSpec, RecipientSpec, SenderIdentity, TTNDraft
+from app.novaposhta.schemas import (
+    ParcelSpec,
+    RecipientSpec,
+    SenderIdentity,
+    TrackingStatus,
+    TTNDraft,
+)
+from app.novaposhta.tracking import dispatch_scan_time
 
 _SENDER = SenderIdentity(
     counterparty_ref="sender-cp",
@@ -339,3 +347,74 @@ def test_status_code_one_is_not_deleted():
     )
 
     assert is_deleted_in_np(status) is False
+
+
+# --- Время сканирования: чем закрывается SLA ------------------------------------
+
+
+def test_dispatch_scan_time_parses_the_real_np_format():
+    """Боевой формат `DateScan` — время впереди даты и без секунд.
+
+    Снят живым пробником (`scripts/e2e/tracking_probe.py`) на боевых ТТН
+    2026-08-02: `'20:05 01.08.2026'`. Первая версия кода знала только «разумные»
+    написания и не разобрала бы ни одного реального ответа — вердикт SLA молча
+    выродился бы в «не знаем» на всех накладных сразу. Формат пиним тестом,
+    чтобы эта ошибка не вернулась.
+    """
+    parsed = dispatch_scan_time(
+        TrackingStatus(
+            number="1", status="Відправлено", status_code="3", raw={"DateScan": "20:05 01.08.2026"}
+        )
+    )
+    # Киев летом — UTC+3.
+    assert parsed == datetime(2026, 8, 1, 17, 5, tzinfo=UTC)
+
+
+def test_dispatch_scan_time_parses_fallback_formats():
+    for text in ("20.06.2026 11:50:00", "20-06-2026 11:50:00", "2026-06-20 11:50:00"):
+        parsed = dispatch_scan_time(
+            TrackingStatus(
+                number="1", status="Відправлено", status_code="3", raw={"DateScan": text}
+            )
+        )
+        assert parsed == datetime(2026, 6, 20, 8, 50, tzinfo=UTC), text
+
+
+def test_dispatch_scan_time_is_none_without_field():
+    assert (
+        dispatch_scan_time(
+            TrackingStatus(number="1", status="Відправлено", status_code="3", raw={})
+        )
+        is None
+    )
+
+
+def test_dispatch_scan_time_ignores_unparsable_value():
+    assert (
+        dispatch_scan_time(
+            TrackingStatus(
+                number="1", status="Відправлено", status_code="3", raw={"DateScan": "хтозна"}
+            )
+        )
+        is None
+    )
+
+
+def test_dispatch_scan_time_never_falls_back_to_date_created():
+    """`DateCreated` — момент создания ТТН, то есть СТАРТ отсчёта SLA.
+
+    Подставив её как время отправки, мы признавали бы успевшими все накладные
+    подряд, включая реально просроченные. Проверяем, что её не берут даже когда
+    другого поля нет.
+    """
+    assert (
+        dispatch_scan_time(
+            TrackingStatus(
+                number="1",
+                status="Відправлено",
+                status_code="3",
+                raw={"DateCreated": "20.06.2026 09:00:00"},
+            )
+        )
+        is None
+    )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole, UserStatus
@@ -66,7 +67,7 @@ async def test_apply_tracking_status_dispatches_and_marks_sla(
         status=ShipmentStatus.confirmed,
         items=[ShipmentItemDraft(sku="SKU-1", name="Кава", quantity=2, unit_price=Decimal("100"))],
     )
-    created.sla_deadline = datetime.now(UTC) - timedelta(minutes=1)
+    created.sla_deadline = datetime.now(UTC) - timedelta(hours=1)
     created.fee_amount = Decimal("21.00")
     await db_session.flush()
 
@@ -74,10 +75,21 @@ async def test_apply_tracking_status_dispatches_and_marks_sla(
     notifier = FakeNotifier()
     mutator = FakeMutator()
 
+    # `DateScan` от НП — единственное, чем промах доказывается однозначно. Без него
+    # вердикт был бы `None` («не знаем»), и это правильно: посылку ни разу не
+    # опрашивали, поэтому доказать, что она уехала ПОСЛЕ дедлайна, нечем, а списывать
+    # комиссию за собственную задержку опроса мы больше не хотим.
+    scanned = (datetime.now(UTC) - timedelta(minutes=30)).astimezone(ZoneInfo("Europe/Kyiv"))
+
     changed, pushed = await apply_tracking_status(
         db_session,
         shipment=shipment,
-        tracking=TrackingStatus(number="59000999", status="Відправлено", status_code="3"),
+        tracking=TrackingStatus(
+            number="59000999",
+            status="Відправлено",
+            status_code="3",
+            raw={"DateScan": scanned.strftime("%d.%m.%Y %H:%M:%S")},
+        ),
         notifier=notifier,
         mutator=mutator,
     )

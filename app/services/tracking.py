@@ -17,13 +17,13 @@ from app.logging_config import get_logger
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import TrackingStatus
-from app.novaposhta.tracking import map_tracking_status
+from app.novaposhta.tracking import dispatch_scan_time, map_tracking_status
 from app.services import notifications
 from app.services.client_sheet_sync import best_effort_sync, run_on_sheets_executor
 from app.services.inventory import stock_sheet_key
 from app.services.notifications import Notifier
 from app.sheets import StockDelta, StockSource, build_stock_source
-from app.utils.sla import sla_met
+from app.utils.sla import sla_verdict
 
 _log = get_logger("tracking")
 
@@ -210,7 +210,11 @@ async def apply_tracking_status(
     mutator: StockSource | None = None,
 ) -> tuple[bool, bool]:
     target_status = map_tracking_status(tracking)
-    shipment.tracking_updated_at = datetime.now(UTC)
+    # Момент прошлого опроса нужен вердикту SLA как нижняя граница интервала, в
+    # который случилась отправка, поэтому снимаем его ДО перезаписи.
+    previous_poll_at = shipment.tracking_updated_at
+    detected_at = datetime.now(UTC)
+    shipment.tracking_updated_at = detected_at
     if target_status is None or target_status is shipment.status:
         await session.flush()
         return False, False
@@ -220,13 +224,31 @@ async def apply_tracking_status(
     await repo.update_status(shipment, target_status)
 
     if target_status is ShipmentStatus.dispatched:
-        shipment.dispatched_at = datetime.now(UTC)
-        shipment.sla_met = sla_met(
-            dispatched_at=shipment.dispatched_at, deadline=shipment.sla_deadline
+        scanned_at = dispatch_scan_time(tracking)
+        # `dispatched_at` — время отправки, а не время, когда мы про неё узнали.
+        # Фолбэк на момент обнаружения оставлен осознанно: он нужен отчётам как
+        # верхняя граница, но на вердикт SLA уже не влияет напрямую.
+        shipment.dispatched_at = scanned_at or detected_at
+        shipment.sla_met = sla_verdict(
+            scanned_at=scanned_at,
+            previous_poll_at=previous_poll_at,
+            detected_at=detected_at,
+            deadline=shipment.sla_deadline,
         )
         if shipment.sla_met is False:
             shipment.fee_free = True
             shipment.fee_amount = 0
+        elif shipment.sla_met is None and shipment.sla_deadline is not None:
+            # Дедлайн попал между прошлым и текущим опросом: по какую он сторону —
+            # неизвестно. Не ставим ни промах, ни успех, но и не прячем случай.
+            _log.warning(
+                "sla.verdict_unknown",
+                shipment_id=str(shipment.id),
+                ttn=shipment.ttn_number,
+                deadline=shipment.sla_deadline.isoformat(),
+                previous_poll_at=previous_poll_at.isoformat() if previous_poll_at else None,
+                detected_at=detected_at.isoformat(),
+            )
         await _apply_dispatch_stock(session, shipment=shipment, mutator=mutator)
 
     await AuditRepository(session).log(
