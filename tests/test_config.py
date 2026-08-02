@@ -86,3 +86,19 @@ def test_inventory_source_rejects_typos(monkeypatch):
     monkeypatch.setenv("INVENTORY_SOURCE", "postgres")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_db_pool_is_configured_not_defaulted(monkeypatch):
+    """Пул задан явно — дефолты SQLAlchemy нам не подходят.
+
+    Коннект удерживается через внешнее I/O (НП, Sheets внутри апдейта), поэтому
+    5+10 кончаются на десятке одновременных отправок, а `pool_timeout=30` означает
+    полминуты тишины перед той же ошибкой.
+    """
+    for key in ("DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_TIMEOUT", "DB_POOL_RECYCLE"):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings(_env_file=None)
+    assert (settings.db_pool_size, settings.db_max_overflow) == (20, 30)
+    assert settings.db_pool_timeout == 10, "долгое ожидание в пуле выглядит как зависший бот"
+    # Коннект, закрытый пулером Neon со своей стороны, дешевле ронять по возрасту.
+    assert settings.db_pool_recycle == 300

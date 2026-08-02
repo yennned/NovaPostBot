@@ -68,24 +68,39 @@ class StockMovementRepository(BaseRepository):
     ) -> None:
         """По движению на каждую позицию: `delta = sign * quantity` (sign ±1).
 
-        `quantity_before`/`quantity_after` — заглушки `0`/`delta`: реального running-
-        баланса не ведём (источник правды по остатку — «Склад» в Sheets, резерв —
-        сумма движений в PG). Единая точка этой конвенции для всех write-путей ТТН.
+        `quantity_before`/`quantity_after` — заглушки `0`/`delta`: это движения
+        БРОНИ (`ttn_reserve`/`ttn_cancel`), которые количество не двигают, а значит
+        и running-баланса у них нет. Физические движения пишет
+        `StockBalanceRepository.apply_movement` — там before/after честные.
+
+        Один `add_all` + один flush, а не flush на позицию: у многопозиционной ТТН
+        это была бы пачка round-trip'ов подряд внутри апдейта, при котором коннект
+        и так удерживается через вызовы НП и Sheets.
         """
-        for item in items:
-            delta = sign * item.quantity
-            await self.create(
+        # Скоуп резолвим ОДИН раз на пачку, а не на позицию: он одинаков для всех
+        # строк одной ТТН, а `resolve_account_scope` — это запрос в БД.
+        client_id, account_id = await resolve_account_scope(
+            self.session, client_id=client_id, account_id=account_id
+        )
+        movements = [
+            StockMovement(
                 client_id=client_id,
                 account_id=account_id,
                 shipment_id=shipment_id,
                 actor_user_id=actor_user_id,
                 sku=item.sku,
                 movement_type=movement_type,
-                quantity_delta=delta,
+                quantity_delta=sign * item.quantity,
                 quantity_before=0,
-                quantity_after=delta,
+                quantity_after=sign * item.quantity,
                 comment=comment,
             )
+            for item in items
+        ]
+        if not movements:
+            return
+        self.session.add_all(movements)
+        await self.session.flush()
 
     async def list_for_shipment(self, shipment_id: uuid.UUID) -> list[StockMovement]:
         stmt = (

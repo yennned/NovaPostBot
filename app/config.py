@@ -100,6 +100,14 @@ class Settings(BaseSettings):
     # PostgreSQL (Neon): pooled — для приложения, direct — для Alembic
     database_url: str = Field(default="", alias="DATABASE_URL")
     database_url_direct: str = Field(default="", alias="DATABASE_URL_DIRECT")
+    # Пул коннектов. Дефолты SQLAlchemy (5+10, таймаут 30 с) рассчитаны на короткие
+    # запросы, а у нас коннект держится через внешнее I/O — вызовы НП и Sheets идут
+    # внутри апдейта, при котором сессия открыта. `pool_timeout=10` вместо 30: под
+    # всплеском лучше быстрый понятный отказ, чем полминуты тишины и та же ошибка.
+    db_pool_size: int = Field(default=20, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=30, alias="DB_MAX_OVERFLOW")
+    db_pool_timeout: int = Field(default=10, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=300, alias="DB_POOL_RECYCLE")
 
     # Redis
     redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
