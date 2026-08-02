@@ -366,6 +366,19 @@ async def notify_stock_ingest_halted(
     await _send_many(notifier, await _staff_recipient_ids(session, settings=current_settings), text)
 
 
+async def notify_staff(
+    session: AsyncSession,
+    notifier: Notifier,
+    *,
+    text: str,
+    settings: Settings | None = None,
+) -> None:
+    """Готовый текст владельцам и дежурным менеджерам — для служебных сводок."""
+    await _send_many(
+        notifier, await _staff_recipient_ids(session, settings=settings or get_settings()), text
+    )
+
+
 async def notify_stock_manual_edits(
     session: AsyncSession,
     notifier: Notifier,

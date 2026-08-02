@@ -19,6 +19,7 @@ from app.jobs import (
     stock_hold_sweep_job,
     stock_ingest_job,
     stock_mirror_job,
+    stock_reconcile_job,
 )
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
@@ -106,6 +107,15 @@ async def stock_mirror_gated(*, notifier, settings: Settings, now: datetime | No
         _log.debug("worker.skip", job="stock_mirror", reason="closed")
         return None
     return await stock_mirror_job(notifier=notifier, settings=settings)
+
+
+async def stock_reconcile_gated(*, notifier, settings: Settings, now: datetime | None = None):
+    """Сверка — в рабочие часы: ночью расхождение всё равно некому разбирать."""
+    at = now or _now(settings)
+    if not _should_run_daytime(settings, at):
+        _log.debug("worker.skip", job="stock_reconcile", reason="closed")
+        return None
+    return await stock_reconcile_job(notifier=notifier, settings=settings)
 
 
 async def clear_expired_duty_gated(*, notifier, settings: Settings, now: datetime | None = None):
@@ -196,6 +206,15 @@ async def main() -> None:
             stock_mirror_gated,
             trigger="interval",
             seconds=settings.stock_mirror_seconds,
+            kwargs={"notifier": notifier, "settings": settings},
+            max_instances=1,
+            coalesce=True,
+        )
+    if settings.stock_reconcile_enabled:
+        scheduler.add_job(
+            stock_reconcile_gated,
+            trigger="interval",
+            seconds=settings.stock_reconcile_seconds,
             kwargs={"notifier": notifier, "settings": settings},
             max_instances=1,
             coalesce=True,
