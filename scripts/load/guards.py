@@ -78,6 +78,35 @@ def report_effective_settings(settings) -> dict[str, object]:
     }
 
 
+async def require_seeded_operators(session, telegram_ids: list[int]) -> None:
+    """Все операторы прогона обязаны существовать в базе и быть активными.
+
+    Незасеянный оператор упирается в экран «надішліть свій номер телефону» и
+    дальше не идёт. Прогон при этом не падает — он честно отрабатывает и
+    показывает 0 % созданных, что читается как «система не тянет», хотя система
+    вообще не участвовала. Ровно так и вышло на первом прогоне профилей: 12 из 15
+    операторов не были засеяны, потому что сид гоняли на трёх аккаунтах.
+    """
+    from app.db.models.enums import UserStatus
+    from app.db.models.user import User
+    from sqlalchemy import select
+
+    rows = await session.scalars(
+        select(User.telegram_id).where(
+            User.telegram_id.in_(tuple(telegram_ids)), User.status == UserStatus.active
+        )
+    )
+    missing = sorted(set(telegram_ids) - set(rows))
+    if missing:
+        raise SystemExit(
+            f"отказ: {len(missing)} з {len(telegram_ids)} операторів не засіяні "
+            f"(перші: {missing[:5]}).\n"
+            "Вони упрутся в екран авторизації, і прогін покаже 0 % створених — це\n"
+            "читається як «система не тягне», хоча система не брала участі.\n"
+            "Засійте базу: python scripts/load/seed.py --accounts 20"
+        )
+
+
 def require_pg_inventory(settings) -> None:
     """Гейт от oversell и PG-путь записи проверяются только при `INVENTORY_SOURCE=pg`."""
     if settings.inventory_source != "pg":
