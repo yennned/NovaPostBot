@@ -11,6 +11,7 @@ Read-side (список/карточка/отмена) остаётся в `serv
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import uuid
 from decimal import Decimal
@@ -263,6 +264,12 @@ async def _release_hold(session: AsyncSession, submit_key: str | None) -> None:
         await session.commit()
     except Exception:
         logger.warning("stock_hold_release_failed", submit_key=submit_key, exc_info=True)
+        # Откатить обязательно: `_release_hold` зовётся из `except`, и сессия,
+        # оставленная в сбойном состоянии, уронит следующий же запрос вызывающего
+        # `PendingRollbackError` — то есть подменит исходную ошибку НП на ошибку
+        # SQLAlchemy, и разбирать инцидент придётся не с той стороны.
+        with contextlib.suppress(Exception):
+            await session.rollback()
 
 
 async def create_shipment(
@@ -330,7 +337,13 @@ async def create_shipment(
     # именно на время вызова НП, а незакоммиченная бронь второму коннекту не видна.
     # Все проверки выше сделаны до неё намеренно: отказ по COD или габаритам не
     # должен оставлять за собой захваченный остаток.
+    # Один и тот же аккаунт на все записи ниже. Разойдись они — бронь взялась бы
+    # по одному аккаунту, а `Shipment` записался по другому (`resolve_account_scope`
+    # выводит его из членства, если параметр пуст): `attach` привязал бы бронь к
+    # чужому отправлению, а `reserved_by_account` не увидел бы этот резерв вовсе,
+    # то есть следующий сабмит продал бы тот же товар повторно.
     scoped_account = shipments.require_client_account(client, account)
+    account_id = account_id or scoped_account.id
     submit_key = await _hold_stock(
         session,
         client=client,
