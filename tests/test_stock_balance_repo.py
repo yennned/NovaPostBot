@@ -7,9 +7,7 @@ from decimal import Decimal
 
 import pytest
 from app.db.models.enums import StockMovementType, UserRole, UserStatus
-from app.db.models.stock_balance import StockBalance
 from app.db.repositories import StockBalanceRepository, UserRepository
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,15 +101,10 @@ async def test_lock_for_update_orders_by_sku(db_session: AsyncSession):
     """
     repo = StockBalanceRepository(db_session)
 
-    # Намерение пиним в самом SQL, чтобы защита не держалась на одном лишь
-    # поведенческом тесте гонки (он медленный и живёт в другом файле).
-    compiled = str(
-        select(StockBalance)
-        .where(StockBalance.account_id == uuid.uuid4(), StockBalance.sku.in_(("A", "B")))
-        .order_by(StockBalance.sku)
-        .with_for_update()
-        .compile(compile_kwargs={"literal_binds": False})
-    )
+    # Компилируем ТОТ ЖЕ запрос, что строит репозиторий. Первая версия теста
+    # собирала копию запроса руками и потому не проверяла ничего: мутация
+    # «убрать ORDER BY» её не валила, хотя защита была снята.
+    compiled = str(StockBalanceRepository.lock_stmt(uuid.uuid4(), ["B", "A"]).compile())
     assert "FOR UPDATE" in compiled
     assert "ORDER BY stock_balances.sku" in compiled
 

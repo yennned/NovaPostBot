@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Sequence
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 
 from app.db.models.enums import StockMovementType
 from app.db.models.stock_balance import StockBalance
@@ -49,6 +49,19 @@ class StockBalanceRepository(BaseRepository):
         )
         return list(await self.session.scalars(stmt))
 
+    @staticmethod
+    def lock_stmt(account_id: uuid.UUID, skus: Sequence[str]) -> Select[tuple[StockBalance]]:
+        """Запрос захвата строк остатка. Вынесен отдельно, чтобы его можно было
+        проверить компиляцией: гарантии `FOR UPDATE` и `ORDER BY sku` иначе
+        держались бы только на поведенческом тесте, а он проходит и без них —
+        Postgres и так обычно отдаёт строки по индексу."""
+        return (
+            select(StockBalance)
+            .where(StockBalance.account_id == account_id, StockBalance.sku.in_(tuple(skus)))
+            .order_by(StockBalance.sku)
+            .with_for_update()
+        )
+
     async def lock_for_update(
         self, *, account_id: uuid.UUID, skus: Sequence[str]
     ) -> dict[str, StockBalance]:
@@ -61,13 +74,7 @@ class StockBalanceRepository(BaseRepository):
         """
         if not skus:
             return {}
-        stmt = (
-            select(StockBalance)
-            .where(StockBalance.account_id == account_id, StockBalance.sku.in_(tuple(skus)))
-            .order_by(StockBalance.sku)
-            .with_for_update()
-        )
-        rows = await self.session.scalars(stmt)
+        rows = await self.session.scalars(self.lock_stmt(account_id, skus))
         return {row.sku: row for row in rows}
 
     async def upsert_meta(
