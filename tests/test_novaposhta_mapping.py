@@ -352,8 +352,26 @@ def test_status_code_one_is_not_deleted():
 # --- Время сканирования: чем закрывается SLA ------------------------------------
 
 
-def test_dispatch_scan_time_parses_both_np_formats():
-    for text in ("20.06.2026 11:50:00", "2026-06-20 11:50:00"):
+def test_dispatch_scan_time_parses_the_real_np_format():
+    """Боевой формат `DateScan` — время впереди даты и без секунд.
+
+    Снят живым пробником (`scripts/e2e/tracking_probe.py`) на боевых ТТН
+    2026-08-02: `'20:05 01.08.2026'`. Первая версия кода знала только «разумные»
+    написания и не разобрала бы ни одного реального ответа — вердикт SLA молча
+    выродился бы в «не знаем» на всех накладных сразу. Формат пиним тестом,
+    чтобы эта ошибка не вернулась.
+    """
+    parsed = dispatch_scan_time(
+        TrackingStatus(
+            number="1", status="Відправлено", status_code="3", raw={"DateScan": "20:05 01.08.2026"}
+        )
+    )
+    # Киев летом — UTC+3.
+    assert parsed == datetime(2026, 8, 1, 17, 5, tzinfo=UTC)
+
+
+def test_dispatch_scan_time_parses_fallback_formats():
+    for text in ("20.06.2026 11:50:00", "20-06-2026 11:50:00", "2026-06-20 11:50:00"):
         parsed = dispatch_scan_time(
             TrackingStatus(
                 number="1", status="Відправлено", status_code="3", raw={"DateScan": text}
