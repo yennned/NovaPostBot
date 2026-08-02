@@ -22,6 +22,8 @@ Google транзакций нет. Postgres-реализации нужно р�
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import structlog
@@ -58,6 +60,28 @@ def stock_sheet_key(account: ClientAccount) -> str:
     return account.stock_sheet_key or account.name.strip() or str(account.id)
 
 
+@dataclass(frozen=True, slots=True)
+class AccountTotals:
+    """Свод по одному аккаунту: сколько позиций и сколько единиц всего."""
+
+    positions: int
+    units: int
+
+
+@dataclass(frozen=True, slots=True)
+class RowPage:
+    """Страница строк остатка + сколько всего подходит под фильтр.
+
+    `categories` считаются по ВСЕМУ остатку аккаунта, а не по странице и не по
+    текущему фильтру: это кнопки выбора, и выбор категории не должен убирать с
+    экрана все остальные кнопки.
+    """
+
+    rows: list[StockRow]
+    total: int
+    categories: list[str]
+
+
 class InventoryBackend(Protocol):
     """Откуда сервис-слой берёт остаток аккаунта."""
 
@@ -70,6 +94,58 @@ class InventoryBackend(Protocol):
     transient_read_errors: tuple[type[Exception], ...]
 
     async def read_rows(self, session: AsyncSession, account: ClientAccount) -> list[StockRow]: ...
+
+    async def read_totals(
+        self, session: AsyncSession, accounts: Sequence[ClientAccount]
+    ) -> list[AccountTotals | None]:
+        """Свод по нескольким аккаунтам сразу — для экрана менеджера «📦 Склад».
+
+        Отдельный метод, а не цикл по `read_rows` у вызывающего: у Postgres это
+        один `GROUP BY`, у Sheets — принципиально по книге на аккаунт, и разница
+        между «одним запросом» и «двадцатью» должна принадлежать бэкенду. `None`
+        в элементе — «источник по этому аккаунту недоступен».
+
+        Ответ выровнен с `accounts` **по позиции**, а не словарём по `account.id`:
+        словарь схлопывает два аккаунта с одинаковым идентификатором в один, и
+        сводка тихо показала бы данные одного вместо другого.
+        """
+        ...
+
+    async def read_page(
+        self,
+        session: AsyncSession,
+        account: ClientAccount,
+        *,
+        query: str | None,
+        category: str | None,
+        limit: int,
+        offset: int,
+    ) -> RowPage:
+        """Страница остатка. Фильтр и срез отдаются источнику, если он умеет.
+
+        Postgres умеет: `WHERE` + `ORDER BY` + `LIMIT/OFFSET`. Google — нет, лист
+        читается только целиком, и там срез остаётся в Python. Разница в цене
+        принадлежит бэкенду, а не экрану.
+        """
+        ...
+
+
+def _display_key(row: StockRow) -> tuple[str, str, str]:
+    """Порядок строк на экране — общий для обоих бэкендов.
+
+    Postgres сортирует тем же ключом в SQL (`_DISPLAY_ORDER`): страницы обязаны
+    идти в одном порядке независимо от источника, иначе переключение
+    `INVENTORY_SOURCE` молча перетасует пагинацию под пользователем.
+    """
+    return ((row.category or "").lower(), row.name.lower(), row.sku.lower())
+
+
+def _matches(row: StockRow, needle: str) -> bool:
+    return (
+        needle in row.sku.lower()
+        or needle in row.name.lower()
+        or needle in (row.category or "").lower()
+    )
 
 
 class SheetsInventoryBackend:
@@ -114,6 +190,56 @@ class SheetsInventoryBackend:
         )
         return rows
 
+    async def read_totals(
+        self, session: AsyncSession, accounts: Sequence[ClientAccount]
+    ) -> list[AccountTotals | None]:
+        """По книге на аккаунт — иначе с Google никак.
+
+        Последовательно, а не `asyncio.gather`: один gspread-клиент на процесс, и
+        параллельные потоки делили бы непотокобезопасную сессию. Это и есть тот
+        потолок, ради которого остаток переезжает в Postgres: на 20 аккаунтах
+        экран стоит 20 чтений и две трети минутной квоты.
+        """
+        totals: list[AccountTotals | None] = []
+        for account in accounts:
+            try:
+                rows = await self.read_rows(session, account)
+            except self.transient_read_errors:
+                logger.warning("inventory.totals_failed", account_id=str(account.id), exc_info=True)
+                totals.append(None)
+                continue
+            totals.append(
+                AccountTotals(positions=len(rows), units=sum(row.quantity for row in rows))
+            )
+        return totals
+
+    async def read_page(
+        self,
+        session: AsyncSession,
+        account: ClientAccount,
+        *,
+        query: str | None,
+        category: str | None,
+        limit: int,
+        offset: int,
+    ) -> RowPage:
+        """Лист читается целиком — иного способа у Google нет, срез в Python.
+
+        Ровно прежнее поведение экрана. Оно и было потолком: у аккаунта с 1636
+        позициями каждый тап пагинации потенциально стоит полного чтения книги.
+        Снимает этот потолок не оптимизация здесь, а переезд на `pg`.
+        """
+        rows = await self.read_rows(session, account)
+        categories = sorted({row.category for row in rows if row.category})
+        if query:
+            needle = query.strip().lower()
+            rows = [row for row in rows if _matches(row, needle)]
+        if category:
+            wanted = category.strip().lower()
+            rows = [row for row in rows if (row.category or "").lower() == wanted]
+        rows.sort(key=_display_key)
+        return RowPage(rows=rows[offset : offset + limit], total=len(rows), categories=categories)
+
 
 class PgInventoryBackend:
     """Остаток из `stock_balances`. Ни одного обращения к Google на чтение."""
@@ -146,6 +272,50 @@ class PgInventoryBackend:
             )
             for balance in balances
         ]
+
+    async def read_totals(
+        self, session: AsyncSession, accounts: Sequence[ClientAccount]
+    ) -> list[AccountTotals | None]:
+        """Один `GROUP BY account_id` на весь экран — вместо чтения на аккаунт.
+
+        Аккаунт без единой строки остатка обязан остаться в ответе с нулями:
+        `GROUP BY` его не вернёт вовсе, а на экране это выглядело бы как «склад
+        недоступний» — то есть как сбой там, где просто пустой склад.
+        """
+        counted = await StockBalanceRepository(session).totals_by_account(
+            [account.id for account in accounts]
+        )
+        return [AccountTotals(*counted.get(account.id, (0, 0))) for account in accounts]
+
+    async def read_page(
+        self,
+        session: AsyncSession,
+        account: ClientAccount,
+        *,
+        query: str | None,
+        category: str | None,
+        limit: int,
+        offset: int,
+    ) -> RowPage:
+        """Фильтр, сортировка и срез — в SQL. С листа читается ноль строк."""
+        repo = StockBalanceRepository(session)
+        balances, total = await repo.page(
+            account.id, query=query, category=category, limit=limit, offset=offset
+        )
+        return RowPage(
+            rows=[
+                StockRow(
+                    sku=balance.sku,
+                    name=balance.name,
+                    category=balance.category,
+                    quantity=balance.quantity,
+                    price=balance.price,
+                )
+                for balance in balances
+            ],
+            total=total,
+            categories=await repo.categories(account.id),
+        )
 
 
 def build_inventory_backend(settings: Settings | None = None) -> InventoryBackend:

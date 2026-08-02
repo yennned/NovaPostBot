@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Sequence
 from decimal import Decimal
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 
 from app.db.models.enums import StockMovementType
 from app.db.models.stock_balance import StockBalance
@@ -48,6 +48,100 @@ class StockBalanceRepository(BaseRepository):
             .order_by(StockBalance.category, StockBalance.name)
         )
         return list(await self.session.scalars(stmt))
+
+    #: Порядок строк на экране склада. `coalesce(category, '')` — чтобы позиции без
+    #: категории шли первыми и одной группой, а не расползались по NULLS-политике
+    #: Postgres; `lower` — потому что человек не различает регистр при сортировке.
+    _DISPLAY_ORDER = (
+        func.lower(func.coalesce(StockBalance.category, "")),
+        func.lower(StockBalance.name),
+        func.lower(StockBalance.sku),
+    )
+
+    def _page_conditions(self, account_id: uuid.UUID, query: str | None, category: str | None):
+        conditions = [StockBalance.account_id == account_id]
+        if query:
+            needle = f"%{query.strip()}%"
+            conditions.append(
+                or_(
+                    StockBalance.sku.ilike(needle),
+                    StockBalance.name.ilike(needle),
+                    func.coalesce(StockBalance.category, "").ilike(needle),
+                )
+            )
+        if category:
+            conditions.append(
+                func.lower(func.coalesce(StockBalance.category, "")) == category.strip().lower()
+            )
+        return conditions
+
+    async def page(
+        self,
+        account_id: uuid.UUID,
+        *,
+        query: str | None = None,
+        category: str | None = None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[StockBalance], int]:
+        """Страница остатка + сколько всего подходит под фильтр.
+
+        Фильтр, сортировка и срез — в SQL. Раньше экран читал остаток целиком и
+        резал страницу в Python: у аккаунта с 1636 позициями каждый тап пагинации
+        стоил полной выгрузки ради восьми строк.
+        """
+        conditions = self._page_conditions(account_id, query, category)
+        total = await self.session.scalar(
+            select(func.count()).select_from(StockBalance).where(*conditions)
+        )
+        rows = await self.session.scalars(
+            select(StockBalance)
+            .where(*conditions)
+            .order_by(*self._DISPLAY_ORDER)
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(rows), int(total or 0)
+
+    async def categories(self, account_id: uuid.UUID) -> list[str]:
+        """Категории аккаунта — для кнопок фильтра.
+
+        Считаются по всему остатку, а не по текущей странице и не по текущему
+        фильтру: иначе выбор категории убирал бы с экрана все остальные кнопки.
+        """
+        rows = await self.session.scalars(
+            select(StockBalance.category)
+            .where(StockBalance.account_id == account_id, StockBalance.category.is_not(None))
+            .distinct()
+            .order_by(StockBalance.category)
+        )
+        return [category for category in rows if category]
+
+    async def totals_by_account(
+        self, account_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[int, int]]:
+        """`{account_id: (позиций, единиц)}` одним запросом на все аккаунты.
+
+        Экран менеджера «📦 Склад» показывает эти два числа по каждому аккаунту.
+        На Sheets это принципиально чтение на книгу — при 20 аккаунтах 20 запросов
+        и две трети минутной квоты на один тап. Здесь — один `GROUP BY`.
+
+        Аккаунтов без строк остатка в ответе нет: подставить им нули — дело
+        вызывающего, потому что «нет строк» и «нет такого аккаунта» здесь
+        неразличимы, а на экране это разные вещи.
+        """
+        if not account_ids:
+            return {}
+        rows = await self.session.execute(
+            select(
+                StockBalance.account_id,
+                func.count(),
+                func.coalesce(func.sum(StockBalance.quantity), 0),
+            )
+            .where(StockBalance.account_id.in_(tuple(account_ids)))
+            .group_by(StockBalance.account_id)
+        )
+        return {account_id: (int(positions), int(units)) for account_id, positions, units in rows}
 
     @staticmethod
     def lock_stmt(account_id: uuid.UUID, skus: Sequence[str]) -> Select[tuple[StockBalance]]:
