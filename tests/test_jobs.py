@@ -5,13 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
 
 from app import jobs
 from app.config import Settings
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import MembershipStatus, UserRole, UserStatus
+from app.db.repositories import ClientAccountRepository, UserRepository
 from app.jobs import _plan_low_stock_updates
 from app.services.inventory import InventoryItem
+from app.sheets import StockSourceUnavailable, reset_stock_source, use_stock_source
+from app.sheets.source import StockRow
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.test_notifications import FakeNotifier
 
 
 @dataclass
@@ -77,88 +82,148 @@ def test_plan_low_stock_updates_notifies_only_on_transition():
     assert third_updates[0].last_notified_at == now
 
 
-async def test_low_stock_job_uses_full_inventory_snapshot(monkeypatch):
-    client = SimpleNamespace(
-        id="client-1",
-        telegram_id=700,
+class _CountingStockSource:
+    """Источник склада, который считает обращения к книге.
+
+    Именно счётчик — предмет проверки: раньше джоба читала склад по разу на
+    КАЖДОГО участника аккаунта, хотя склад у команды один.
+    """
+
+    def __init__(self, rows: list[StockRow], fails_for: set[str] | None = None) -> None:
+        self._rows = rows
+        self._fails_for = fails_for or set()
+        self.reads: list[str] = []
+
+    def read_stock(self, client_key: str) -> list[StockRow]:
+        self.reads.append(client_key)
+        if client_key in self._fails_for:
+            raise StockSourceUnavailable(client_key, 503)
+        return list(self._rows)
+
+    def apply_deltas(self, client_key: str, deltas) -> None:  # pragma: no cover — джоба не пишет
+        raise AssertionError("low_stock_job не должна писать в склад")
+
+
+async def _team_account(session: AsyncSession, *, base_id: int, name: str, size: int):
+    """Аккаунт с `size` активными участниками — как настоящая команда клиента."""
+    users = UserRepository(session)
+    accounts = ClientAccountRepository(session)
+    owner = await users.create(
+        telegram_id=base_id,
+        phone=f"+3809900{base_id}",
+        full_name=name,
         role=UserRole.client,
         status=UserStatus.active,
+        account_name=name,
     )
-    account = SimpleNamespace(id="account-1")
-    session = SimpleNamespace(committed=False)
+    membership = await accounts.get_membership(user_id=owner.id)
+    account = membership.account
+    account.stock_sheet_key = name
+    for index in range(1, size):
+        employee = await users.create(
+            telegram_id=base_id + index,
+            phone=f"+3809900{base_id + index}",
+            full_name=f"{name} · працівник {index}",
+            role=UserRole.client,
+            status=UserStatus.active,
+            create_account=False,
+        )
+        invited = await accounts.create_invited_membership(
+            account_id=account.id, user=employee, invited_by_user_id=owner.id
+        )
+        await accounts.set_membership_status(invited, MembershipStatus.active)
+    await session.flush()
+    return account, [base_id + index for index in range(size)]
 
-    async def commit():
-        session.committed = True
 
-    session.commit = commit
+def _run_job_on(session: AsyncSession, monkeypatch) -> None:
+    """Заставить джобу работать в сессии теста, а не поднимать свою."""
 
-    class _SessionContext:
+    class _Ctx:
         async def __aenter__(self):
             return session
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class _Repo:
-        def __init__(self, current_session):
-            assert current_session is session
+    monkeypatch.setattr(jobs, "get_sessionmaker", lambda: _Ctx)
 
-        async def list_by_status(self, **kwargs):
-            return [client], 1
 
-    class _AccountRepo:
-        def __init__(self, current_session):
-            assert current_session is session
+async def test_low_stock_job_reads_account_once_and_tells_whole_team(
+    db_session: AsyncSession, monkeypatch
+):
+    """Одно чтение на аккаунт — и алерт всей команде, а не одному её участнику.
 
-        async def get_context_for_user(self, user_id):
-            assert user_id == client.id
-            return account, None
+    Два дефекта в одном месте. Джоба ходила по клиентам: три человека в аккаунте
+    давали три одинаковых чтения склада (на боевых двадцати аккаунтах это разница
+    между 20 и 126 обращениями к Google при квоте 60/мин). А состояние алертов
+    хранится ПО АККАУНТУ, поэтому первый же участник помечал SKU как «уже
+    уведомили», и остальные двое не получали ничего — кто окажется первым, зависело
+    от порядка выборки.
 
-    items = [
-        InventoryItem(
-            sku=f"SKU-{index}",
-            name="Товар",
-            category="Категорія",
-            stock=1,
-            reserved=0,
-            available=1,
-            price=Decimal("10"),
+    Мутация: вернуть цикл по клиентам — `reads` станет три, а получателей из
+    команды останется один.
+    """
+    _, team = await _team_account(db_session, base_id=7100, name="Магазин", size=3)
+    staff = UserRepository(db_session)
+    await staff.create(telegram_id=7001, role=UserRole.owner, status=UserStatus.active)
+    duty_manager = await staff.create(
+        telegram_id=7002, role=UserRole.manager, status=UserStatus.active
+    )
+    duty_manager.on_duty = True
+    await db_session.flush()
+
+    # 700 позиций, низкая — глубоко в середине: страничная выборка её не увидит.
+    rows = [
+        StockRow(
+            sku=f"SKU-{index:03d}", name="Товар", category="Категорія", quantity=100, price=None
         )
         for index in range(700)
     ]
-    observed = {"snapshot": 0, "notify": 0}
+    rows[500] = StockRow(sku="SKU-500", name="Кава", category="Напої", quantity=1, price=None)
+    source = _CountingStockSource(rows)
+    notifier = FakeNotifier()
+    _run_job_on(db_session, monkeypatch)
+    token = use_stock_source(source)
+    try:
+        result = await jobs.low_stock_job(notifier=notifier, settings=Settings(_env_file=None))
+    finally:
+        reset_stock_source(token)
 
-    async def fake_get_inventory_snapshot(
-        current_session, *, client, account_id=None, account=None, reader=None
-    ):
-        assert current_session is session
-        assert client is not None
-        assert account_id == account.id == "account-1"
-        observed["snapshot"] = len(items)
-        return items
-
-    async def fake_collect_low_stock_alerts(
-        current_session, *, client, account_id=None, threshold, items
-    ):
-        assert current_session is session
-        assert account_id == "account-1"
-        return items
-
-    async def fake_notify_low_stock(current_session, notifier, *, client, items):
-        assert current_session is session
-        observed["notify"] = len(items)
-
-    monkeypatch.setattr(jobs, "get_sessionmaker", lambda: lambda: _SessionContext())
-    monkeypatch.setattr(jobs, "UserRepository", _Repo)
-    monkeypatch.setattr(jobs, "ClientAccountRepository", _AccountRepo)
-    monkeypatch.setattr(jobs, "get_inventory_snapshot", fake_get_inventory_snapshot)
-    monkeypatch.setattr(jobs, "_collect_low_stock_alerts", fake_collect_low_stock_alerts)
-    monkeypatch.setattr(jobs.notifications, "notify_low_stock", fake_notify_low_stock)
-
-    result = await jobs.low_stock_job(notifier=object(), settings=Settings(_env_file=None))
-
-    assert observed["snapshot"] == 700
-    assert observed["notify"] == 700
-    assert session.committed is True
-    assert result.clients_checked == 1
+    assert source.reads == ["Магазин"]  # ровно одно чтение, а не по числу людей
+    assert result.accounts_checked == 1
     assert result.alerts_sent == 1
+    recipients = {tid for tid, _ in notifier.sent}
+    assert set(team) <= recipients  # алерт получила ВСЯ команда
+    assert {7001, 7002} <= recipients  # и персонал
+    assert any("SKU-500" in text for _, text in notifier.sent)
+
+
+async def test_low_stock_job_survives_one_broken_warehouse(db_session: AsyncSession, monkeypatch):
+    """Недоступный склад одного аккаунта не отменяет алерты остальным.
+
+    Раньше `StockSourceUnavailable` поднималось наружу и гасило проход целиком:
+    один аккаунт без листа — и низкий остаток не увидел никто. Вероятность отказа
+    растёт с числом аккаунтов, то есть дефект тем злее, чем больше клиентов.
+
+    Мутация: убрать `except StockSourceUnavailable` — джоба падает, второй аккаунт
+    остаётся без уведомления.
+    """
+    await _team_account(db_session, base_id=7200, name="Зламаний", size=1)
+    _, ok_team = await _team_account(db_session, base_id=7300, name="Робочий", size=1)
+    rows = [StockRow(sku="SKU-A", name="Кава", category="Напої", quantity=1, price=None)]
+    source = _CountingStockSource(rows, fails_for={"Зламаний"})
+    notifier = FakeNotifier()
+    _run_job_on(db_session, monkeypatch)
+    token = use_stock_source(source)
+    try:
+        result = await jobs.low_stock_job(notifier=notifier, settings=Settings(_env_file=None))
+    finally:
+        reset_stock_source(token)
+
+    # Ключи, а не вызовы: сломанное чтение ретраится (`sheets_retry_attempts`),
+    # и это правильно — проверяем, что джоба дошла до ВТОРОГО аккаунта.
+    assert sorted(set(source.reads)) == ["Зламаний", "Робочий"]
+    assert result.accounts_checked == 2
+    assert result.alerts_sent == 1  # сломанный аккаунт пропущен, рабочий уведомлён
+    assert set(ok_team) <= {tid for tid, _ in notifier.sent}

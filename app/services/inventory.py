@@ -28,6 +28,7 @@ __all__ = [
     "InventoryPage",
     "StockTotals",
     "find_inventory_item",
+    "get_account_inventory_snapshot",
     "get_inventory_snapshot",
     "list_inventory",
     "stock_sheet_key",
@@ -82,6 +83,39 @@ def _build_items(rows: list[StockRow], reserved: dict[str, int]) -> list[Invento
                 price=row.price,
             )
         )
+    return items
+
+
+async def get_account_inventory_snapshot(
+    session: AsyncSession,
+    account: ClientAccount,
+    *,
+    reader: StockSource | None = None,
+    backend: InventoryBackend | None = None,
+) -> list[InventoryItem]:
+    """Остаток аккаунта без гейта прав — для фоновых джоб.
+
+    Отдельная функция, а не `get_inventory_snapshot` с фиктивным `client`:
+    `require_client_account` проверяет **человека**, а у джобы человека нет. Гнать
+    её через гейт значило бы либо подсовывать произвольного участника (и тогда
+    блокировка одного человека молча гасила бы складские алерты всей команды),
+    либо ослаблять сам гейт — а он стоит на клиентских путях не зря.
+
+    Склад принадлежит аккаунту, а не участнику: читать его N раз по числу людей в
+    команде — это N одинаковых ответов и N-кратный расход квоты Google.
+    """
+    rows = await resolve_inventory_backend(reader=reader, backend=backend).read_rows(
+        session, account
+    )
+    reserved = await ShipmentRepository(session).reserved_by_account(account.id)
+    items = _build_items(rows, reserved)
+    items.sort(
+        key=lambda item: (
+            (item.category or "").lower(),
+            item.name.lower(),
+            item.sku.lower(),
+        )
+    )
     return items
 
 
