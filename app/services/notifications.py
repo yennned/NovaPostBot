@@ -343,6 +343,29 @@ async def notify_low_stock(
     await _send_many(notifier, await _staff_recipient_ids(session), low_stock_text(client, items))
 
 
+async def notify_stock_ingest_halted(
+    session: AsyncSession,
+    notifier: Notifier,
+    *,
+    reason: str,
+    settings: Settings | None = None,
+) -> None:
+    """Ингест приёмки остановлен — молчать нельзя.
+
+    Останавливаемся мы только на нарушенной целостности журнала, и это состояние
+    само не рассосётся: пока человек не разберётся, приёмка в Postgres не едет, а
+    остаток тихо расходится с листом. Владельцам и дежурным менеджерам.
+    """
+    current_settings = settings or get_settings()
+    text = (
+        "⚠️ <b>Інгест приймання зупинено</b>\n"
+        f"{html.escape(reason)}\n\n"
+        "Залишок у Postgres перестав оновлюватися. Потрібно звірити лист "
+        "«Історія» книги «Склад» і перезапустити інгест."
+    )
+    await _send_many(notifier, await _staff_recipient_ids(session, settings=current_settings), text)
+
+
 async def notify_shipment_cancelled_by_client(
     session: AsyncSession,
     notifier: Notifier,
