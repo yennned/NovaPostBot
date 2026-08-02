@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -302,31 +303,34 @@ class ShipmentRepository(BaseRepository):
             Shipment.dispatched_at < end,
         )
 
-    async def reserved_by_sku(self, client_id: uuid.UUID) -> dict[str, int]:
-        stmt = (
+    async def _reserved(self, scope, skus: Sequence[str] | None) -> dict[str, int]:
+        """Бронь по SKU в скоупе. `skus` — сузить до конкретных позиций.
+
+        Сужение нужно постраничному экрану склада: строк остатка у аккаунта могут
+        быть тысячи, а на странице их восемь, и бронь по остальным ему не нужна.
+        """
+        conditions = [scope, Shipment.status.in_(tuple(RESERVING_STATUSES))]
+        if skus is not None:
+            if not skus:
+                return {}
+            conditions.append(ShipmentItem.sku.in_(tuple(skus)))
+        rows = await self.session.execute(
             select(ShipmentItem.sku, func.coalesce(func.sum(ShipmentItem.quantity), 0))
             .join(Shipment, Shipment.id == ShipmentItem.shipment_id)
-            .where(
-                Shipment.client_id == client_id,
-                Shipment.status.in_(tuple(RESERVING_STATUSES)),
-            )
+            .where(*conditions)
             .group_by(ShipmentItem.sku)
         )
-        rows = await self.session.execute(stmt)
         return {sku: int(total) for sku, total in rows}
 
-    async def reserved_by_account(self, account_id: uuid.UUID) -> dict[str, int]:
-        stmt = (
-            select(ShipmentItem.sku, func.coalesce(func.sum(ShipmentItem.quantity), 0))
-            .join(Shipment, Shipment.id == ShipmentItem.shipment_id)
-            .where(
-                Shipment.account_id == account_id,
-                Shipment.status.in_(tuple(RESERVING_STATUSES)),
-            )
-            .group_by(ShipmentItem.sku)
-        )
-        rows = await self.session.execute(stmt)
-        return {sku: int(total) for sku, total in rows}
+    async def reserved_by_sku(
+        self, client_id: uuid.UUID, *, skus: Sequence[str] | None = None
+    ) -> dict[str, int]:
+        return await self._reserved(Shipment.client_id == client_id, skus)
+
+    async def reserved_by_account(
+        self, account_id: uuid.UUID, *, skus: Sequence[str] | None = None
+    ) -> dict[str, int]:
+        return await self._reserved(Shipment.account_id == account_id, skus)
 
     #: Что нужно апдейту статуса: получатели пушей, позиции для списания и ключ ФОП.
     #: `stock_movements` сознательно НЕ грузим — идемпотентность отгрузки проверяется

@@ -127,33 +127,31 @@ async def list_inventory(
     reader: StockSource | None = None,
     backend: InventoryBackend | None = None,
 ) -> InventoryPage:
-    items = await get_inventory_snapshot(
+    account = shipments.require_client_account(client, account)
+    page = await resolve_inventory_backend(reader=reader, backend=backend).read_page(
         session,
-        client=client,
-        account_id=account_id,
-        account=account,
-        reader=reader,
-        backend=backend,
-    )
-    categories = sorted({item.category for item in items if item.category})
-    if query:
-        needle = query.strip().lower()
-        items = [
-            item
-            for item in items
-            if needle in item.sku.lower()
-            or needle in item.name.lower()
-            or needle in (item.category or "").lower()
-        ]
-    if category:
-        items = [item for item in items if (item.category or "").lower() == category.lower()]
-    total = len(items)
-    return InventoryPage(
-        items=items[offset : offset + limit],
-        total=total,
+        account,
+        query=query,
+        category=category,
         limit=limit,
         offset=offset,
-        categories=categories,
+    )
+    # Бронь считаем только по SKU страницы. Раньше сюда приходил снимок всего
+    # склада, и бронь тянулась по всем позициям аккаунта — на 1636 позициях это
+    # агрегат по всей истории ради восьми строк на экране.
+    repo = ShipmentRepository(session)
+    skus = [row.sku for row in page.rows]
+    reserved = (
+        await repo.reserved_by_sku(client.id, skus=skus)
+        if account_id is None
+        else await repo.reserved_by_account(account_id, skus=skus)
+    )
+    return InventoryPage(
+        items=_build_items(page.rows, reserved),
+        total=page.total,
+        limit=limit,
+        offset=offset,
+        categories=page.categories,
     )
 
 
@@ -233,12 +231,17 @@ async def stock_summary(
     reader: StockSource | None = None,
     backend: InventoryBackend | None = None,
 ) -> list[tuple[ClientAccount, StockTotals | None]]:
-    """Свод склада по аккаунтам — лист на аккаунт (для экрана менеджера «📦 Склад»).
+    """Свод склада по аккаунтам для экрана менеджера «📦 Склад».
 
-    Читаем последовательно (не `asyncio.gather`): один `SheetsClient`/gspread-сессия
-    не рассчитана на параллельные потоки, а активных аккаунтов немного. Если число
-    аккаунтов сильно вырастет — заводить отдельный источник на поток + ограничитель
-    конкуренции, а не делить одну сессию.
+    Сколько это стоит, решает бэкенд: у Postgres — один `GROUP BY` на весь экран,
+    у Sheets — по книге на аккаунт, иначе с Google никак. Раньше цикл жил здесь и
+    приколачивал к экрану поведение Sheets: на 20 аккаунтах ~20 последовательных
+    чтений, 15–30 с на один тап и две трети минутной квоты чтения — на бэкенде,
+    которому хватает одного запроса.
     """
     chosen = resolve_inventory_backend(reader=reader, backend=backend)
-    return [(account, await stock_totals(session, account, backend=chosen)) for account in accounts]
+    totals = await chosen.read_totals(session, accounts)
+    return [
+        (account, None if row is None else StockTotals(positions=row.positions, units=row.units))
+        for account, row in zip(accounts, totals, strict=True)
+    ]
