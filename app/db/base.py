@@ -50,9 +50,26 @@ class Base(DeclarativeBase):
 
 
 def make_engine(url: str | None = None) -> AsyncEngine:
+    """Движок приложения. Размеры пула заданы явно, а не дефолтами SQLAlchemy.
+
+    Дефолт (`pool_size=5, max_overflow=10, pool_timeout=30`) рассчитан на короткие
+    запросы, а у нас коннект удерживается через внешнее I/O: сессия открывается на
+    апдейт, а внутри апдейта лежат вызовы НП и Sheets. При десятке одновременных
+    отправок 15 коннектов кончаются, и следующий апдейт ждёт **полминуты** прежде
+    чем упасть — то есть пользователь полминуты смотрит в тишину, а потом получает
+    ошибку. Короткий `pool_timeout` превращает это в быстрый и понятный отказ.
+
+    `pool_recycle` — не столько про Postgres, сколько про PgBouncer Neon: коннект,
+    который пулер уже закрыл со своей стороны, `pool_pre_ping` обнаружит лишним
+    round-trip'ом на каждом взятии. Пересоздание по возрасту дешевле.
+    """
     settings = get_settings()
     return create_async_engine(
         url or settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+        pool_recycle=settings.db_pool_recycle,
         pool_pre_ping=True,
         connect_args={"statement_cache_size": 0},
     )
