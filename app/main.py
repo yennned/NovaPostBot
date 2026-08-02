@@ -14,6 +14,7 @@ from app.logging_config import configure_logging, get_logger
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.services.bootstrap import ensure_owners
+from app.utils.heartbeat import run_heartbeat
 from app.utils.work_schedule import schedule_summary
 
 
@@ -56,9 +57,14 @@ async def main() -> None:
         settings, np_client=np_client, np_cache=np_cache, redis=redis_client
     )
     bot = Bot(token=settings.bot_token)
+    # Пульс живости идёт из ТОГО ЖЕ event loop, что и поллинг: если loop встанет
+    # (синхронный вызов, дедлок), ключ протухнет сам и контейнер станет unhealthy.
+    # Отдельный поток или процесс продолжал бы рапортовать «жив» о мёртвом боте.
+    heartbeat = asyncio.create_task(run_heartbeat(redis_client, "bot"))
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
+        heartbeat.cancel()
         await np_client.aclose()
         await redis_client.aclose()
 

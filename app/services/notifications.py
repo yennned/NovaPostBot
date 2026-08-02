@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import permissions
 from app.config import Settings, get_settings
-from app.db.models.client_account import ClientAccountMembership
+from app.db.models.client_account import ClientAccount, ClientAccountMembership
 from app.db.models.enums import MembershipStatus, ShipmentStatus, UserRole, UserStatus
 from app.db.models.shipment import Shipment
 from app.db.models.user import User
@@ -147,10 +147,16 @@ def shipment_cancelled_text(client: User, shipment: Shipment) -> str:
     return text
 
 
-def low_stock_text(client: User, items: list[InventoryItem]) -> str:
+def account_low_stock_text(account: ClientAccount, items: list[InventoryItem]) -> str:
+    """То же для персонала, но подписано аккаунтом, а не участником команды.
+
+    Склад принадлежит аккаунту; подпись человеком означала бы, что менеджер видит
+    имя того, до кого первым дошёл цикл, — и по одному и тому же складу в разные
+    дни приходили бы письма от разных людей.
+    """
     lines = [
         "📦 <b>Низький залишок</b>",
-        f"Клієнт: {_client_label(client)}",
+        f"Акаунт: {account.name}",
     ]
     for item in items[:10]:
         lines.append(
@@ -346,18 +352,51 @@ async def notify_shipment_status_changed(
     await _send_many(notifier, recipients, shipment_status_text(shipment))
 
 
-async def notify_low_stock(
+async def notify_account_low_stock(
     session: AsyncSession,
     notifier: Notifier,
     *,
-    client: User,
+    account: ClientAccount,
     items: list[InventoryItem],
 ) -> None:
+    """Низкий остаток — всей активной команде аккаунта, персоналу один раз.
+
+    Прежде джоба звала `notify_low_stock` в цикле по клиентам, а состояние алертов
+    хранится **по аккаунту** (`upsert_state(account_id=…)`). Значит первый же
+    участник, до которого доходил цикл, помечал SKU как «уже уведомили», и
+    остальная команда не получала ничего. Кто именно окажется первым — зависело от
+    порядка выборки пользователей, то есть было произвольным.
+
+    Склад общий, поэтому и адресат — команда, а не один её участник. Настройки всех
+    получателей читаются одним запросом: джоба ходит по всем аккаунтам сразу, и
+    цикл из SELECT'ов на человека дал бы ту же N × RTT, что уже убрана в
+    статус-пушах.
+    """
     if not items:
         return
-    if await _notification_enabled(session, user=client, key=NOTIFY_LOW_STOCK):
-        await notifier.send_message(client.telegram_id, client_low_stock_text(items))
-    await _send_many(notifier, await _staff_recipient_ids(session), low_stock_text(client, items))
+    members = list(
+        await session.scalars(
+            select(User)
+            .join(ClientAccountMembership, ClientAccountMembership.user_id == User.id)
+            .where(
+                ClientAccountMembership.account_id == account.id,
+                ClientAccountMembership.status == MembershipStatus.active,
+                User.status == UserStatus.active,
+            )
+        )
+    )
+    overrides = await NotificationSettingRepository(session).map_for_users(
+        [member.id for member in members], (NOTIFY_LOW_STOCK,)
+    )
+    recipients = [
+        member.telegram_id
+        for member in members
+        if _resolve_setting(member, NOTIFY_LOW_STOCK, overrides)
+    ]
+    await _send_many(notifier, recipients, client_low_stock_text(items))
+    await _send_many(
+        notifier, await _staff_recipient_ids(session), account_low_stock_text(account, items)
+    )
 
 
 async def notify_stock_ingest_halted(

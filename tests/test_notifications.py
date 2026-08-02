@@ -5,8 +5,13 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.bot import permissions as perm
-from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import ShipmentItemDraft, ShipmentRepository, UserRepository
+from app.db.models.enums import MembershipStatus, UserRole, UserStatus
+from app.db.repositories import (
+    ClientAccountRepository,
+    ShipmentItemDraft,
+    ShipmentRepository,
+    UserRepository,
+)
 from app.services import notifications
 from app.services.inventory import InventoryItem
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,18 +121,43 @@ async def test_notify_shipment_status_changed_respects_client_toggle(db_session:
     assert notifier.sent == []
 
 
-async def test_notify_low_stock_goes_to_client_and_staff(db_session: AsyncSession):
+async def test_notify_low_stock_goes_to_whole_team_and_staff(db_session: AsyncSession):
+    """Склад общий у команды — значит и адресат команда, а не один участник.
+
+    Заблокированный участник в рассылку не попадает: `User.status == active` в
+    выборке. Без этого условия человек, которого только что отключили от аккаунта,
+    продолжал бы получать складские данные клиента.
+    """
     users = UserRepository(db_session)
     await users.create(telegram_id=1, role=UserRole.owner, status=UserStatus.active)
     manager = await users.create(telegram_id=2, role=UserRole.manager, status=UserStatus.active)
     manager.on_duty = True
-    client = await users.create(telegram_id=102, role=UserRole.client, status=UserStatus.active)
+    client = await users.create(
+        telegram_id=102,
+        role=UserRole.client,
+        status=UserStatus.active,
+        account_name="Магазин",
+    )
+    accounts = ClientAccountRepository(db_session)
+    account = (await accounts.get_membership(user_id=client.id)).account
+    colleague = await users.create(
+        telegram_id=103, role=UserRole.client, status=UserStatus.active, create_account=False
+    )
+    blocked = await users.create(
+        telegram_id=104, role=UserRole.client, status=UserStatus.blocked, create_account=False
+    )
+    for member in (colleague, blocked):
+        invited = await accounts.create_invited_membership(
+            account_id=account.id, user=member, invited_by_user_id=client.id
+        )
+        await accounts.set_membership_status(invited, MembershipStatus.active)
+    await db_session.flush()
     notifier = FakeNotifier()
 
-    await notifications.notify_low_stock(
+    await notifications.notify_account_low_stock(
         db_session,
         notifier,
-        client=client,
+        account=account,
         items=[
             InventoryItem(
                 sku="SKU-LOW",
@@ -142,4 +172,7 @@ async def test_notify_low_stock_goes_to_client_and_staff(db_session: AsyncSessio
     )
 
     recipients = {tid for tid, _ in notifier.sent}
-    assert recipients == {1, 2, 102}
+    assert recipients == {1, 2, 102, 103}
+    # Персоналу приходит подписанное аккаунтом, а не именем случайного участника.
+    staff_texts = [text for tid, text in notifier.sent if tid in {1, 2}]
+    assert all("Магазин" in text for text in staff_texts)

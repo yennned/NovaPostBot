@@ -26,6 +26,11 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
 
   postgres:
     # Мажор держим в одном месте — `EXPECTED_PG_MAJOR` в app/db/base.py: бот на
@@ -63,6 +68,27 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Пульс из event loop бота (app/utils/heartbeat.py). Проверка «процесс жив»
+    # была бы бесполезна: она истинна всегда, пока контейнер запущен, а падение
+    # и так лечит restart. Ловим другое — залипший поллинг при живом процессе.
+    # ВАЖНО: compose сам по нездоровью НЕ перезапускает (это умеет только Swarm);
+    # это видимость в `docker ps` и повод для деплоя дождаться healthy.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck", "bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Потолки, а не резервации: `reservations` compose вне swarm игнорирует.
+    # Смысл — не «нарезать поровну», а не дать одному контейнеру утянуть за собой
+    # весь VPS (CPX21: 3 vCPU / 4 ГБ на bot + worker + redis). Запас к типичному
+    # потреблению (~200–300 МБ RSS) трёх-четырёхкратный: лимит должен ловить
+    # утечку, а не штатный всплеск.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1g
 
   worker:
     <<: *app
@@ -75,6 +101,17 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck", "worker"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
 
 volumes:
   redisdata:

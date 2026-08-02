@@ -7,15 +7,15 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 import structlog
+from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.db.base import get_sessionmaker
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.client_account import ClientAccount
+from app.db.models.enums import ClientAccountStatus
 from app.db.repositories import (
-    ClientAccountRepository,
     LowStockAlertRepository,
     StockHoldRepository,
-    UserRepository,
 )
 from app.novaposhta.client import NovaPoshtaClient
 from app.services import (
@@ -26,16 +26,19 @@ from app.services import (
     stock_reconcile,
     tracking,
 )
-from app.services.inventory import InventoryItem, get_inventory_snapshot
+from app.services.inventory import (
+    InventoryItem,
+    get_account_inventory_snapshot,
+)
 from app.services.notifications import Notifier
-from app.sheets import StockSource
+from app.sheets import StockSource, StockSourceUnavailable
 
 logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
 class LowStockResult:
-    clients_checked: int
+    accounts_checked: int
     alerts_sent: int
 
 
@@ -88,18 +91,18 @@ def _plan_low_stock_updates(
 async def _collect_low_stock_alerts(
     session,
     *,
-    client,
-    account_id=None,
+    account_id,
     threshold: int,
     items: list[InventoryItem],
 ) -> list[InventoryItem]:
+    """Состояние алертов — по аккаунту, потому что склад принадлежит аккаунту.
+
+    `client_id` в строке остаётся ради обратной совместимости и заполняется
+    владельцем аккаунта (`resolve_account_scope`); ключом он не является —
+    `upsert_state` ищет по `(account_id, sku)`.
+    """
     repo = LowStockAlertRepository(session)
-    known_rows = (
-        await repo.list_for_account(account_id)
-        if account_id is not None
-        else await repo.list_for_client(client.id)
-    )
-    known = {row.sku: row for row in known_rows}
+    known = {row.sku: row for row in await repo.list_for_account(account_id)}
     now = datetime.now(UTC)
     should_notify, updates = _plan_low_stock_updates(
         threshold=threshold,
@@ -109,7 +112,6 @@ async def _collect_low_stock_alerts(
     )
     for update in updates:
         await repo.upsert_state(
-            client_id=client.id,
             account_id=account_id,
             sku=update.sku,
             is_low=update.is_low,
@@ -287,31 +289,34 @@ async def low_stock_job(
     current_settings = settings or get_settings()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        repo = UserRepository(session)
-        clients, _ = await repo.list_by_status(
-            role=UserRole.client, status=UserStatus.active, limit=500
+        accounts = list(
+            await session.scalars(
+                select(ClientAccount)
+                .where(ClientAccount.status == ClientAccountStatus.active)
+                .order_by(ClientAccount.name)
+            )
         )
         alerts = 0
-        for client in clients:
-            account_scope = await ClientAccountRepository(session).get_context_for_user(client.id)
-            account = account_scope[0] if account_scope is not None else None
-            account_id = account.id if account is not None else None
-            items = await get_inventory_snapshot(
-                session,
-                client=client,
-                account_id=account_id,
-                account=account,
-            )
+        for account in accounts:
+            try:
+                items = await get_account_inventory_snapshot(session, account)
+            except StockSourceUnavailable:
+                # Недоступный склад одного аккаунта не должен отменять алерты
+                # остальным: раньше исключение поднималось наружу и гасило проход
+                # целиком, причём тем вероятнее, чем больше аккаунтов.
+                logger.warning("low_stock.read_failed", account_id=str(account.id), exc_info=True)
+                continue
             low = await _collect_low_stock_alerts(
                 session,
-                client=client,
-                account_id=account_id,
+                account_id=account.id,
                 threshold=current_settings.low_stock_threshold,
                 items=items,
             )
             if not low:
                 continue
-            await notifications.notify_low_stock(session, notifier, client=client, items=low)
+            await notifications.notify_account_low_stock(
+                session, notifier, account=account, items=low
+            )
             alerts += 1
         await session.commit()
-        return LowStockResult(clients_checked=len(clients), alerts_sent=alerts)
+        return LowStockResult(accounts_checked=len(accounts), alerts_sent=alerts)
