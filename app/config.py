@@ -204,6 +204,12 @@ class Settings(BaseSettings):
     # именно на него. 0 — снять ограничение (не рекомендуется).
     stock_manual_delta_limit: int = Field(default=100, alias="STOCK_MANUAL_DELTA_LIMIT")
 
+    # Бронь остатка на время похода в НП. TTL короткий: он существует ровно на
+    # длину внешнего вызова (p50 2,5 с, до 45 с при флаки-НП) плюс запас. Длиннее —
+    # значит дольше держать заниженный `available` после падения процесса.
+    stock_hold_ttl_seconds: int = Field(default=300, alias="STOCK_HOLD_TTL_SECONDS")
+    stock_hold_sweep_seconds: int = Field(default=120, alias="STOCK_HOLD_SWEEP_SECONDS")
+
     low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
     low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
     # Период проверки авто-снятия дежурства (закрытие отделения), сек.
