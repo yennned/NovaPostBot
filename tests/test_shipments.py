@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
@@ -212,7 +213,10 @@ async def test_date_search_works_on_account_scope(db_session: AsyncSession):
         ttn_number="TTN-DATE",
         items=[ShipmentItemDraft(sku="S1", name="Товар", quantity=1)],
     )
-    today = datetime.now(UTC).strftime("%d.%m.%Y")
+    # КИЕВСКАЯ дата, а не UTC: поиск по дате фильтрует киевским днём (PR #149).
+    # С 21:00 до 24:00 UTC даты расходятся, и запрос по UTC-дате не находил
+    # только что созданную ТТН — тест закреплял прежнюю, неверную семантику.
+    today = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y")
 
     page = await shipments.list_shipments(
         db_session, client=client, account_id=membership.account_id, query=today

@@ -11,7 +11,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from app.db.models.enums import ShipmentStatus, UserRole, UserStatus
 from app.db.models.shipment import Shipment
@@ -21,6 +22,20 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _SHIPMENTS = 30
+_KYIV = ZoneInfo("Europe/Kyiv")
+
+
+def _inside_todays_kyiv_day() -> datetime:
+    """Момент внутри СЕГОДНЯШНЕГО киевского дня, а не «сейчас минус минуты».
+
+    Границы периода отчёт считает в киевском дне (`_bounds`), а сид ставил
+    `now(UTC) - i минут`. С 21:00 до 24:00 UTC киевские сутки уже сменились, и
+    часть ТТН уезжала во «вчера»: тест падал три часа в сутки, причём на
+    произвольном PR — он ловил не свою регрессию, а часовой пояс. Полдень по
+    Киеву гарантированно внутри дня при любом времени прогона.
+    """
+    today_kyiv = datetime.now(_KYIV).date()
+    return datetime.combine(today_kyiv, time(12, 0), tzinfo=_KYIV).astimezone(UTC)
 
 
 @contextmanager
@@ -57,7 +72,7 @@ async def _seed(session: AsyncSession, *, telegram_id: int, late: int = 0) -> No
         status=UserStatus.active,
     )
     repo = ShipmentRepository(session)
-    now = datetime.now(UTC)
+    now = _inside_todays_kyiv_day()
     for i in range(_SHIPMENTS):
         shipment = await repo.create(
             client_id=client.id,
