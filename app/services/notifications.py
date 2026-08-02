@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import uuid
 from collections.abc import Iterable
 from decimal import Decimal
 from typing import Protocol
@@ -256,6 +257,17 @@ async def notify_support_queued_to_managers(
     )
 
 
+def _resolve_setting(user: User, key: str, overrides: dict[tuple[uuid.UUID, str], bool]) -> bool:
+    """Значение настройки из уже прочитанной пачки. Приоритет тот же, что у
+    `_notification_enabled`: строка в БД перебивает право пользователя, оно —
+    дефолт. Держим их рядом, чтобы приоритет нельзя было разъехать незаметно."""
+    default = bool(DEFAULT_NOTIFICATION_SETTINGS.get(key, True))
+    override = overrides.get((user.id, key))
+    if override is not None:
+        return override
+    return bool(user.permissions.get(key, default))
+
+
 async def _notification_enabled(
     session: AsyncSession,
     *,
@@ -317,14 +329,19 @@ async def notify_shipment_status_changed(
             User.status == UserStatus.active,
         )
     )
-    for member in members:
+    # Настройки всех получателей — ОДНИМ запросом. Раньше цикл делал один-два
+    # SELECT на каждого участника, и они шли подряд: задержка росла как N × RTT до
+    # Neon, а не как max(RTT). Внутри прохода трекинга, который выдаёт сотню таких
+    # вееров за раз, это и превращалось в минуты на ровном месте.
+    member_list = list(members)
+    overrides = await NotificationSettingRepository(session).map_for_users(
+        [member.id for member in member_list],
+        (NOTIFY_ALL_ACCOUNT_SHIPMENTS, NOTIFY_SHIPMENT_STATUS),
+    )
+    for member in member_list:
         own = shipment.created_by_user_id == member.id
-        all_account = await _notification_enabled(
-            session, user=member, key=NOTIFY_ALL_ACCOUNT_SHIPMENTS
-        )
-        if (own or all_account) and await _notification_enabled(
-            session, user=member, key=NOTIFY_SHIPMENT_STATUS
-        ):
+        all_account = _resolve_setting(member, NOTIFY_ALL_ACCOUNT_SHIPMENTS, overrides)
+        if (own or all_account) and _resolve_setting(member, NOTIFY_SHIPMENT_STATUS, overrides):
             recipients.append(member.telegram_id)
     await _send_many(notifier, recipients, shipment_status_text(shipment))
 
