@@ -181,6 +181,18 @@ class Settings(BaseSettings):
     returns_watch_min_days: int = Field(default=3, alias="RETURNS_WATCH_MIN_DAYS")
     returns_watch_max_days: int = Field(default=21, alias="RETURNS_WATCH_MAX_DAYS")
     returns_recheck_hours: int = Field(default=24, alias="RETURNS_RECHECK_HOURS")
+    # Ингест приёмки: лист «Історія» книги «Склад» → `stock_balances`.
+    # Выключен по умолчанию и НЕ привязан к `INVENTORY_SOURCE` намеренно: порядок
+    # выкатки — сначала backfill балансов, потом ингест на наблюдении несколько
+    # дней, и только потом переключение чтения на PG. Включённый ингест до
+    # backfill'а построил бы баланс из одних приходов, без стартового остатка.
+    stock_ingest_enabled: bool = Field(default=False, alias="STOCK_INGEST_ENABLED")
+    stock_ingest_seconds: int = Field(default=60, alias="STOCK_INGEST_SECONDS")
+    # Сколько строк журнала забирает один проход. Читаются одним запросом окном
+    # `A{водораздел}:F{водораздел+N}`, поэтому цена прохода — ровно одно обращение
+    # к Google независимо от лимита.
+    stock_ingest_batch_limit: int = Field(default=500, alias="STOCK_INGEST_BATCH_LIMIT")
+
     low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
     low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
     # Период проверки авто-снятия дежурства (закрытие отделения), сек.

@@ -11,7 +11,7 @@ from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
 from app.db.repositories import ClientAccountRepository, LowStockAlertRepository, UserRepository
 from app.novaposhta.client import NovaPoshtaClient
-from app.services import duty, notifications, tracking
+from app.services import duty, notifications, stock_ingest, tracking
 from app.services.inventory import InventoryItem, get_inventory_snapshot
 from app.services.notifications import Notifier
 from app.sheets import StockSource
@@ -142,6 +142,34 @@ async def poll_returns_job(
             settings=settings or get_settings(),
         )
         await session.commit()
+        return result
+
+
+async def stock_ingest_job(
+    *,
+    notifier: Notifier | None = None,
+    settings: Settings | None = None,
+) -> stock_ingest.IngestResult:
+    """Перенести новые события приёмки из листа «Історія» в `stock_balances`.
+
+    Коммит один на проход: дельты и водораздел обязаны уехать вместе. При
+    остановке (разошёлся отпечаток строки-водораздела) коммита нет вовсе — в БД не
+    должно остаться половины пачки.
+    """
+    current_settings = settings or get_settings()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await stock_ingest.ingest_intake_history(session, settings=current_settings)
+        if result.halted_reason is None:
+            await session.commit()
+        else:
+            await session.rollback()
+            if notifier is not None and stock_ingest.should_notify_halt(
+                current_settings.sheets_stock_book_id, result.halted_reason
+            ):
+                await notifications.notify_stock_ingest_halted(
+                    session, notifier, reason=result.halted_reason, settings=current_settings
+                )
         return result
 
 

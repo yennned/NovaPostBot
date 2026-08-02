@@ -11,7 +11,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.bot.notify import BotNotifier
 from app.config import Settings, get_settings
-from app.jobs import clear_expired_duty_job, low_stock_job, poll_returns_job, poll_tracking_job
+from app.jobs import (
+    clear_expired_duty_job,
+    low_stock_job,
+    poll_returns_job,
+    poll_tracking_job,
+    stock_ingest_job,
+)
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
 from app.sheets import build_stock_source
@@ -80,6 +86,16 @@ async def low_stock_gated(*, notifier, settings: Settings, now: datetime | None 
     return await low_stock_job(notifier=notifier, settings=settings)
 
 
+async def stock_ingest_gated(*, notifier, settings: Settings, now: datetime | None = None):
+    """Ингест приёмки — в рабочие часы: приёмку вносят работники склада, а они
+    вне окна не работают. Ночью это была бы минута за минутой пустого чтения Google."""
+    at = now or _now(settings)
+    if not _should_run_daytime(settings, at):
+        _log.debug("worker.skip", job="stock_ingest", reason="closed")
+        return None
+    return await stock_ingest_job(notifier=notifier, settings=settings)
+
+
 async def clear_expired_duty_gated(*, notifier, settings: Settings, now: datetime | None = None):
     at = now or _now(settings)
     if not _should_run_duty(settings, at):
@@ -143,6 +159,19 @@ async def main() -> None:
             low_stock_gated,
             trigger="interval",
             seconds=settings.low_stock_poll_seconds,
+            kwargs={"notifier": notifier, "settings": settings},
+            max_instances=1,
+            coalesce=True,
+        )
+    # Ингест приёмки выключен по умолчанию (`STOCK_INGEST_ENABLED`): порядок
+    # выкатки — backfill балансов, потом ингест на наблюдении, и только потом
+    # переключение чтения на PG. Джоба, включённая до backfill'а, построила бы
+    # баланс из одних приходов, без стартового остатка.
+    if settings.stock_ingest_enabled:
+        scheduler.add_job(
+            stock_ingest_gated,
+            trigger="interval",
+            seconds=settings.stock_ingest_seconds,
             kwargs={"notifier": notifier, "settings": settings},
             max_instances=1,
             coalesce=True,
