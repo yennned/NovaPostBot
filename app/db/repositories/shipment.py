@@ -18,14 +18,23 @@ from app.db.repositories.base import BaseRepository
 from app.db.repositories.scope import resolve_account_scope
 
 RESERVING_STATUSES = {ShipmentStatus.created, ShipmentStatus.confirmed}
-TRACKABLE_STATUSES = {
-    ShipmentStatus.created,
-    ShipmentStatus.confirmed,
-    ShipmentStatus.dispatched,
-    ShipmentStatus.in_transit,
-    ShipmentStatus.arrived,
-    ShipmentStatus.returning,
-}
+
+#: Что опрашивает горячий трекинг. Только до `dispatched` — дальше путь посылки
+#: клиент смотрит в приложении НП, а нам от НП нужен ровно один факт, который
+#: нельзя получить иначе: момент, когда посылку приняли. Он же закрывает SLA, и
+#: он же единственный, который не может подкрутить менеджер (`dispatched` вручную
+#: не выставляется: в `NONSTANDARD_TARGET_STATUSES` только lost/damaged).
+#:
+#: Раньше сюда входили ещё `dispatched`, `in_transit`, `arrived` и `returning`.
+#: `arrived` живёт до 7 дней (посылка ждёт получателя), поэтому набор «живых»
+#: документов рос до тысяч и при `LIMIT` выборки новые ТТН переставали опрашиваться
+#: вовсе. Возвраты теперь ловит отдельный редкий проход — `RETURN_WATCH_STATUSES`.
+TRACKABLE_STATUSES = {ShipmentStatus.created, ShipmentStatus.confirmed}
+
+#: Что опрашивает поздний проход возвратов: уже уехавшие ТТН, которые НП ещё может
+#: развернуть обратно. Возврат физически приезжает на наш склад и должен вернуться
+#: в остаток, поэтому на «менеджер заметит коробку» полагаться нельзя.
+RETURN_WATCH_STATUSES = {ShipmentStatus.dispatched}
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,26 +339,107 @@ class ShipmentRepository(BaseRepository):
         rows = await self.session.execute(stmt)
         return {sku: int(total) for sku, total in rows}
 
-    async def list_for_tracking(self, *, limit: int = 200) -> list[Shipment]:
+    #: Что нужно апдейту статуса: получатели пушей, позиции для списания и ключ ФОП.
+    #: `stock_movements` сознательно НЕ грузим — идемпотентность отгрузки проверяется
+    #: запросом `movement_exists`, а joinedload двух коллекций сразу даёт декартово
+    #: произведение строк (позиции × движения) на ровном месте.
+    _TRACKING_LOADS = (
+        joinedload(Shipment.client),
+        joinedload(Shipment.account),
+        joinedload(Shipment.items),
+        joinedload(Shipment.sender_profile),
+    )
+
+    async def list_for_tracking(
+        self,
+        *,
+        limit: int = 200,
+        stale_before: datetime | None = None,
+    ) -> list[Shipment]:
+        """ТТН, ждущие отметки НП о приёме, в порядке «кого дольше всех не спрашивали».
+
+        Сортировка по `tracking_updated_at`, а не по `status_changed_at`: второй
+        двигается только при СМЕНЕ статуса, поэтому документ с неменяющимся статусом
+        навсегда оставался в голове очереди и занимал слот лимита. `NULLS FIRST` —
+        чтобы ни разу не опрошенные шли раньше уже опрошенных.
+
+        `stale_before` отсекает брошенные: ТТН, заведённую и забытую клиентом, никто
+        никогда не отправит, а из выборки она сама не уйдёт.
+        """
         stmt = (
             select(Shipment)
-            .options(
-                joinedload(Shipment.client),
-                joinedload(Shipment.account),
-                joinedload(Shipment.items),
-                joinedload(Shipment.sender_profile),
-                joinedload(Shipment.stock_movements),
-            )
+            .options(*self._TRACKING_LOADS)
             .where(
                 Shipment.ttn_number.is_not(None),
                 Shipment.sender_profile_id.is_not(None),
                 Shipment.status.in_(tuple(TRACKABLE_STATUSES)),
             )
-            .order_by(Shipment.status_changed_at.asc())
+            .order_by(Shipment.tracking_updated_at.asc().nullsfirst())
+            .limit(limit)
+        )
+        if stale_before is not None:
+            stmt = stmt.where(Shipment.created_at >= stale_before)
+        rows = await self.session.scalars(stmt)
+        return list(rows.unique())
+
+    async def list_for_return_watch(
+        self,
+        *,
+        dispatched_from: datetime,
+        dispatched_to: datetime,
+        recheck_before: datetime,
+        limit: int = 500,
+    ) -> list[Shipment]:
+        """Уже отправленные ТТН, которые НП ещё может развернуть обратно.
+
+        Окно задаётся по `dispatched_at`: позже `dispatched_to` возврат физически
+        ещё невозможен, раньше `dispatched_from` — уже неинтересен. `recheck_before`
+        не даёт опрашивать один документ чаще раза в сутки.
+        """
+        stmt = (
+            select(Shipment)
+            .options(*self._TRACKING_LOADS)
+            .where(
+                Shipment.ttn_number.is_not(None),
+                Shipment.sender_profile_id.is_not(None),
+                Shipment.status.in_(tuple(RETURN_WATCH_STATUSES)),
+                Shipment.dispatched_at.is_not(None),
+                Shipment.dispatched_at >= dispatched_from,
+                Shipment.dispatched_at < dispatched_to,
+                or_(
+                    Shipment.tracking_updated_at.is_(None),
+                    Shipment.tracking_updated_at < recheck_before,
+                ),
+            )
+            .order_by(Shipment.tracking_updated_at.asc().nullsfirst())
             .limit(limit)
         )
         rows = await self.session.scalars(stmt)
         return list(rows.unique())
+
+    async def tracking_backlog(
+        self, *, stale_before: datetime | None = None
+    ) -> tuple[int, int, datetime | None]:
+        """`(всего, ни разу не опрошено, самый старый tracking_updated_at)`.
+
+        Нужна для лога прохода: без наблюдаемого размера очереди «трекинг тихо
+        перестал видеть новые ТТН» снова окажется невидимым — ровно так этот дефект
+        и прожил незамеченным.
+        """
+        conditions = [
+            Shipment.ttn_number.is_not(None),
+            Shipment.sender_profile_id.is_not(None),
+            Shipment.status.in_(tuple(TRACKABLE_STATUSES)),
+        ]
+        if stale_before is not None:
+            conditions.append(Shipment.created_at >= stale_before)
+        stmt = select(
+            func.count(Shipment.id),
+            func.count().filter(Shipment.tracking_updated_at.is_(None)),
+            func.min(Shipment.tracking_updated_at),
+        ).where(*conditions)
+        total, never, oldest = (await self.session.execute(stmt)).one()
+        return int(total), int(never), oldest
 
     async def list_for_staff(
         self,

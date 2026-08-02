@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment
 from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
+from app.logging_config import get_logger
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import TrackingStatus
@@ -23,6 +24,8 @@ from app.services.inventory import stock_sheet_key
 from app.services.notifications import Notifier
 from app.sheets import StockDelta, StockSource, build_stock_source
 from app.utils.sla import sla_met
+
+_log = get_logger("tracking")
 
 NONSTANDARD_STATUSES = {
     ShipmentStatus.returning,
@@ -42,31 +45,37 @@ class TrackingPollResult:
     notified: int
 
 
-async def poll_shipments(
+async def _poll_batch(
     session: AsyncSession,
     *,
+    shipments: list[Shipment],
     np_client: NovaPoshtaClient,
-    notifier: Notifier | None = None,
-    mutator: StockSource | None = None,
-    settings: Settings | None = None,
+    notifier: Notifier | None,
+    mutator: StockSource | None,
 ) -> TrackingPollResult:
-    repo = ShipmentRepository(session)
-    shipments = await repo.list_for_tracking()
+    """Спросить НП про переданные ТТН и применить ответы.
+
+    Общее ядро горячего трекинга и позднего прохода возвратов: они отличаются
+    только выборкой, а работа с НП и запись статусов у них одна и та же.
+    """
     if not shipments:
         return TrackingPollResult(checked=0, updated=0, notified=0)
 
     by_api_key: dict[str, list[Shipment]] = defaultdict(list)
     for shipment in shipments:
-        if shipment.sender_profile is None:
+        if shipment.sender_profile is None or not shipment.ttn_number:
             continue
         by_api_key[shipment.sender_profile.np_api_key].append(shipment)
 
-    # Спеки чтения: (api_key, batch, chunk из ≤100 номеров) на каждый ФОП.
-    fetch_specs: list[tuple[str, list[Shipment], list[str]]] = []
+    # Чанкуем ОТПРАВЛЕНИЯ, а не номера. Раньше чанк номеров нёс с собой весь список
+    # ФОП, и фаза записи обходила его заново на каждый чанк — O(чанки × партия) при
+    # >100 ТТН у одного ФОП. Главное же: по чанку номеров нельзя отличить «НП не
+    # вернула документ» от «этот документ в этом чанке не спрашивали», а без такого
+    # различения нельзя честно проставить `tracking_updated_at`.
+    fetch_specs: list[tuple[str, list[Shipment]]] = []
     for api_key, batch in by_api_key.items():
-        numbers = [shipment.ttn_number for shipment in batch if shipment.ttn_number]
-        for chunk in _chunked(numbers, size=100):
-            fetch_specs.append((api_key, batch, chunk))
+        for chunk in _chunked(batch, size=100):
+            fetch_specs.append((api_key, chunk))
     if not fetch_specs:
         return TrackingPollResult(checked=0, updated=0, notified=0)
 
@@ -76,34 +85,120 @@ async def poll_shipments(
     # задач и «Task exception was never retrieved»).
     sem = asyncio.Semaphore(_POLL_FETCH_CONCURRENCY)
 
-    async def _fetch(api_key: str, chunk: list[str]) -> list[TrackingStatus]:
+    async def _fetch(api_key: str, chunk: list[Shipment]) -> list[TrackingStatus]:
         async with sem:
-            return await methods.get_status_documents(np_client, api_key=api_key, numbers=chunk)
+            numbers = [shipment.ttn_number for shipment in chunk if shipment.ttn_number]
+            return await methods.get_status_documents(np_client, api_key=api_key, numbers=numbers)
 
     async with asyncio.TaskGroup() as tg:
-        tasks = [tg.create_task(_fetch(api_key, chunk)) for api_key, _, chunk in fetch_specs]
+        tasks = [tg.create_task(_fetch(api_key, chunk)) for api_key, chunk in fetch_specs]
     fetched = [task.result() for task in tasks]
 
     # Фаза записи — последовательно на общей `AsyncSession` (не потокобезопасна).
     checked = 0
     updated = 0
     notified = 0
-    for (_api_key, batch, chunk), rows in zip(fetch_specs, fetched, strict=True):
+    unanswered = 0
+    now = datetime.now(UTC)
+    for (_api_key, chunk), rows in zip(fetch_specs, fetched, strict=True):
         checked += len(chunk)
         by_number = {row.number: row for row in rows}
-        for shipment in batch:
-            if shipment.ttn_number not in by_number:
+        for shipment in chunk:
+            tracking = by_number.get(shipment.ttn_number or "")
+            if tracking is None:
+                # НП спросили, но строку по документу она не вернула. Отметку времени
+                # всё равно ставим: без неё документ навсегда остаётся «самым давно не
+                # опрошенным», вечно занимает начало выборки и вытесняет из лимита
+                # всех остальных.
+                shipment.tracking_updated_at = now
+                unanswered += 1
                 continue
             changed, pushed = await apply_tracking_status(
                 session,
                 shipment=shipment,
-                tracking=by_number[shipment.ttn_number],
+                tracking=tracking,
                 notifier=notifier,
                 mutator=mutator,
             )
             updated += int(changed)
             notified += int(pushed)
+    if unanswered:
+        await session.flush()
+        _log.info("tracking.unanswered", count=unanswered)
     return TrackingPollResult(checked=checked, updated=updated, notified=notified)
+
+
+async def poll_shipments(
+    session: AsyncSession,
+    *,
+    np_client: NovaPoshtaClient,
+    notifier: Notifier | None = None,
+    mutator: StockSource | None = None,
+    settings: Settings | None = None,
+) -> TrackingPollResult:
+    """Горячий трекинг: довести ТТН до `dispatched`.
+
+    Дальше путь посылки клиент смотрит в приложении НП — нам после отправки нужен
+    только факт возврата, и его ловит отдельный редкий проход (`poll_returns`).
+    """
+    settings = settings or get_settings()
+    repo = ShipmentRepository(session)
+    stale_before = datetime.now(UTC) - timedelta(days=settings.tracking_stale_days)
+    total, never, oldest = await repo.tracking_backlog(stale_before=stale_before)
+    shipments = await repo.list_for_tracking(
+        limit=settings.tracking_batch_limit,
+        stale_before=stale_before,
+    )
+    # Размер очереди в логе — единственное, по чему видно «трекинг перестал успевать».
+    # Если `backlog` упирается в `limit`, часть ТТН не опрашивается в этот проход.
+    _log.info(
+        "tracking.poll",
+        backlog=total,
+        never_polled=never,
+        oldest_polled_at=oldest.isoformat() if oldest else None,
+        batch=len(shipments),
+        limit=settings.tracking_batch_limit,
+    )
+    return await _poll_batch(
+        session,
+        shipments=shipments,
+        np_client=np_client,
+        notifier=notifier,
+        mutator=mutator,
+    )
+
+
+async def poll_returns(
+    session: AsyncSession,
+    *,
+    np_client: NovaPoshtaClient,
+    notifier: Notifier | None = None,
+    mutator: StockSource | None = None,
+    settings: Settings | None = None,
+) -> TrackingPollResult:
+    """Поздний проход: не развернула ли НП уже отправленную посылку обратно.
+
+    Ходит редко (часы, не минуты) и по узкому окну `dispatched_at`, поэтому стоит
+    единицы запросов в сутки. Нужен потому, что возврат приезжает физически к нам на
+    склад и должен вернуться в остаток: полагаться на то, что кто-то заметит коробку
+    и нажмёт кнопку, значит поставить точность остатка в зависимость от дисциплины.
+    """
+    settings = settings or get_settings()
+    now = datetime.now(UTC)
+    shipments = await ShipmentRepository(session).list_for_return_watch(
+        dispatched_from=now - timedelta(days=settings.returns_watch_max_days),
+        dispatched_to=now - timedelta(days=settings.returns_watch_min_days),
+        recheck_before=now - timedelta(hours=settings.returns_recheck_hours),
+        limit=settings.tracking_batch_limit,
+    )
+    _log.info("tracking.returns_poll", batch=len(shipments))
+    return await _poll_batch(
+        session,
+        shipments=shipments,
+        np_client=np_client,
+        notifier=notifier,
+        mutator=mutator,
+    )
 
 
 async def apply_tracking_status(
@@ -203,5 +298,5 @@ async def _apply_dispatch_stock(
     )
 
 
-def _chunked(items: list[str], *, size: int) -> list[list[str]]:
+def _chunked[T](items: list[T], *, size: int) -> list[list[T]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
