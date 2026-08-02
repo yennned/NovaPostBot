@@ -35,6 +35,17 @@ async def _client(session: AsyncSession, telegram_id: int = 100, name: str = "К
     )
 
 
+#: Статусы, при которых у ТТН обязано быть время отправки. Держим здесь копией, а
+#: не импортом из `tracking`: тест должен ломаться, если продовое множество
+#: разъедется с тем, что он считает достижимым состоянием.
+_POST_DISPATCH = {
+    ShipmentStatus.dispatched,
+    ShipmentStatus.in_transit,
+    ShipmentStatus.arrived,
+    ShipmentStatus.delivered,
+}
+
+
 async def _shipment(session, *, client_id, status, qty, **fields):
     repo = ShipmentRepository(session)
     shipment = await repo.create(
@@ -45,6 +56,12 @@ async def _shipment(session, *, client_id, status, qty, **fields):
     )
     for key, value in fields.items():
         setattr(shipment, key, value)
+    # Уехавшая ТТН без `dispatched_at` — недостижимое состояние: трекинг ставит
+    # поле тем же переходом, которым уводит документ за `confirmed`, а legacy-строки
+    # закрыты бэкфилом `e5f8a1b2c3d4`. Раньше отчёт подбирал их фолбэком по
+    # `status_changed_at`, и тесты незаметно опирались именно на фолбэк.
+    if status in _POST_DISPATCH and shipment.dispatched_at is None:
+        shipment.dispatched_at = shipment.status_changed_at
     await session.flush()
     return shipment
 

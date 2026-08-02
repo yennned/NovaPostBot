@@ -34,6 +34,16 @@ NONSTANDARD_STATUSES = {
     ShipmentStatus.damaged,
 }
 
+#: Статусы, означающие «посылка уже уехала». Отправка — это переход в ЛЮБОЙ из
+#: них, а не только в `dispatched`: при перерыве в опросе НП отдаёт сразу более
+#: поздний статус, и промежуточный мы не видим никогда.
+POST_DISPATCH_STATUSES = {
+    ShipmentStatus.dispatched,
+    ShipmentStatus.in_transit,
+    ShipmentStatus.arrived,
+    ShipmentStatus.delivered,
+}
+
 # Потолок конкурентных НП-чтений статусов за один поллинг (по одному httpx-клиенту).
 _POLL_FETCH_CONCURRENCY = 8
 
@@ -223,7 +233,21 @@ async def apply_tracking_status(
     before_status = shipment.status
     await repo.update_status(shipment, target_status)
 
-    if target_status is ShipmentStatus.dispatched:
+    # Не «статус стал ровно `dispatched`», а «документ впервые ушёл дальше
+    # `confirmed`». Разница не теоретическая: НП обновляет трек с задержкой, а мы
+    # опрашиваем не непрерывно — воркер может лежать, а до правки расписания он
+    # ещё и молчал два дня из семи. За такой перерыв посылка успевает уехать И
+    # доехать, и следующий опрос видит сразу `in_transit`/`arrived`. Прежнее
+    # условие на такой скачок не срабатывало вовсе: остаток не списывался,
+    # `dispatched_at` не проставлялся, вердикт SLA не выносился, и ТТН выпадала
+    # из отчётов целиком. Заметно это стало только сейчас — legacy-ветка
+    # `OR (dispatched_at IS NULL AND status IN (…))` в отчётах такие строки
+    # подбирала и тем прятала дыру.
+    #
+    # `dispatched_at is None` — маркер «ещё не отправляли»: он делает блок
+    # идемпотентным, поэтому списание остатка не повторится, даже если статус
+    # позже качнётся между пост-отправочными значениями.
+    if target_status in POST_DISPATCH_STATUSES and shipment.dispatched_at is None:
         scanned_at = dispatch_scan_time(tracking)
         # `dispatched_at` — время отправки, а не время, когда мы про неё узнали.
         # Фолбэк на момент обнаружения оставлен осознанно: он нужен отчётам как

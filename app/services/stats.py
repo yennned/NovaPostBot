@@ -109,36 +109,22 @@ async def get_client_stats(
     cfg = settings or get_settings()
     start, end = _bounds(period, day=day, settings=cfg, date_from=date_from, date_to=date_to)
     repo = ShipmentRepository(session)
-    dispatched_shipments = await repo.list_dispatched_between(
-        client.id, start=start, end=end, account_id=account_id
+    # Суммирует Postgres. Прежняя форма выгружала все отправления периода вместе
+    # с позициями и складывала их `Counter`-ом в памяти процесса — тысячи объектов
+    # ORM на каждый тап «Статистика» ради пяти строк топа и трёх сумм.
+    shipped = Counter(
+        await repo.units_by_sku_dispatched(client.id, start=start, end=end, account_id=account_id)
     )
-    returned_shipments = await repo.list_status_changed_between(
-        client.id,
-        start=start,
-        end=end,
-        statuses=RETURN_STATUSES,
-        account_id=account_id,
+    returned = Counter(
+        await repo.units_by_sku_status_changed(
+            client.id, start=start, end=end, statuses=RETURN_STATUSES, account_id=account_id
+        )
     )
-    lost_shipments = await repo.list_status_changed_between(
-        client.id,
-        start=start,
-        end=end,
-        statuses=LOSS_STATUSES,
-        account_id=account_id,
+    lost = Counter(
+        await repo.units_by_sku_status_changed(
+            client.id, start=start, end=end, statuses=LOSS_STATUSES, account_id=account_id
+        )
     )
-
-    shipped = Counter[str]()
-    returned = Counter[str]()
-    lost = Counter[str]()
-    for shipment in dispatched_shipments:
-        for item in shipment.items:
-            shipped[item.sku] += item.quantity
-    for shipment in returned_shipments:
-        for item in shipment.items:
-            returned[item.sku] += item.quantity
-    for shipment in lost_shipments:
-        for item in shipment.items:
-            lost[item.sku] += item.quantity
 
     inventory = await get_inventory_snapshot(
         session, client=client, account_id=account_id, account=account, reader=reader

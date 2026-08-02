@@ -63,6 +63,10 @@ class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "dispatched_at",
             postgresql_where=text("ttn_number IS NOT NULL"),
         ),
+        # Отчёты выбирают период по `dispatched_at`. Индекс стал применим только
+        # после сноса legacy-ветки `OR (dispatched_at IS NULL AND …)`: пока она
+        # была в запросе, планировщик обязан был проверить её на каждой строке.
+        Index("ix_shipments_dispatched_at", "dispatched_at"),
         # Поиск идёт `ILIKE '%…%'` — B-tree к нему неприменим в принципе.
         Index(
             "ix_shipments_ttn_trgm",
