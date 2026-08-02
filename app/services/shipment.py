@@ -11,6 +11,8 @@ Read-side (список/карточка/отмена) остаётся в `serv
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import uuid
 from decimal import Decimal
 
@@ -25,9 +27,11 @@ from app.db.models.user import User
 from app.db.repositories import (
     AuditRepository,
     ClientAccountRepository,
+    InsufficientAvailable,
     SenderProfileRepository,
     ShipmentItemDraft,
     ShipmentRepository,
+    StockHoldRepository,
     StockMovementRepository,
 )
 from app.novaposhta import methods
@@ -47,6 +51,7 @@ from app.services.exceptions import (
     TtnCancelFailed,
     TtnCreationFailed,
 )
+from app.services.inventory_backend import resolve_inventory_backend
 from app.services.notifications import Notifier
 from app.services.sender_scope import resolve_scoped_profile
 from app.sheets import StockSource, invalidate_stock_cache
@@ -180,6 +185,93 @@ async def _resolve_items(
     return drafts
 
 
+def submit_key_for(
+    *, client_id: uuid.UUID, account_id: uuid.UUID, drafts: list[ShipmentItemDraft]
+) -> str:
+    """Ключ попытки сабмита — детерминированный по корзине, а не случайный.
+
+    Двойной тап «Відправити» обязан попасть в ту же бронь: апдейты обрабатываются
+    параллельными задачами и без `events_isolation`, поэтому два нажатия — норма.
+    Случайный ключ дал бы две брони на одну корзину и занизил остаток вдвое.
+
+    Повторная отправка ТОЙ ЖЕ корзины после успеха ключ переиспользует, но брони
+    той попытки уже сняты (`attach`), а `hold` переиспользует только активные, —
+    значит захват будет новым, как и должно быть.
+    """
+    payload = "\x1f".join(
+        [
+            str(client_id),
+            str(account_id),
+            *(f"{d.sku}:{d.quantity}" for d in sorted(drafts, key=lambda d: d.sku)),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+async def _hold_stock(
+    session: AsyncSession,
+    *,
+    client: User,
+    account: ClientAccount,
+    drafts: list[ShipmentItemDraft],
+    reader: StockSource | None,
+    settings: Settings,
+) -> str | None:
+    """Фаза 1 трёхфазного сабмита: захватить бронь и **сделать её видимой**.
+
+    `None` — гейт не применяется: источник остатка ещё лист, а у Google нет ни
+    транзакций, ни строчных локов, и городить над ним подобие гейта значило бы
+    изображать защиту, которой нет.
+
+    Коммит здесь обязателен и является сутью фазы. Бронь, живущая в незакоммиченной
+    транзакции, второму коннекту не видна — то есть это не гейт, а локальная
+    переменная. Коммитим ДО похода в НП, потому что именно на время этого вызова
+    (p50 2,5 с, до 45 с при флаки-НП) остаток и надо удержать.
+    """
+    if resolve_inventory_backend(reader=reader).name != "pg":
+        return None
+    key = submit_key_for(client_id=client.id, account_id=account.id, drafts=drafts)
+    reserved = await ShipmentRepository(session).reserved_by_account(account.id)
+    try:
+        await StockHoldRepository(session).hold(
+            account_id=account.id,
+            client_id=client.id,
+            submit_key=key,
+            wanted={draft.sku: draft.quantity for draft in drafts},
+            reserved=reserved,
+            ttl_seconds=settings.stock_hold_ttl_seconds,
+        )
+    except InsufficientAvailable as exc:
+        # Один язык отказа на оба источника: экраны уже умеют показывать
+        # `InsufficientStock`, и гейт не должен приносить второй тип ошибки.
+        await session.rollback()
+        raise InsufficientStock(exc.sku, exc.requested, exc.available) from exc
+    await session.commit()
+    return key
+
+
+async def _release_hold(session: AsyncSession, submit_key: str | None) -> None:
+    """Снять бронь и **закоммитить снятие**.
+
+    Без коммита откат транзакции вызывающим вернул бы бронь к жизни: сама строка
+    брони закоммичена фазой 1, а её снятие — нет. Товар оставался бы заблокирован
+    до дворника, то есть клиент не смог бы продать собственный остаток.
+    """
+    if submit_key is None:
+        return
+    try:
+        await StockHoldRepository(session).release(submit_key)
+        await session.commit()
+    except Exception:
+        logger.warning("stock_hold_release_failed", submit_key=submit_key, exc_info=True)
+        # Откатить обязательно: `_release_hold` зовётся из `except`, и сессия,
+        # оставленная в сбойном состоянии, уронит следующий же запрос вызывающего
+        # `PendingRollbackError` — то есть подменит исходную ошибку НП на ошибку
+        # SQLAlchemy, и разбирать инцидент придётся не с той стороны.
+        with contextlib.suppress(Exception):
+            await session.rollback()
+
+
 async def create_shipment(
     session: AsyncSession,
     *,
@@ -241,7 +333,28 @@ async def create_shipment(
     effective_cod = cod_amount if is_cod else None
     api_key = profile.np_api_key  # EncryptedString расшифровывает при чтении
 
-    # NP-first: контрагент-получатель → сохранение ТТН. Любой сбой НП → ничего в БД.
+    # Фаза 1: бронь под корзину — закоммиченная, потому что удержать остаток надо
+    # именно на время вызова НП, а незакоммиченная бронь второму коннекту не видна.
+    # Все проверки выше сделаны до неё намеренно: отказ по COD или габаритам не
+    # должен оставлять за собой захваченный остаток.
+    # Один и тот же аккаунт на все записи ниже. Разойдись они — бронь взялась бы
+    # по одному аккаунту, а `Shipment` записался по другому (`resolve_account_scope`
+    # выводит его из членства, если параметр пуст): `attach` привязал бы бронь к
+    # чужому отправлению, а `reserved_by_account` не увидел бы этот резерв вовсе,
+    # то есть следующий сабмит продал бы тот же товар повторно.
+    scoped_account = shipments.require_client_account(client, account)
+    account_id = account_id or scoped_account.id
+    submit_key = await _hold_stock(
+        session,
+        client=client,
+        account=scoped_account,
+        drafts=drafts,
+        reader=reader,
+        settings=settings,
+    )
+
+    # Фаза 2 (NP-first): контрагент-получатель → сохранение ТТН, без открытой
+    # транзакции. Любой сбой НП → ничего в БД и бронь снимается.
     try:
         recipient_ref, contact_ref = await methods.ensure_recipient(
             np_client,
@@ -284,12 +397,20 @@ async def create_shipment(
         )
         result = await methods.save_ttn(np_client, api_key=api_key, draft=draft)
     except NovaPoshtaError as exc:
+        await _release_hold(session, submit_key)
         raise TtnCreationFailed(str(exc)) from exc
     except ValueError as exc:
         # Некорректные/противоречивые габариты не должны просачиваться как 500.
+        await _release_hold(session, submit_key)
         raise TtnCreationFailed(str(exc)) from exc
+    except BaseException:
+        # Отмена задачи, таймаут, что угодно: бронь закоммичена и сама не исчезнет.
+        # Дворник добьёт её через TTL, но до тех пор клиент не продаст свой товар.
+        await _release_hold(session, submit_key)
+        raise
 
-    # Успех НП → запись в БД (последний awaited-шаг). status=created → резерв активен.
+    # Фаза 3. Успех НП → запись в БД. status=created → резерв выводится из статуса,
+    # поэтому бронь тут же снимается: иначе то же количество вычлось бы дважды.
     repo = ShipmentRepository(session)
     shipment = await repo.create(
         client_id=client.id,
@@ -313,6 +434,8 @@ async def create_shipment(
         np_ref=result.ref,
         items=drafts,
     )
+    if submit_key is not None:
+        await StockHoldRepository(session).attach(submit_key, shipment_id=shipment.id)
     shipment.sla_deadline = shipment_sla_deadline(shipment.created_at, settings=settings)
     shipment.fee_amount = compute_shipment_fee(sum(item.quantity for item in drafts))
     await StockMovementRepository(session).record_for_items(
