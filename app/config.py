@@ -210,6 +210,13 @@ class Settings(BaseSettings):
     stock_hold_ttl_seconds: int = Field(default=300, alias="STOCK_HOLD_TTL_SECONDS")
     stock_hold_sweep_seconds: int = Field(default=120, alias="STOCK_HOLD_SWEEP_SECONDS")
 
+    # Сверка остатка. Отдельно от зеркала и от ингеста: по порядку выкатки она
+    # работает в режиме наблюдения несколько дней ПЕРЕД тем, как включить зеркало
+    # и переключить чтение на PG. Час, а не минуты: сверка стоит чтение на аккаунт,
+    # а расхождение эскалируется только пережив два цикла подряд.
+    stock_reconcile_enabled: bool = Field(default=False, alias="STOCK_RECONCILE_ENABLED")
+    stock_reconcile_seconds: int = Field(default=3600, alias="STOCK_RECONCILE_SECONDS")
+
     low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
     low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
     # Период проверки авто-снятия дежурства (закрытие отделения), сек.

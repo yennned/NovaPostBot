@@ -18,7 +18,14 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.novaposhta.client import NovaPoshtaClient
-from app.services import duty, notifications, stock_ingest, stock_mirror, tracking
+from app.services import (
+    duty,
+    notifications,
+    stock_ingest,
+    stock_mirror,
+    stock_reconcile,
+    tracking,
+)
 from app.services.inventory import InventoryItem, get_inventory_snapshot
 from app.services.notifications import Notifier
 from app.sheets import StockSource
@@ -227,6 +234,30 @@ async def stock_hold_sweep_job(*, settings: Settings | None = None) -> int:
         if released:
             logger.info("stock_holds.swept", released=released)
         return released
+
+
+async def stock_reconcile_job(
+    *,
+    notifier: Notifier | None = None,
+    settings: Settings | None = None,
+) -> list[stock_reconcile.AccountReconcileResult]:
+    """Сверка остатка: PG против листа и PG против собственного журнала.
+
+    Только читает — ничего не чинит. «Усыновить» число из листа значило бы
+    превратить опечатку человека в разрешение продать несуществующий товар.
+    """
+    current_settings = settings or get_settings()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        results = await stock_reconcile.reconcile_all_accounts(session)
+        if notifier is not None:
+            for result in results:
+                text = stock_reconcile.report_text(result)
+                if text is not None:
+                    await notifications.notify_staff(
+                        session, notifier, text=text, settings=current_settings
+                    )
+        return results
 
 
 async def clear_expired_duty_job(
