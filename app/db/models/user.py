@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, String, text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,6 +22,24 @@ if TYPE_CHECKING:
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Веерные рассылки и экраны персонала выбирают «активные менеджеры»,
+        # «активные владельцы», «активные клиенты» — всегда пара роль+статус.
+        Index("ix_users_role_status", "role", "status"),
+        # Поиск персонала и клиентов по подстроке — тот же `ILIKE '%…%'`.
+        Index(
+            "ix_users_full_name_trgm",
+            "full_name",
+            postgresql_using="gin",
+            postgresql_ops={"full_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_users_phone_trgm",
+            "phone",
+            postgresql_using="gin",
+            postgresql_ops={"phone": "gin_trgm_ops"},
+        ),
+    )
 
     # Telegram-идентификатор (основной ключ авторизации). Nullable: владелец может
     # завести менеджера по одному телефону (ещё не запускавшего бота) — telegram_id
