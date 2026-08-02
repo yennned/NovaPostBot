@@ -366,6 +366,39 @@ async def notify_stock_ingest_halted(
     await _send_many(notifier, await _staff_recipient_ids(session, settings=current_settings), text)
 
 
+async def notify_stock_manual_edits(
+    session: AsyncSession,
+    notifier: Notifier,
+    *,
+    account_label: str,
+    applied: list[tuple[str, int, int]],
+    rejected: list[tuple[str, int, int, str]],
+    settings: Settings | None = None,
+) -> None:
+    """Ручные правки количества прямо в листе «Склад».
+
+    Сообщаем и о принятых, и об отклонённых. Принятые — потому что изменение
+    остатка мимо приёмки и отгрузки обязано быть видимым; отклонённые — потому что
+    иначе человек будет считать, что поправил, а число вернётся обратно, и это
+    выглядит как сбой бота.
+    """
+    if not applied and not rejected:
+        return
+    lines = [f"✏️ <b>Ручні правки залишку</b> · {html.escape(account_label)}"]
+    for sku, was, now in applied:
+        lines.append(f"• {html.escape(sku)}: {was} → {now}")
+    for sku, was, now, reason in rejected:
+        lines.append(
+            f"• ⛔ {html.escape(sku)}: {was} → {now} — не застосовано ({html.escape(reason)}), "
+            "значення повернуто"
+        )
+    await _send_many(
+        notifier,
+        await _staff_recipient_ids(session, settings=settings or get_settings()),
+        "\n".join(lines),
+    )
+
+
 async def notify_shipment_cancelled_by_client(
     session: AsyncSession,
     notifier: Notifier,

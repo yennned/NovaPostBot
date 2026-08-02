@@ -193,6 +193,17 @@ class Settings(BaseSettings):
     # к Google независимо от лимита.
     stock_ingest_batch_limit: int = Field(default=500, alias="STOCK_INGEST_BATCH_LIMIT")
 
+    # Зеркало Postgres → лист «Склад»: пишет только «Кількість» и «Резерв», забирает
+    # описательные поля обратно и принимает ручные правки количества.
+    # 300 секунд, а не 60: проход стоит чтение + запись на аккаунт, и при 20
+    # аккаунтах минутный интервал съел бы две трети квоты Google в обе стороны.
+    stock_mirror_enabled: bool = Field(default=False, alias="STOCK_MIRROR_ENABLED")
+    stock_mirror_seconds: int = Field(default=300, alias="STOCK_MIRROR_SECONDS")
+    # Предохранитель на ручную правку ячейки «Кількість». Опечатка в одну цифру
+    # иначе становится реальным изменением остатка, а гейт от oversell смотрит
+    # именно на него. 0 — снять ограничение (не рекомендуется).
+    stock_manual_delta_limit: int = Field(default=100, alias="STOCK_MANUAL_DELTA_LIMIT")
+
     low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
     low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
     # Период проверки авто-снятия дежурства (закрытие отделения), сек.

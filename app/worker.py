@@ -17,6 +17,7 @@ from app.jobs import (
     poll_returns_job,
     poll_tracking_job,
     stock_ingest_job,
+    stock_mirror_job,
 )
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
@@ -96,6 +97,16 @@ async def stock_ingest_gated(*, notifier, settings: Settings, now: datetime | No
     return await stock_ingest_job(notifier=notifier, settings=settings)
 
 
+async def stock_mirror_gated(*, notifier, settings: Settings, now: datetime | None = None):
+    """Зеркало склада — в рабочие часы: ночью в листе никто ничего не правит, а
+    проход стоит чтение и запись Google на каждый аккаунт."""
+    at = now or _now(settings)
+    if not _should_run_daytime(settings, at):
+        _log.debug("worker.skip", job="stock_mirror", reason="closed")
+        return None
+    return await stock_mirror_job(notifier=notifier, settings=settings)
+
+
 async def clear_expired_duty_gated(*, notifier, settings: Settings, now: datetime | None = None):
     at = now or _now(settings)
     if not _should_run_duty(settings, at):
@@ -172,6 +183,18 @@ async def main() -> None:
             stock_ingest_gated,
             trigger="interval",
             seconds=settings.stock_ingest_seconds,
+            kwargs={"notifier": notifier, "settings": settings},
+            max_instances=1,
+            coalesce=True,
+        )
+    # Зеркало — после ингеста и реже него: приёмка, попавшая между ними, доедет
+    # следующим циклом, а обратный порядок писал бы в лист остаток, ещё не знающий
+    # о только что внесённой приёмке.
+    if settings.stock_mirror_enabled:
+        scheduler.add_job(
+            stock_mirror_gated,
+            trigger="interval",
+            seconds=settings.stock_mirror_seconds,
             kwargs={"notifier": notifier, "settings": settings},
             max_instances=1,
             coalesce=True,
