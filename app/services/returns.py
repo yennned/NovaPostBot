@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment
-from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
-from app.services.client_sheet_sync import best_effort_sync, run_on_sheets_executor
+from app.db.repositories import AuditRepository, ShipmentRepository
+from app.services.client_sheet_sync import best_effort_sync
 from app.services.exceptions import InvalidReturnDecision, ShipmentActionForbidden, ShipmentNotFound
-from app.services.inventory import stock_sheet_key
-from app.sheets import StockDelta, StockSource, build_stock_source
+from app.services.inventory_backend import build_inventory_backend
+from app.services.stock_write import StockWriteItem, apply_physical_movement
+from app.sheets import StockSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,29 +81,10 @@ async def receive_returned_shipment(
 
     by_sku = {item.sku: item for item in shipment.items}
     actual = _normalize_return_decisions(shipment, decisions)
-    deltas: list[StockDelta] = []
-    for decision in actual:
-        item = by_sku.get(decision.sku)
-        if item is None or decision.accepted_quantity <= 0:
-            continue
-        deltas.append(
-            StockDelta(
-                sku=item.sku,
-                quantity_delta=decision.accepted_quantity,
-                name=item.name,
-                category=item.category,
-                price=item.unit_price,
-            )
-        )
-    await run_on_sheets_executor(
-        (mutator or build_stock_source()).apply_deltas,
-        stock_sheet_key(shipment.account),
-        deltas,
-    )
 
-    movements = StockMovementRepository(session)
     accepted_total = 0
     rejected_total = 0
+    returned: list[StockWriteItem] = []
     for decision in actual:
         item = by_sku.get(decision.sku)
         if item is None:
@@ -111,18 +93,32 @@ async def receive_returned_shipment(
         rejected_total += max(decision.rejected_quantity, 0)
         if decision.accepted_quantity <= 0:
             continue
-        await movements.create(
-            client_id=shipment.client_id,
-            account_id=shipment.account_id,
-            shipment_id=shipment.id,
-            actor_user_id=actor_user_id,
-            sku=item.sku,
-            movement_type=StockMovementType.ttn_return,
-            quantity_delta=decision.accepted_quantity,
-            quantity_before=0,
-            quantity_after=decision.accepted_quantity,
-            comment=decision.comment or f"Повернення по ТТН {shipment.ttn_number or '—'}",
+        returned.append(
+            StockWriteItem(
+                sku=item.sku,
+                quantity=decision.accepted_quantity,
+                name=item.name,
+                category=item.category,
+                unit_price=item.unit_price,
+            )
         )
+
+    # Возврат кладётся туда же, где живёт остаток: на `pg` — в `stock_balances`
+    # движением с честными before/after, на `sheets` — прежней записью в лист.
+    # Комментарий здесь общий на пачку: пер-позиционный текст из `decision.comment`
+    # относится к решению приёмщика, а не к движению остатка, и живёт в аудите.
+    await apply_physical_movement(
+        session,
+        account=shipment.account,
+        client_id=shipment.client_id,
+        shipment_id=shipment.id,
+        items=returned,
+        movement_type=StockMovementType.ttn_return,
+        sign=1,
+        comment=f"Повернення по ТТН {shipment.ttn_number or '—'}",
+        actor_user_id=actor_user_id,
+        mutator=mutator,
+    )
 
     before = {"status": shipment.status.value}
     shipment.status = ShipmentStatus.returned
@@ -140,10 +136,14 @@ async def receive_returned_shipment(
             "rejected_quantity": rejected_total,
         },
     )
-    await best_effort_sync(
-        session,
-        client=shipment.client,
-        account=shipment.account,
-        log_key="return_sheet_sync_failed",
-        shipment_id=str(shipment.id),
-    )
+    # Как и в трекинге: на `pg` колонку «Кількість» ведёт Postgres, а её проекцию
+    # в лист пишет зеркало воркера. Синк отсюда был бы лишним расходом квоты и
+    # вторым писателем в ту же ячейку.
+    if build_inventory_backend().name != "pg":
+        await best_effort_sync(
+            session,
+            client=shipment.client,
+            account=shipment.account,
+            log_key="return_sheet_sync_failed",
+            shipment_id=str(shipment.id),
+        )

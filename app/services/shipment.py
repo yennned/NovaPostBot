@@ -51,7 +51,7 @@ from app.services.exceptions import (
     TtnCancelFailed,
     TtnCreationFailed,
 )
-from app.services.inventory_backend import resolve_inventory_backend
+from app.services.inventory_backend import build_inventory_backend, resolve_inventory_backend
 from app.services.notifications import Notifier
 from app.services.sender_scope import resolve_scoped_profile
 from app.sheets import StockSource, invalidate_stock_cache
@@ -488,14 +488,19 @@ async def create_shipment(
             )
         except Exception:
             logger.warning("shipment_push_failed", shipment_id=str(shipment.id))
-    await best_effort_sync(
-        session,
-        client=client,
-        account=account,
-        log_key="shipment_sheet_sync_failed",
-        reader=reader,
-        shipment_id=str(shipment.id),
-    )
+    # Синк зеркалит в лист «Резерв» и книгу-вьюшку оператора. На `pg` обеими
+    # колонками владеет Postgres, а в лист их пишет зеркало воркера — здесь это
+    # было бы три записи в Google на каждый сабмит и второй писатель в ту же
+    # ячейку. Ради снятия этого расхода остаток и переезжал.
+    if build_inventory_backend().name != "pg":
+        await best_effort_sync(
+            session,
+            client=client,
+            account=account,
+            log_key="shipment_sheet_sync_failed",
+            reader=reader,
+            shipment_id=str(shipment.id),
+        )
     # Перечитываем с joinedload(items) — иначе `_to_card` ленивой загрузкой
     # коллекции упадёт в async (MissingGreenlet).
     fresh = await repo.get_by_id(shipment.id)
@@ -595,7 +600,7 @@ async def cancel_shipment_np_first(
         sign=1,
         comment=f"Скасування ТТН {shipment.ttn_number or '—'}",
     )
-    if sync:
+    if sync and build_inventory_backend().name != "pg":
         await best_effort_sync(
             session,
             client=client,

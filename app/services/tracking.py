@@ -12,17 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment
-from app.db.repositories import AuditRepository, ShipmentRepository, StockMovementRepository
+from app.db.repositories import AuditRepository, ShipmentRepository
 from app.logging_config import get_logger
 from app.novaposhta import methods
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.schemas import TrackingStatus
 from app.novaposhta.tracking import dispatch_scan_time, map_tracking_status
 from app.services import notifications
-from app.services.client_sheet_sync import best_effort_sync, run_on_sheets_executor
-from app.services.inventory import stock_sheet_key
+from app.services.client_sheet_sync import best_effort_sync
+from app.services.inventory_backend import build_inventory_backend
 from app.services.notifications import Notifier
-from app.sheets import StockDelta, StockSource, build_stock_source
+from app.services.stock_write import apply_physical_movement, items_from_shipment
+from app.sheets import StockSource
 from app.utils.sla import sla_verdict
 
 _log = get_logger("tracking")
@@ -312,36 +313,31 @@ async def _apply_dispatch_stock(
     if await repo.movement_exists(shipment.id, StockMovementType.ttn_dispatch):
         return
 
-    await run_on_sheets_executor(
-        (mutator or build_stock_source()).apply_deltas,
-        stock_sheet_key(shipment.account),
-        [
-            StockDelta(
-                sku=item.sku,
-                quantity_delta=-item.quantity,
-                name=item.name,
-                category=item.category,
-                price=item.unit_price,
-            )
-            for item in shipment.items
-        ],
-    )
-    await StockMovementRepository(session).record_for_items(
+    # Куда именно уйдёт списание, решает `stock_write`, а не эта функция: на `pg`
+    # оно обязано лечь в `stock_balances`, иначе зеркало увидит расхождение листа с
+    # `mirrored_quantity` и примет штатную отправку за ручную правку человека.
+    await apply_physical_movement(
+        session,
+        account=shipment.account,
         client_id=shipment.client_id,
-        account_id=shipment.account_id,
         shipment_id=shipment.id,
-        items=shipment.items,
+        items=items_from_shipment(shipment.items),
         movement_type=StockMovementType.ttn_dispatch,
         sign=-1,
         comment=f"Списання по ТТН {shipment.ttn_number or '—'}",
+        mutator=mutator,
     )
-    await best_effort_sync(
-        session,
-        client=shipment.client,
-        account=shipment.account,
-        log_key="tracking_sheet_sync_failed",
-        shipment_id=str(shipment.id),
-    )
+    # Синк книги-зеркала оператора — только когда остаток живёт в листе. На `pg`
+    # это чистый расход квоты Google: колонку «Кількість» ведёт Postgres, а её
+    # проекцию в лист пишет зеркало воркера (`stock_mirror`), а не этот путь.
+    if build_inventory_backend().name != "pg":
+        await best_effort_sync(
+            session,
+            client=shipment.client,
+            account=shipment.account,
+            log_key="tracking_sheet_sync_failed",
+            shipment_id=str(shipment.id),
+        )
 
 
 def _chunked[T](items: list[T], *, size: int) -> list[list[T]]:
