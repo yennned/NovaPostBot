@@ -92,8 +92,15 @@ def ensure_sender_dispatchable(profile: SenderProfile, settings: Settings) -> No
         raise SenderDispatchNotConfigured("склад відправника не налаштований")
 
 
-async def _refuse_if_account_frozen(session: AsyncSession, client: User) -> None:
+async def _refuse_if_account_frozen(
+    session: AsyncSession, client: User, account: ClientAccount | None = None
+) -> None:
     """Отказать в создании/отмене ТТН, если аккаунт актора не `active`.
+
+    `account` — уже загруженный мидлварью аккаунт актора. Если он передан, запрос
+    в БД не нужен: мидлварь кладёт в контекст ТОЛЬКО активный аккаунт, а для
+    неактивного отдаёт `None`, и тогда мы честно идём проверять членством. Это
+    убирает один из трёх повторных загрузок членства за апдейт.
 
     Дыра, которую это закрывает: при блокировке (и при удалении клиента, где мы
     ставим `blocked`) `get_context_for_user` отдаёт `None`, хендлер зовёт сервис с
@@ -103,6 +110,10 @@ async def _refuse_if_account_frozen(session: AsyncSession, client: User) -> None
     остаётся `active`). Проверяем аккаунт напрямую по членству: и владелец, и
     работник неактивного аккаунта получают отказ. Соло-клиент без членства — без
     изменений (`membership is None`)."""
+    if account is not None:
+        if account.status is not ClientAccountStatus.active:
+            raise PermissionDenied("клієнтський акаунт заблоковано або видаляється")
+        return
     membership = await ClientAccountRepository(session).get_membership(user_id=client.id)
     if membership is not None and membership.account.status is not ClientAccountStatus.active:
         raise PermissionDenied("клієнтський акаунт заблоковано або видаляється")
@@ -310,7 +321,7 @@ async def create_shipment(
     FSM на шаге накладеного платежу).
     """
     shipments._require_active_client(client)
-    await _refuse_if_account_frozen(session, client)
+    await _refuse_if_account_frozen(session, client, account)
     settings = settings or get_settings()
     profile = await _resolve_sender(
         session, client, sender_profile_id, settings, account_id=account_id
@@ -352,6 +363,15 @@ async def create_shipment(
         reader=reader,
         settings=settings,
     )
+
+    # Коннект не должен удерживаться через вызов НП. `InternetDocument.save` — это
+    # p50 2,5 с, а при флаки-НП до 45 с с ретраями; всё это время коннект из пула
+    # Neon был бы занят ничем, а под всплеском их всего 50 на процесс. Коммит
+    # возвращает коннект в пул: следующее обращение к сессии возьмёт новый.
+    #
+    # На PG-пути коммит уже сделала фаза 1; здесь он холостой и нужен ровно для
+    # того, чтобы путь Sheets вёл себя так же, а не держал коннект молча.
+    await session.commit()
 
     # Фаза 2 (NP-first): контрагент-получатель → сохранение ТТН, без открытой
     # транзакции. Любой сбой НП → ничего в БД и бронь снимается.
