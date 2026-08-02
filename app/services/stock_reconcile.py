@@ -1,12 +1,18 @@
 """Сверка остатка: Postgres против листа «Склад» и Postgres против самого себя.
 
-Две проверки, и вторая важнее первой.
+Три проверки, и внутренние важнее сравнения с Google.
 
 **Внутренний инвариант PG** — `SUM(дельт по физическим типам) == quantity`. Он
 ловит баг в нашем собственном коде: движение записали, а баланс не сдвинули, или
 наоборот. Никакое сравнение с Google этого не даёт, потому что расхождение с
 листом объясняется чем угодно — отставанием зеркала, правкой человека, приёмкой в
 процессе.
+
+**Бронь под закрытыми ТТН** — второй внутренний инвариант, и первый его не видит:
+`ttn_reserve`/`ttn_cancel` количество не двигают, поэтому бронь без пары не ломает
+«сумма дельт == остаток» ничем, а доступный остаток верен, потому что считается по
+статусу ТТН. Именно эта слепота и дала дефекту «ТТН удалили в кабинете НП» прожить
+полтора года.
 
 **Сравнение с листом** — вспомогательное и намеренно осторожное:
 
@@ -61,6 +67,8 @@ class AccountReconcileResult:
     pg_only: tuple[str, ...] = field(default=())
     #: Внутренний инвариант PG разошёлся: `(sku, ожидание по журналу, факт)`.
     ledger_drift: tuple[tuple[str, int, int], ...] = field(default=())
+    #: Закрытые ТТН с невозвращённой бронью: `(shipment_id, номер ТТН, бронь)`.
+    unreleased: tuple[tuple[object, str | None, int], ...] = field(default=())
     error: str | None = None
 
 
@@ -90,13 +98,24 @@ async def reconcile_account(
         logger.error(
             "stock_reconcile.ledger_drift", account_id=str(account.id), items=len(ledger_drift)
         )
+    unreleased = tuple(await repo.unreleased_reserves(account.id))
+    if unreleased:
+        logger.error(
+            "stock_reconcile.unreleased_reserves",
+            account_id=str(account.id),
+            shipments=len(unreleased),
+        )
 
     try:
         snapshot = await run_sheets_read(mirror.read_snapshot, key)
     except StockSheetNotFound:
-        return AccountReconcileResult(account.id, key, ledger_drift=ledger_drift)
+        return AccountReconcileResult(
+            account.id, key, ledger_drift=ledger_drift, unreleased=unreleased
+        )
     except MirrorSheetError as exc:
-        return AccountReconcileResult(account.id, key, ledger_drift=ledger_drift, error=str(exc))
+        return AccountReconcileResult(
+            account.id, key, ledger_drift=ledger_drift, unreleased=unreleased, error=str(exc)
+        )
 
     balances = {b.sku: b.quantity for b in await repo.list_for_account(account.id)}
     sheet = {row.sku: row.quantity for row in snapshot.rows}
@@ -129,6 +148,7 @@ async def reconcile_account(
         sheet_only=tuple(sorted(set(sheet) - set(balances))),
         pg_only=tuple(sorted(set(balances) - set(sheet))),
         ledger_drift=ledger_drift,
+        unreleased=unreleased,
     )
 
 
@@ -147,6 +167,7 @@ async def reconcile_all_accounts(
         pending=sum(len(r.pending) for r in results),
         sheet_only=sum(len(r.sheet_only) for r in results),
         ledger_drift=sum(len(r.ledger_drift) for r in results),
+        unreleased=sum(len(r.unreleased) for r in results),
     )
     return results
 
@@ -160,6 +181,11 @@ def report_text(result: AccountReconcileResult) -> str | None:
     lines: list[str] = []
     for sku, expected, actual in result.ledger_drift:
         lines.append(f"• ⚠️ {sku}: журнал рухів каже {expected}, залишок {actual} — це баг у боті")
+    for _, number, reserve in result.unreleased:
+        lines.append(
+            f"• ⚠️ ТТН {number or '—'}: закрита, але бронь {abs(reserve)} шт "
+            "лишилася в журналі — це баг у боті"
+        )
     for drift in result.confirmed:
         lines.append(f"• {drift.sku}: у боті {drift.pg}, у листі {drift.sheet}")
     if result.sheet_only:

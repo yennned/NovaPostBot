@@ -277,7 +277,7 @@ async def apply_tracking_status(
         await _apply_dispatch_stock(session, shipment=shipment, mutator=mutator)
 
     if target_status is ShipmentStatus.cancelled:
-        await _release_reserve_in_ledger(session, shipment=shipment)
+        await release_reserve_in_ledger(session, shipment=shipment)
 
     await AuditRepository(session).log(
         "shipment_tracking_status_updated",
@@ -306,7 +306,7 @@ async def apply_tracking_status(
     return True, pushed
 
 
-async def _release_reserve_in_ledger(session: AsyncSession, *, shipment: Shipment) -> None:
+async def release_reserve_in_ledger(session: AsyncSession, *, shipment: Shipment) -> None:
     """Снять бронь в журнале, когда ТТН удалили в кабинете НП.
 
     Все ЧЕЛОВЕЧЕСКИЕ пути отмены пишут `ttn_cancel` (клиент, менеджер, удаление

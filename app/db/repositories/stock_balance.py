@@ -17,12 +17,14 @@ import uuid
 from collections.abc import Sequence
 from decimal import Decimal
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, case, func, or_, select
 
 from app.db.models.enums import StockMovementType
+from app.db.models.shipment import Shipment
 from app.db.models.stock_balance import StockBalance
 from app.db.models.stock_movement import StockMovement
 from app.db.repositories.base import BaseRepository
+from app.db.repositories.shipment import RESERVING_STATUSES
 
 #: Типы, реально двигающие количество. `ttn_reserve`/`ttn_cancel` — про бронь,
 #: которая выводится из статуса ТТН, поэтому количество они не трогают.
@@ -272,3 +274,63 @@ class StockBalanceRepository(BaseRepository):
             for sku, expected, actual in rows
             if expected != actual
         ]
+
+    async def unreleased_reserves(
+        self, account_id: uuid.UUID
+    ) -> list[tuple[uuid.UUID, str | None, int]]:
+        """Закрытые ТТН, чья бронь осталась в журнале: `(shipment_id, номер, бронь)`.
+
+        Второй внутренний инвариант PG — и `ledger_matches_balance` его не видит
+        в принципе: `ttn_reserve`/`ttn_cancel` количество не двигают, поэтому
+        бронь без пары не ломает «сумма физических дельт == остаток» ничем.
+        Доступный остаток тоже остаётся верным, он считается по СТАТУСУ ТТН.
+        Расходится ровно журнал — тот самый, по которому разбирают «куда делся
+        товар». Отсутствие этой проверки и есть причина, по которой удаление ТТН
+        в кабинете НП оставляло висячую бронь полтора года незамеченным.
+
+        Бронь считается снятой, если под ТТН есть `ttn_cancel` (отмена) или
+        `ttn_dispatch` (отправка: статус ушёл из `RESERVING_STATUSES`, и бронь
+        снялась вместе с ним). ТТН в `created`/`confirmed` не проверяются вовсе —
+        там бронь висеть и должна.
+        """
+        released_types = (StockMovementType.ttn_cancel, StockMovementType.ttn_dispatch)
+        # Только движения под ТТН: `intake` и `manual` к брони отношения не имеют, а
+        # приёмка — самый массовый тип в журнале (строка на позицию). Без этого
+        # фильтра почасовая сверка агрегировала бы весь журнал аккаунта целиком.
+        reserve_types = (StockMovementType.ttn_reserve, *released_types)
+        totals = (
+            select(
+                StockMovement.shipment_id.label("shipment_id"),
+                func.sum(
+                    case(
+                        (
+                            StockMovement.movement_type == StockMovementType.ttn_reserve,
+                            StockMovement.quantity_delta,
+                        ),
+                        else_=0,
+                    )
+                ).label("reserve"),
+                func.count()
+                .filter(StockMovement.movement_type.in_(released_types))
+                .label("released"),
+            )
+            .where(
+                StockMovement.account_id == account_id,
+                StockMovement.shipment_id.is_not(None),
+                StockMovement.movement_type.in_(reserve_types),
+            )
+            .group_by(StockMovement.shipment_id)
+            .subquery()
+        )
+        stmt = (
+            select(Shipment.id, Shipment.ttn_number, totals.c.reserve)
+            .join(totals, totals.c.shipment_id == Shipment.id)
+            .where(
+                Shipment.status.not_in(tuple(RESERVING_STATUSES)),
+                totals.c.reserve != 0,
+                totals.c.released == 0,
+            )
+            .order_by(Shipment.created_at)
+        )
+        rows = await self.session.execute(stmt)
+        return [(shipment_id, number, int(reserve)) for shipment_id, number, reserve in rows]
