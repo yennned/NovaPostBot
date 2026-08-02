@@ -124,6 +124,27 @@ async def poll_tracking_job(
         return result
 
 
+async def poll_returns_job(
+    *,
+    np_client: NovaPoshtaClient,
+    notifier: Notifier | None = None,
+    mutator: StockSource | None = None,
+    settings: Settings | None = None,
+) -> tracking.TrackingPollResult:
+    """Поздний проход возвратов — отдельной джобой, с частотой в часах, а не минутах."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await tracking.poll_returns(
+            session,
+            np_client=np_client,
+            notifier=notifier,
+            mutator=mutator,
+            settings=settings or get_settings(),
+        )
+        await session.commit()
+        return result
+
+
 async def clear_expired_duty_job(
     *,
     notifier: Notifier | None = None,

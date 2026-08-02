@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.bot.notify import BotNotifier
 from app.config import Settings, get_settings
-from app.jobs import clear_expired_duty_job, low_stock_job, poll_tracking_job
+from app.jobs import clear_expired_duty_job, low_stock_job, poll_returns_job, poll_tracking_job
 from app.logging_config import configure_logging, get_logger
 from app.novaposhta.client import NovaPoshtaClient
 from app.sheets import build_stock_source
@@ -60,6 +60,18 @@ async def poll_tracking_gated(
     )
 
 
+async def poll_returns_gated(
+    *, np_client, notifier, mutator, settings: Settings, now: datetime | None = None
+):
+    at = now or _now(settings)
+    if not _should_run_daytime(settings, at):
+        _log.debug("worker.skip", job="poll_returns", reason="closed")
+        return None
+    return await poll_returns_job(
+        np_client=np_client, notifier=notifier, mutator=mutator, settings=settings
+    )
+
+
 async def low_stock_gated(*, notifier, settings: Settings, now: datetime | None = None):
     at = now or _now(settings)
     if not _should_run_daytime(settings, at):
@@ -101,6 +113,22 @@ async def main() -> None:
         poll_tracking_gated,
         trigger="interval",
         seconds=settings.tracking_poll_seconds,
+        kwargs={
+            "np_client": np_client,
+            "notifier": notifier,
+            "mutator": mutator,
+            "settings": settings,
+        },
+        max_instances=1,
+        coalesce=True,
+    )
+    # Возвраты — отдельной джобой и на порядки реже трекинга: окно опроса узкое
+    # (`dispatched_at` за 3–21 день), каждый документ проверяется не чаще раза в
+    # сутки, поэтому проход стоит единицы запросов к НП.
+    scheduler.add_job(
+        poll_returns_gated,
+        trigger="interval",
+        seconds=settings.returns_poll_seconds,
         kwargs={
             "np_client": np_client,
             "notifier": notifier,

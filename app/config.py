@@ -158,6 +158,25 @@ class Settings(BaseSettings):
     # Воркер / SLA
     work_schedule_raw: str = Field(default="", alias="WORK_SCHEDULE")
     tracking_poll_seconds: int = Field(default=180, alias="TRACKING_POLL_SECONDS")
+    # Сколько ТТН забирает один проход трекинга. Раньше здесь стояла зашитая
+    # константа 200, и её не хватало: выборка сортировалась по `status_changed_at`,
+    # который двигается только при СМЕНЕ статуса, поэтому документы с неменяющимся
+    # статусом занимали слоты навсегда. Сортировка теперь по `tracking_updated_at`,
+    # но лимит всё равно должен быть настраиваемым — на случай всплеска.
+    tracking_batch_limit: int = Field(default=500, alias="TRACKING_BATCH_LIMIT")
+    # ТТН, не уехавшая за столько дней, выводится из трекинга: клиент завёл накладную
+    # и передумал. Без отсечки такие копятся в `confirmed` монотонно и снова выбирают
+    # лимит — просто медленнее, чем раньше.
+    tracking_stale_days: int = Field(default=14, alias="TRACKING_STALE_DAYS")
+
+    # Поздний опрос возвратов: после `dispatched` посылка уходит из горячего трекинга,
+    # но НП может развернуть её назад (неполучение — обычно 7 дней хранения, возврат
+    # приезжает к нам к 10–12-му дню). Возврат физически приходит на наш склад и
+    # должен вернуться в остаток, поэтому редкий опрос дешевле ручной дисциплины.
+    returns_poll_seconds: int = Field(default=21_600, alias="RETURNS_POLL_SECONDS")
+    returns_watch_min_days: int = Field(default=3, alias="RETURNS_WATCH_MIN_DAYS")
+    returns_watch_max_days: int = Field(default=21, alias="RETURNS_WATCH_MAX_DAYS")
+    returns_recheck_hours: int = Field(default=24, alias="RETURNS_RECHECK_HOURS")
     low_stock_poll_seconds: int = Field(default=900, alias="LOW_STOCK_POLL_SECONDS")
     low_stock_threshold: int = Field(default=3, alias="LOW_STOCK_THRESHOLD")
     # Период проверки авто-снятия дежурства (закрытие отделения), сек.
