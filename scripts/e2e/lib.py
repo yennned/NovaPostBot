@@ -540,6 +540,12 @@ async def build_persona(
     нагрузочного прогона; `NovaPoshtaClient` его принимает, но раньше сюда не
     прокидывался. `install_sheets_meter=False` — не вешать хронометраж на
     настоящий `SheetsClient`: у нагрузки свой счётчик с квотой.
+
+    **FSM берётся из Redis, как в проде.** Раньше сюда не передавался redis-клиент,
+    и харнесс жил на `MemoryStorage` — то есть не мог увидеть целый класс дефектов:
+    `RedisStorage` json-дампит FSM-data, и первое же непригодное для JSON значение
+    (`date`, `Decimal`, `UUID`) валит форму в проде, оставаясь невидимым здесь.
+    Redis харнессу и так обязателен — на нём кэш справочников НП строкой ниже.
     """
     from app.bot import build_dispatcher
     from app.config import get_settings
@@ -551,7 +557,9 @@ async def build_persona(
     np_client = NovaPoshtaClient(settings=settings, transport=np_transport)
     redis_client = redis_from_url(settings.redis_url)
     np_cache = NPReferenceCache(redis_client, settings=settings)
-    dispatcher = build_dispatcher(settings, np_client=np_client, np_cache=np_cache)
+    dispatcher = build_dispatcher(
+        settings, np_client=np_client, np_cache=np_cache, redis=redis_client
+    )
 
     sheets: SheetsMeter | None = None
     if install_sheets_meter:
