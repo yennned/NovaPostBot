@@ -6,8 +6,14 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from app.db.models.enums import StockMovementType, UserRole, UserStatus
-from app.db.repositories import StockBalanceRepository, UserRepository
+from app.db.models.enums import ShipmentStatus, StockMovementType, UserRole, UserStatus
+from app.db.repositories import (
+    ShipmentItemDraft,
+    ShipmentRepository,
+    StockBalanceRepository,
+    StockMovementRepository,
+    UserRepository,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,3 +168,104 @@ async def test_ledger_invariant_catches_drift(db_session: AsyncSession):
 
     drift = await repo.ledger_matches_balance(account_id)
     assert drift == [("SKU-1", 10, 42)]
+
+
+async def _shipment_with_reserve(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    ttn: str,
+    status: ShipmentStatus,
+    extra: StockMovementType | None = None,
+):
+    """ТТН с бронью в журнале; `extra` — движение, снимающее её."""
+    user = await UserRepository(session).create(
+        telegram_id=telegram_id,
+        full_name=f"Клієнт {telegram_id}",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+    account = await account_of(session, user)
+    shipments = ShipmentRepository(session)
+    created = await shipments.create(
+        client_id=user.id,
+        recipient_name="Іван",
+        ttn_number=ttn,
+        status=status,
+        items=[ShipmentItemDraft(sku="SKU-1", name="Кава", quantity=3, unit_price=Decimal("100"))],
+    )
+    shipment = await shipments.get_by_id(created.id)
+    movements = StockMovementRepository(session)
+    await movements.record_for_items(
+        client_id=user.id,
+        account_id=account.id,
+        shipment_id=shipment.id,
+        actor_user_id=user.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_reserve,
+        sign=-1,
+        comment="Резерв",
+    )
+    if extra is not None:
+        await movements.record_for_items(
+            client_id=user.id,
+            account_id=account.id,
+            shipment_id=shipment.id,
+            actor_user_id=user.id,
+            items=shipment.items,
+            movement_type=extra,
+            sign=1 if extra is StockMovementType.ttn_cancel else -1,
+            comment="Знято",
+        )
+    await session.flush()
+    return account.id, created.id
+
+
+async def test_unreleased_reserve_found_only_when_ttn_is_closed(db_session: AsyncSession):
+    """Бронь под закрытой ТТН — дефект; под открытой — норма.
+
+    `ledger_matches_balance` этого не видит в принципе: `ttn_reserve` не входит в
+    физические типы, поэтому «сумма дельт == остаток» держится и при висячей брони.
+    Отсутствие такой проверки и дало дефекту «ТТН удалили в кабинете НП» прожить
+    полтора года — нашёлся он живым прогоном, а не сверкой.
+
+    Мутация: убрать условие `Shipment.status.not_in(RESERVING_STATUSES)` — открытая
+    ТТН попадёт в выборку, и второй assert покраснеет.
+    """
+    repo = StockBalanceRepository(db_session)
+
+    open_account, _ = await _shipment_with_reserve(
+        db_session, telegram_id=1110, ttn="59001110", status=ShipmentStatus.confirmed
+    )
+    assert await repo.unreleased_reserves(open_account) == []
+
+    broken_account, broken_id = await _shipment_with_reserve(
+        db_session, telegram_id=1111, ttn="59001111", status=ShipmentStatus.cancelled
+    )
+    assert await repo.unreleased_reserves(broken_account) == [(broken_id, "59001111", -3)]
+
+
+@pytest.mark.parametrize(
+    "released_by", [StockMovementType.ttn_cancel, StockMovementType.ttn_dispatch]
+)
+async def test_unreleased_reserve_silent_when_reserve_was_released(
+    db_session: AsyncSession, released_by: StockMovementType
+):
+    """Бронь снята отменой или отправкой — жаловаться не на что.
+
+    `ttn_dispatch` считается снятием намеренно: отправка выводит ТТН из
+    `RESERVING_STATUSES`, бронь исчезает вместе со статусом, и парного `ttn_cancel`
+    в штатном пути нет. Без этой ветки сверка кричала бы на каждой отправленной ТТН.
+
+    Мутация: убрать `ttn_dispatch` из `released_types` — параметризованный случай
+    покраснеет.
+    """
+    telegram_id = 1120 + list(StockMovementType).index(released_by)
+    account_id, _ = await _shipment_with_reserve(
+        db_session,
+        telegram_id=telegram_id,
+        ttn=f"5900{telegram_id}",
+        status=ShipmentStatus.dispatched,
+        extra=released_by,
+    )
+    assert await StockBalanceRepository(db_session).unreleased_reserves(account_id) == []

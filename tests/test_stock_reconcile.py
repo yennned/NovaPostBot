@@ -167,3 +167,59 @@ async def test_ledger_drift_is_reported_as_our_bug(db_session: AsyncSession):
     # Лист с PG при этом сходится — то есть по сравнению с Google всё «хорошо».
     assert result.confirmed == () and result.pending == ()
     assert "це баг у боті" in (stock_reconcile.report_text(result) or "")
+
+
+async def test_unreleased_reserve_is_reported_even_when_sheet_agrees(db_session: AsyncSession):
+    """Бронь под закрытой ТТН видна сверке, хотя ни одна прежняя проверка её не ловит.
+
+    Остаток совпадает и с листом, и с журналом физических дельт: `ttn_reserve`
+    количество не двигает. Именно поэтому дефект «ТТН удалили в кабинете НП» жил
+    полтора года — сверка молчала, потому что смотреть было нечем.
+
+    Мутация: убрать `unreleased` из `reconcile_account` — оба assert покраснеют.
+    """
+    from decimal import Decimal
+
+    from app.db.models.enums import ShipmentStatus
+    from app.db.repositories import ShipmentItemDraft, ShipmentRepository, StockMovementRepository
+
+    stock_reconcile.reset_seen()
+    user = await UserRepository(db_session).create(
+        telegram_id=1806,
+        full_name="Клієнт 1806",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+    account = await account_of(db_session, user)
+    account.stock_sheet_key = "Магазин"
+    await db_session.flush()
+    await _stock(db_session, account.id, "A", 5)
+
+    shipments = ShipmentRepository(db_session)
+    created = await shipments.create(
+        client_id=user.id,
+        recipient_name="Іван",
+        ttn_number="59001806",
+        status=ShipmentStatus.cancelled,
+        items=[ShipmentItemDraft(sku="A", name="Кава", quantity=2, unit_price=Decimal("100"))],
+    )
+    shipment = await shipments.get_by_id(created.id)
+    await StockMovementRepository(db_session).record_for_items(
+        client_id=user.id,
+        account_id=account.id,
+        shipment_id=shipment.id,
+        actor_user_id=user.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_reserve,
+        sign=-1,
+        comment="Резерв",
+    )
+    await db_session.flush()
+
+    mirror, _ = _mirror([["A", "Кава", "", 5, "", 0, 5]])
+    result = await stock_reconcile.reconcile_account(db_session, account, mirror=mirror)
+
+    # Ни одна прежняя проверка расхождения не видит.
+    assert result.ledger_drift == () and result.confirmed == () and result.pending == ()
+    assert [(number, reserve) for _, number, reserve in result.unreleased] == [("59001806", -2)]
+    assert "ТТН 59001806" in (stock_reconcile.report_text(result) or "")

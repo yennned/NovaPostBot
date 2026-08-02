@@ -210,7 +210,7 @@ async def test_np_deleted_ttn_releases_reserve_in_ledger(db_session: AsyncSessio
     по проду 2026-08-03 — ТТН 20451492663031 от 21.07 держала `ttn_reserve` −8 без
     парного движения. Журнал — то, по чему разбирают «куда делся товар».
 
-    Мутация: убрать вызов `_release_reserve_in_ledger` — сумма движений станет −2.
+    Мутация: убрать вызов `release_reserve_in_ledger` — сумма движений станет −2.
     """
     from app.db.models.stock_movement import StockMovement
     from app.db.repositories import StockMovementRepository
@@ -259,7 +259,7 @@ async def test_np_deleted_ttn_does_not_double_release(db_session: AsyncSession):
     """
     from app.db.models.stock_movement import StockMovement
     from app.db.repositories import StockMovementRepository
-    from app.services.tracking import _release_reserve_in_ledger
+    from app.services.tracking import release_reserve_in_ledger
     from sqlalchemy import select
 
     client = await _active_client(db_session, telegram_id=932)
@@ -283,8 +283,8 @@ async def test_np_deleted_ttn_does_not_double_release(db_session: AsyncSession):
         comment="Резерв",
     )
 
-    await _release_reserve_in_ledger(db_session, shipment=shipment)
-    await _release_reserve_in_ledger(db_session, shipment=shipment)
+    await release_reserve_in_ledger(db_session, shipment=shipment)
+    await release_reserve_in_ledger(db_session, shipment=shipment)
 
     rows = list(
         await db_session.scalars(
