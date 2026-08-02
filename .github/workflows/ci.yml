@@ -335,5 +335,33 @@ jobs:
             docker compose ps --status running --services | grep -Eq '(^| )bot( |$)' || fail
             docker compose ps --status running --services | grep -Eq '(^| )worker( |$)' || fail
 
+            # «Running» и «работает» — не одно и то же. Процесс, поднявшийся без
+            # доступа к Redis или упавший в поллинге после старта, остаётся
+            # `running`, и деплой засчитывался бы успешным. Ждём пульс живости
+            # (см. app/utils/heartbeat.py): он идёт из того же event loop, что и
+            # работа, поэтому «healthy» здесь означает «действительно обслуживает».
+            #
+            # Потолок 150 с: `start_period` 40 с + `interval` 30 с × `retries` 3
+            # плюс запас на медленный старт. Не дождались — это `fail`, то есть
+            # штатный откат на предыдущий образ, а не молчаливый зелёный деплой.
+            wait_healthy() {
+              service="$1"
+              cid=$(docker compose ps -q "$service") || return 1
+              [ -n "$cid" ] || return 1
+              for _ in $(seq 1 30); do
+                state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo unknown)
+                case "$state" in
+                  healthy) echo "$service: healthy"; return 0 ;;
+                  none) echo "$service: healthcheck не объявлен — пропускаем"; return 0 ;;
+                  unhealthy) echo "$service: unhealthy"; return 1 ;;
+                esac
+                sleep 5
+              done
+              echo "$service: не стал healthy за 150 с (последнее состояние: $state)"
+              return 1
+            }
+            wait_healthy bot || fail
+            wait_healthy worker || fail
+
             docker compose ps
             docker image prune -f
