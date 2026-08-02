@@ -16,6 +16,7 @@ import pytest_asyncio
 from app.config import get_settings
 from app.db.base import Base, make_engine
 from app.utils import crypto
+from sqlalchemy import text as sa_text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -119,6 +120,10 @@ async def engine() -> AsyncIterator[AsyncEngine]:
     _assert_safe_test_database(get_settings().database_url)
     eng = make_engine()
     async with eng.begin() as conn:
+        # Индексы поиска — GIN по `gin_trgm_ops`, и без расширения `create_all`
+        # упадёт. В проде его ставит миграция; здесь схема строится из метаданных,
+        # поэтому расширение нужно завести самим.
+        await conn.execute(sa_text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield eng

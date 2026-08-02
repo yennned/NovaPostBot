@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import joinedload
 
+from app.config import get_settings
 from app.db.models.enums import ShipmentStatus, StockMovementType
 from app.db.models.shipment import Shipment, ShipmentItem
 from app.db.models.stock_movement import StockMovement
@@ -547,5 +549,18 @@ def _shipment_search_filters(query: str) -> list:
     ]
     parsed_date = _parse_query_date(stripped)
     if parsed_date is not None:
-        filters.append(cast(Shipment.created_at, Date) == parsed_date)
+        # Диапазоном, а не `cast(created_at, Date) == d`. Две причины, и обе
+        # существенные:
+        #
+        # 1. `cast` по колонке не sargable — индекс на `created_at` к нему
+        #    неприменим, и поиск по дате читает всю историю аккаунта целиком.
+        # 2. `cast` приводит timestamptz к дате в часовом поясе СЕССИИ (UTC), а
+        #    человек ищет по киевской дате. ТТН, созданная 1 августа в 00:30 по
+        #    Киеву, лежит в UTC как 31 июля 21:30 — и по запросу «01.08» не
+        #    находилась. Границы берём в киевском дне и сравниваем в нём же.
+        tz = ZoneInfo(get_settings().timezone)
+        start = datetime.combine(parsed_date, time.min, tzinfo=tz)
+        filters.append(
+            and_(Shipment.created_at >= start, Shipment.created_at < start + timedelta(days=1))
+        )
     return filters

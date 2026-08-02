@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -20,6 +20,12 @@ if TYPE_CHECKING:
 
 class StockMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "stock_movements"
+    __table_args__ = (
+        # Журнал по позиции склада: сверка и разбор «откуда взялось это число».
+        Index("ix_stock_movements_account_sku", "account_id", "sku"),
+        # Что именно списалось/забронировалось под конкретной ТТН.
+        Index("ix_stock_movements_shipment_type", "shipment_id", "movement_type"),
+    )
 
     # «Кто завёл движение», а не скоуп: компанию держит `account_id`. Переживает
     # физическое удаление человека как NULL — см. `e5f6a7b8c1d3`.

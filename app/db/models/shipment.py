@@ -12,7 +12,17 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Numeric, String, Text, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -28,6 +38,45 @@ if TYPE_CHECKING:
 
 class Shipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "shipments"
+    __table_args__ = (
+        # Все списки кабинета и очереди менеджера фильтруют по скоупу и сортируют
+        # по свежести. Одиночного индекса на `account_id` для этого мало: Postgres
+        # берёт по нему строки, а потом сортирует их целиком — на 15k ТТН/мес это
+        # сортировка десятков тысяч строк на каждый тап пагинации.
+        Index("ix_shipments_account_created", "account_id", text("created_at DESC")),
+        Index("ix_shipments_client_created", "client_id", text("created_at DESC")),
+        # Фильтр по «корзине» статусов идёт вместе со скоупом.
+        Index("ix_shipments_account_status", "account_id", "status"),
+        # Выборки воркера. Частичные: документ без номера трекать нечем.
+        # Заведены миграцией `a1b2c3d4e5f7`, но в метаданных их не было — из-за
+        # чего `alembic check` считал их «лишними в БД». Держим здесь, чтобы
+        # модель оставалась источником правды по схеме.
+        Index(
+            "ix_shipments_tracking_scan",
+            "status",
+            "tracking_updated_at",
+            postgresql_where=text("ttn_number IS NOT NULL"),
+        ),
+        Index(
+            "ix_shipments_return_watch",
+            "status",
+            "dispatched_at",
+            postgresql_where=text("ttn_number IS NOT NULL"),
+        ),
+        # Поиск идёт `ILIKE '%…%'` — B-tree к нему неприменим в принципе.
+        Index(
+            "ix_shipments_ttn_trgm",
+            "ttn_number",
+            postgresql_using="gin",
+            postgresql_ops={"ttn_number": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_shipments_recipient_trgm",
+            "recipient_name",
+            postgresql_using="gin",
+            postgresql_ops={"recipient_name": "gin_trgm_ops"},
+        ),
+    )
 
     # «Кто завёл ТТН» (у ТТН работника — сам работник), а не скоуп: компанию держит
     # `account_id`. Переживает удаление человека как NULL — см. `e5f6a7b8c1d3`.
