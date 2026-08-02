@@ -16,6 +16,7 @@ from app.jobs import (
     low_stock_job,
     poll_returns_job,
     poll_tracking_job,
+    stock_hold_sweep_job,
     stock_ingest_job,
     stock_mirror_job,
 )
@@ -199,6 +200,16 @@ async def main() -> None:
             max_instances=1,
             coalesce=True,
         )
+    # Дворник броней НЕ гейтится рабочими часами: бронь, оставшаяся от падения в
+    # 19:59, иначе провисела бы до утра и всё это время занижала доступный остаток.
+    scheduler.add_job(
+        stock_hold_sweep_job,
+        trigger="interval",
+        seconds=settings.stock_hold_sweep_seconds,
+        kwargs={"settings": settings},
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.add_job(
         clear_expired_duty_gated,
         trigger="interval",

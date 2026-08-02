@@ -6,15 +6,24 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+import structlog
+
 from app.config import Settings, get_settings
 from app.db.base import get_sessionmaker
 from app.db.models.enums import UserRole, UserStatus
-from app.db.repositories import ClientAccountRepository, LowStockAlertRepository, UserRepository
+from app.db.repositories import (
+    ClientAccountRepository,
+    LowStockAlertRepository,
+    StockHoldRepository,
+    UserRepository,
+)
 from app.novaposhta.client import NovaPoshtaClient
 from app.services import duty, notifications, stock_ingest, stock_mirror, tracking
 from app.services.inventory import InventoryItem, get_inventory_snapshot
 from app.services.notifications import Notifier
 from app.sheets import StockSource
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +211,22 @@ async def stock_mirror_job(
                     settings=current_settings,
                 )
         return results
+
+
+async def stock_hold_sweep_job(*, settings: Settings | None = None) -> int:
+    """Снять брони, пережившие TTL: процесс мог упасть между фазами сабмита.
+
+    Без дворника такая бронь висит вечно, `available` занижен, и клиент не может
+    продать собственный товар. Заниженный остаток — та сторона ошибки, которую
+    можно вычищать фоном; oversell так вычистить нельзя.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        released = await StockHoldRepository(session).sweep_expired()
+        await session.commit()
+        if released:
+            logger.info("stock_holds.swept", released=released)
+        return released
 
 
 async def clear_expired_duty_job(
