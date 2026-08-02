@@ -276,9 +276,16 @@ class Persona:
         bot: RecordingBot,
         log_path: Path,
         sheets: SheetsMeter | None = None,
+        chat_id: int | None = None,
     ) -> None:
         self.name = name
         self.telegram_id = telegram_id
+        # Свой чат нужен нагрузочному прогону: там N персон живут в ОДНОМ процессе
+        # (роутеры — модульные синглтоны, второй диспетчер собрать нельзя), и общий
+        # `outbox_chat_id` склеил бы их состояния — ключ FSM строится из
+        # `(bot_id, chat_id, user_id)`. У e2e поведение прежнее: `None` → чат
+        # владельца, иначе в режиме `real` не сработает `edit_message_text`.
+        self.chat_id = chat_id
         self.dp = dispatcher
         self.bot = bot
         self.sheets = sheets
@@ -299,8 +306,9 @@ class Persona:
 
     def _chat(self) -> Chat:
         # Чат — владельца: в режиме `real` иначе не сработает `edit_message_text`
-        # (message_id принадлежит именно этому чату).
-        return Chat(id=outbox_chat_id(), type="private")
+        # (message_id принадлежит именно этому чату). Нагрузочный прогон задаёт
+        # свой: см. комментарий у `chat_id` в `__init__`.
+        return Chat(id=self.chat_id or outbox_chat_id(), type="private")
 
     def _next(self) -> int:
         self._update_id += 1
@@ -521,8 +529,18 @@ async def build_persona(
     telegram_id: int,
     mode: str = "stub",
     run_id: str = "run",
+    np_transport: Any = None,
+    log_path: Path | None = None,
+    chat_id: int | None = None,
+    install_sheets_meter: bool = True,
 ) -> tuple[Persona, Any, Any]:
-    """Собрать диспетчер и персону. Вызывается ОДИН раз на процесс."""
+    """Собрать диспетчер и персону. Диспетчер — ОДИН на процесс.
+
+    `np_transport` — подменить транспорт НП (`httpx.MockTransport`) для
+    нагрузочного прогона; `NovaPoshtaClient` его принимает, но раньше сюда не
+    прокидывался. `install_sheets_meter=False` — не вешать хронометраж на
+    настоящий `SheetsClient`: у нагрузки свой счётчик с квотой.
+    """
     from app.bot import build_dispatcher
     from app.config import get_settings
     from app.novaposhta.cache import NPReferenceCache
@@ -530,13 +548,15 @@ async def build_persona(
     from redis.asyncio import from_url as redis_from_url
 
     settings = get_settings()
-    np_client = NovaPoshtaClient(settings=settings)
+    np_client = NovaPoshtaClient(settings=settings, transport=np_transport)
     redis_client = redis_from_url(settings.redis_url)
     np_cache = NPReferenceCache(redis_client, settings=settings)
     dispatcher = build_dispatcher(settings, np_client=np_client, np_cache=np_cache)
 
-    sheets = SheetsMeter()
-    sheets.install()
+    sheets: SheetsMeter | None = None
+    if install_sheets_meter:
+        sheets = SheetsMeter()
+        sheets.install()
 
     bot = RecordingBot(settings.bot_token, mode=mode, label=name)
     persona = Persona(
@@ -544,7 +564,41 @@ async def build_persona(
         telegram_id=telegram_id,
         dispatcher=dispatcher,
         bot=bot,
-        log_path=ARTIFACTS / run_id / f"{name}.jsonl",
+        log_path=log_path or (ARTIFACTS / run_id / f"{name}.jsonl"),
         sheets=sheets,
+        chat_id=chat_id,
     )
     return persona, np_client, redis_client
+
+
+def attach_persona(
+    *,
+    name: str,
+    telegram_id: int,
+    dispatcher: Any,
+    log_path: Path,
+    chat_id: int,
+) -> Persona:
+    """Ещё одна персона на УЖЕ собранном диспетчере.
+
+    `build_dispatcher` в процессе можно позвать один раз (роутеры в
+    `app/bot/handlers` — модульные синглтоны), но персон на нём может жить сколько
+    угодно: `dp.feed_update(bot, update)` принимает бота аргументом, а ключ FSM
+    строится из `(bot_id, chat_id, user_id)`. Именно так работает прод — один
+    процесс, много людей, — и именно эту топологию обязан воспроизводить
+    нагрузочный прогон. Разносить персон по процессам нельзя: у каждого был бы
+    свой пул коннектов и свой single-worker executor, а значит ожидание в пуле и
+    глубина очереди оказались бы тождественно нулевыми.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    bot = RecordingBot(settings.bot_token, mode="stub", label=name)
+    return Persona(
+        name=name,
+        telegram_id=telegram_id,
+        dispatcher=dispatcher,
+        bot=bot,
+        log_path=log_path,
+        chat_id=chat_id,
+    )

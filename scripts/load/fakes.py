@@ -270,7 +270,14 @@ class NovaPoshtaFake:
     reference_seconds: float = NP_REFERENCE_SECONDS
     unchanged_prefixes: tuple[str, ...] = ()
     silent_prefixes: tuple[str, ...] = ()
-    _serial: int = 59_000_000
+    #: С чего начинать нумерацию выданных ТТН. Обязан различаться между прогонами:
+    #: `shipments.ttn_number` уникален в схеме, и фиксированная база означала бы,
+    #: что второй прогон по той же базе получает `IntegrityError` на КАЖДОМ
+    #: сабмите. Наружу это выглядело как «⚠️ Сталася помилка» и 0 % созданных —
+    #: то есть как отказ системы под нагрузкой, хотя ломался стенд. Поймано
+    #: прогоном профилей: 1 ТТН/мин дал 100 %, все последующие — 0 %.
+    serial_base: int = 59_000_000
+    _serial: int = 0
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -338,7 +345,7 @@ class NovaPoshtaFake:
     def _data(self, body: dict[str, Any]) -> list[dict[str, Any]]:
         model, called = body["modelName"], body["calledMethod"]
         if model == "InternetDocument" and called == "save":
-            self._serial += 1
+            self._serial = (self._serial or self.serial_base) + 1
             return [
                 {
                     "Ref": f"doc-{self._serial}",
@@ -351,18 +358,12 @@ class NovaPoshtaFake:
             return [{"Cost": 70, "CostRedelivery": 20}]
         if model in ("Counterparty", "ContactPerson"):
             return [{"Ref": "cp-ref", "ContactPerson": {"data": [{"Ref": "ct-ref"}]}}]
-        if model == "Address" and called == "searchSettlements":
+        if model == "Address" and called == "getCities":
+            # Ровно та форма, которую разбирает `methods.get_cities`: `Ref` +
+            # `Description`. Первая версия отвечала на `searchSettlements` —
+            # метода, которого в коде нет вовсе, — и город не находился никогда.
             return [
-                {
-                    "Addresses": [
-                        {
-                            "Present": "м. Київ, Київська обл.",
-                            "DeliveryCity": "city-ref",
-                            "MainDescription": "Київ",
-                            "Ref": "settlement-ref",
-                        }
-                    ]
-                }
+                {"Ref": "city-ref", "Description": "Київ", "AreaDescription": "Київська"},
             ]
         if model == "Address" and called == "getWarehouses":
             return [

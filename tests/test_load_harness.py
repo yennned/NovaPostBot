@@ -230,3 +230,79 @@ def test_np_fake_latency_matches_measured_profile():
         return time.perf_counter() - started
 
     assert asyncio.run(_run()) >= 0.05
+
+
+def test_np_fake_answers_the_city_method_the_app_actually_calls():
+    """Город ищется через `Address.getCities`, а не `searchSettlements`.
+
+    Первая версия фейка отвечала на метод, которого в `app/novaposhta/` нет
+    вовсе, — и город не находился никогда. Прогон при этом не падал: он доходил
+    до шага «місто» и вставал, а выглядело это как отказ бизнес-логики.
+    """
+    from app.novaposhta.schemas import City
+
+    fake = NovaPoshtaFake()
+    rows = fake._data({"modelName": "Address", "calledMethod": "getCities"})
+
+    # Ровно тот разбор, что в `methods.get_cities`.
+    cities = [
+        City(ref=row["Ref"], name=row.get("Description", ""), area=row.get("AreaDescription"))
+        for row in rows
+        if row.get("Ref")
+    ]
+    assert cities and cities[0].name == "Київ"
+
+
+def test_operator_never_sleeps_past_the_deadline():
+    """Прогон обязан закончиться вовремя даже при низкой интенсивности.
+
+    При 1 ТТН/мин на 15 операторов интервал между сабмитами — 15 минут. Без
+    обрезки по дедлайну оператор уходил спать на весь интервал, и замер «на 90
+    секунд» висел четверть часа. Дефект тихий: скрипт не падает, он просто не
+    заканчивается, и это легко списать на «нагрузка большая».
+    """
+    from scripts.load.submit import _operator
+
+    class _Stub:
+        async def send(self, *_a, **_kw):
+            return {}
+
+        async def tap_data(self, *_a, **_kw):
+            return {}
+
+        @property
+        def screen(self):
+            raise AssertionError("до экрана дойти не должны: сценарий обрывается на /start")
+
+    async def _run() -> float:
+        import time
+
+        results: list = []
+        started = time.perf_counter()
+        # Интервал 15 минут против дедлайна в 1 секунду.
+        await asyncio.wait_for(
+            _operator(_Stub(), rate_per_minute=1 / 15, seconds=1.0, results=results),
+            timeout=10,
+        )
+        return time.perf_counter() - started
+
+    assert asyncio.run(_run()) < 5, "оператор проспал дедлайн прогона"
+
+
+def test_unreproduced_profile_is_reported_not_hidden(capsys):
+    """Заявленный профиль и фактический — разные вещи, расхождение обязано быть видно.
+
+    Интервал между сабмитами одного оператора — `operators*60/rate`. Если окно
+    прогона короче него, оператор успевает ровно один сабмит, и профиль
+    вырождается в «столько, сколько влезло». Первый sweep дал ровно это: цели 1,
+    3, 6 и 10 ТТН/мин показали **одинаковые** 10 ТТН/мин фактических — то есть
+    колена не искали вовсе, четыре раза измерили одну точку, а отчёт выглядел как
+    полноценная развёртка.
+    """
+    from scripts.load.submit import warn_if_profile_not_reproduced
+
+    warn_if_profile_not_reproduced(rate=1, operators=15, elapsed=90.0, achieved=10.0)
+    assert "не відтворено" in capsys.readouterr().out
+
+    warn_if_profile_not_reproduced(rate=10, operators=10, elapsed=180.0, achieved=9.8)
+    assert capsys.readouterr().out == ""
