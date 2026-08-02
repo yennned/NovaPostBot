@@ -291,15 +291,27 @@ async def _one_ttn(p: Persona, h: Human, *, index: int, submit: bool) -> dict[st
         return result
 
     # Картка: человек почти всегда что-то правит перед отправкой.
-    if h.maybe():
-        await p.tap_data("cab:ttn:setpm:")
-    if h.maybe():
+    #
+    # Каждая правка — только если её кнопка ЕСТЬ на экране. Прежде сценарий тапал
+    # `cab:ttn:setpm:` и `cab:ttn:back:city` вслепую, а карточка предлагает
+    # `cab:ttn:edit:pay` и `cab:ttn:edit:city`. Тап несуществующей кнопки сам по
+    # себе безвреден, но следом шёл `p.send(right)` — текст города в диалог, где
+    # его никто не ждёт. Бот на такое молчит совершенно правильно, а `validate`
+    # видел «бот не ответил ничем» и выносил 🔴 «признак падения в хендлере».
+    # Пять критических находок live2 — ровно это. Красный вердикт от ошибки
+    # харнесса хуже отсутствующего: настоящий сигнал в нём тонет.
+    if h.maybe() and p.screen.find_data("cab:ttn:edit:pay"):
+        await p.tap_data("cab:ttn:edit:pay")
+    if h.maybe() and p.screen.find_data("cab:ttn:recompute"):
         await p.tap_data("cab:ttn:recompute")
-    if h.maybe():
-        await p.tap_data("cab:ttn:back:city")
-        await p.send(right)
-        await _resolve_city(p)
-        await p.tap_data("cab:ttn:wh:")
+    if h.maybe() and p.screen.find_data("cab:ttn:edit:city"):
+        await p.tap_data("cab:ttn:edit:city")
+        # Текст шлём, только если бот действительно ждёт название города.
+        if "місто" in p.screen.text.lower():
+            await p.send(right)
+            await _resolve_city(p)
+            if p.screen.find_data("cab:ttn:wh:"):
+                await p.tap_data("cab:ttn:wh:")
 
     result["card_reached"] = bool(p.screen.find_data("cab:ttn:send"))
     if not result["card_reached"]:
