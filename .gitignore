@@ -58,3 +58,4 @@ docker-compose.override.yml
 
 # --- E2E-харнесс: логи прогонов и срезы боевой БД (данные клиентов, не в git) ---
 scripts/e2e/artifacts/
+scripts/load/artifacts/
