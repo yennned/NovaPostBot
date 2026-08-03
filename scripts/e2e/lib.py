@@ -588,6 +588,33 @@ async def build_persona(
     return persona, np_client, redis_client
 
 
+async def open_stepper(persona: Persona, *, attempts: int | None = None) -> bool:
+    """Тыкать позиции пикера, пока не откроется степпер количества.
+
+    Позиция с нулевым доступным остатком степпер не открывает: бот отвечает
+    алертом и оставляет пикер. Человек в этом месте просто тычет в следующий
+    товар — отсюда перебор.
+
+    Вынесено сюда, потому что идиома была скопирована в трёх драйверах
+    (`cascade`, `load/submit`, `insured_probe`) и правка ей доставалась по
+    одному: разбор PR #165 нашёл её только в каскаде. Теперь точка одна.
+
+    `attempts=None` — перебрать ровно столько позиций, сколько на экране: у
+    крупного аккаунта верхние выкупаются бронями самого прогона, и фиксированная
+    шестёрка упиралась в них раньше, чем в конец страницы.
+    """
+    if attempts is None:
+        attempts = sum(
+            1 for b in persona.screen.inline if b.data and b.data.startswith("cab:ttn:pick:")
+        )
+    for attempt in range(max(attempts, 1)):
+        if not await persona.tap_data("cab:ttn:pick:", nth=attempt):
+            break
+        if persona.screen.find_data("cab:ttn:qok"):
+            return True
+    return bool(persona.screen.find_data("cab:ttn:qok"))
+
+
 def attach_persona(
     *,
     name: str,

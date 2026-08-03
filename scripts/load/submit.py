@@ -190,6 +190,10 @@ async def _one_submit(persona, *, index: int) -> dict:
     персоны нет экрана вовсе, и все тапы уходят в пустоту (`missing: true`) —
     первый прогон этого драйвера дал ровно это.
     """
+    # Импорт здесь, как и у остальных `scripts.e2e.lib` в этом файле: окружение
+    # стенда обязано лечь в `os.environ` раньше, чем что-либо дёрнет настройки.
+    from scripts.e2e.lib import open_stepper
+
     started = time.perf_counter()
     outcome: dict = {"index": index, "submitted": False, "failed_at": None}
     try:
@@ -213,12 +217,7 @@ async def _one_submit(persona, *, index: int) -> dict:
         # прогон упёрся ровно в это: доходил до карточки и получал отказ.
         await persona.tap_data("cab:ttn:search")
         await persona.send(_PICK_SKU)
-        for attempt in range(6):
-            if not await persona.tap_data("cab:ttn:pick:", nth=attempt):
-                break
-            if persona.screen.find_data("cab:ttn:qok"):
-                break
-        if not persona.screen.find_data("cab:ttn:qok"):
+        if not await open_stepper(persona):
             outcome["failed_at"] = "picker"
             outcome["screen"] = persona.screen.text[:200]
             return outcome

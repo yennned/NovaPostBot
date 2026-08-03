@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from scripts.e2e.human import GARBAGE_PHONE, GARBAGE_WEIGHT, Human
-from scripts.e2e.lib import ARTIFACTS, Persona
+from scripts.e2e.human import GARBAGE_PHONE, GARBAGE_QTY, GARBAGE_WEIGHT, Human
+from scripts.e2e.lib import ARTIFACTS, Persona, open_stepper
 
 #: Города, куда отправляем. Реальные, разные — чтобы задеть кэш справочников НП
 #: и по попаданиям/промахам увидеть его эффект под нагрузкой.
@@ -148,6 +148,34 @@ async def _spread_over_catalogue(p: Persona, h: Human) -> None:
             return
 
 
+#: «Макс (7)» на кнопке степпера — единственное место, где доступный остаток
+#: позиции виден харнессу. Читаем его, а не угадываем.
+_MAX_QTY_RE = re.compile(r"Макс\s*\((\d+)\)")
+
+
+def _valid_qty(p: Persona, h: Human) -> str:
+    """Количество, которое степпер точно примет, — но не всегда 1.
+
+    Раньше здесь стояла константа «2», и на позиции с остатком в одну штуку бот
+    честно отвечал «Кількість має бути 1–1». Экран отказа кнопок не несёт, и
+    следующий тап по `cab:ttn:qok` писал `missing_button` — каскад сам себе
+    выдумывал дефект бота (живой прогон 2026-08-03).
+
+    Заменить константу на «1» было бы дешевле, но тогда ручной ввод всегда
+    обнулял бы набранное степпером, и многоштучных позиций этот путь не давал бы
+    вовсе — а на них держатся и сверка кошика, и гейт oversell, и арифметика
+    брони. Поэтому берём потолок с самой кнопки и выбираем в его пределах.
+
+    Верхняя граница — 3, а не `available`: корзина прогона не должна выкупать
+    склад, иначе следующие ТТН упрутся в гейт по остатку, которого мы сами и
+    лишили. `randrange(hi) + 1` вместо `randrange(1, hi + 1)`: так значение
+    остаётся валидным при любом стабе rng в тестах.
+    """
+    match = _MAX_QTY_RE.search(" ".join(b.text for b in p.screen.inline))
+    available = int(match.group(1)) if match else 1
+    return str(h.rng.randrange(max(min(available, 3), 1)) + 1)
+
+
 async def _page_forward(p: Persona) -> bool:
     """Перелистнуть вперёд. По префиксу `cab:ttn:page:` тапать нельзя — он общий
     у ◀ и ▶, и со второй страницы первой совпадёт ◀, то есть «листание» топталось
@@ -189,36 +217,21 @@ async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
         if h.maybe():  # сузить категорией
             await _pick_category(p, h)
 
-        # Позиция с нулевым доступным остатком степпер не открывает — бот
-        # отвечает алертом и оставляет пикер. Человек в этом месте просто тычет
-        # в следующий товар, поэтому перебираем, пока степпер не появится.
-        # Перебираем всю страницу, а не первые шесть: у крупного аккаунта верхние
-        # позиции первыми и выкупаются бронями самого прогона.
-        picks = sum(1 for b in p.screen.inline if b.data and b.data.startswith("cab:ttn:pick:"))
-        for attempt in range(max(picks, 1)):
-            if not await p.tap_data("cab:ttn:pick:", nth=attempt):
-                break
-            if p.screen.find_data("cab:ttn:qok"):
-                break
-        if not p.screen.find_data("cab:ttn:qok"):
+        if not await open_stepper(p):
             break
 
         # Степпер: нервный плюс-минус, иногда ручной ввод с мусором.
         await p.tap_data("cab:ttn:qd:1")
         if h.maybe():
-            await h.double_tap("\\+5|cab:ttn:qd:5")
+            # Только по тексту: `Persona.tap` резолвит паттерн через `Screen.find`,
+            # а тот — регексп по подписи кнопки, не по `callback_data`. Альтернатива
+            # `cab:ttn:qd:5` не совпала бы никогда и лишь выглядела бы страховкой.
+            await h.double_tap("\\+5")
         if h.maybe():
             await p.tap_data("cab:ttn:qnum")
-            # «Правильное» значение — 1, а не 2: степпер открывается и у позиции,
-            # где на остатке ровно одна штука, и тогда двойка тоже отвергается
-            # («Кількість має бути 1–1»). Экран отказа кнопок не несёт, следующий
-            # тап по `qok` писал `missing_button` — то есть каскад сам себе
-            # выдумывал находку. Единица проходит всегда: пикер не открывает
-            # степпер при нулевом доступном остатке.
-            await h.garbage_then(GARBAGE_QTY_POOL, "1", count=1)
-        if not p.screen.find_data("cab:ttn:qok"):
+            await h.garbage_then(GARBAGE_QTY, _valid_qty(p, h), count=1)
+        if not await p.tap_data("cab:ttn:qok"):
             break
-        await p.tap_data("cab:ttn:qok")
         added += 1
 
         if n < items - 1 and not p.screen.find_data("cab:ttn:pick:"):
@@ -270,9 +283,6 @@ async def _check_cart_edit(p: Persona) -> None:
                 "detail": f"сумма товаров {before} → {after} без изменения количества",
             }
         )
-
-
-GARBAGE_QTY_POOL = ["-3", "0", "мільйон"]
 
 
 def _extract_ttn(entry: dict[str, Any]) -> str | None:
