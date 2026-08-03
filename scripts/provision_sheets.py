@@ -35,6 +35,7 @@ from typing import Any
 import gspread
 from app.config import get_settings
 from app.db.base import get_engine, get_sessionmaker
+from app.db.models.client_account import ClientAccount, ClientAccountMembership
 from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB, ViewRow, _view_data_row
@@ -344,33 +345,67 @@ def share_readonly(book: Any, emails: list[str]) -> None:
         book.share(None, perm_type="anyone", role="reader", with_link=True)
 
 
-async def clients_without_view_book() -> list[tuple[str, str, str]]:
-    """Активные клиенты без книги-зеркала → `(user_id, label, source_tab)`.
+async def accounts_without_view_book() -> list[tuple[str, str, str]]:
+    """Аккаунты без книги-зеркала → `(account_id, label, source_tab)`.
 
-    `label` = `full_name`/`telegram_id` (для названия книги); `source_tab` =
-    `stock_sheet_key` (имя вкладки клиента в основном «Складі» для подтяжки остатков).
+    `label` — для названия книги; `source_tab` — вкладка аккаунта в основном
+    «Складі» (`stock_sheet_key`), откуда подтягивается остаток для оформления.
+
+    Скоуп — аккаунт, а не пользователь, и это не косметика. Миграция
+    `d4e5f6a7b8c0` (2026-07-15) снесла `users.stock_sheet_key` и
+    `users.stock_view_book_id`: склад принадлежит бизнес-аккаунту, у работника
+    своего листа нет. Запрос здесь остался по `User` и с тех пор падал
+    `AttributeError` ещё на построении — то есть `--client-books` не работал
+    вовсе, а `--attach-book` вместе с ним.
     """
     sm = get_sessionmaker()
     async with sm() as session:
         rows = (
             await session.execute(
-                select(User.id, User.full_name, User.telegram_id, User.stock_sheet_key).where(
-                    User.role == UserRole.client,
-                    User.status == UserStatus.active,
-                    User.stock_view_book_id.is_(None),
-                )
+                select(
+                    ClientAccount.id,
+                    ClientAccount.name,
+                    ClientAccount.stock_sheet_key,
+                ).where(ClientAccount.stock_view_book_id.is_(None))
             )
         ).all()
     return [
-        (str(uid), (name or str(tg)).strip(), (ssk or name or str(tg)).strip())
-        for uid, name, tg, ssk in rows
+        (str(aid), (name or str(aid)).strip(), (ssk or name or str(aid)).strip())
+        for aid, name, ssk in rows
     ]
+
+
+#: У сервис-аккаунта нет собственного Drive: любая попытка создать файл упирается
+#: в «The user's Drive storage quota has been exceeded» (403). Это не настройка и
+#: не квота, которую можно поднять, — у SA просто нет хранилища. Проверено живьём
+#: на боевом ключе 2026-08-03. Обходы: Shared Drive (нужен Workspace, у нас личные
+#: Gmail) или создание книги человеком с последующим `--attach-book`.
+NO_DRIVE_QUOTA_HINT = (
+    "Сервіс-акаунт не може створювати файли в Google Drive — у нього немає власного "
+    "сховища (403 storage quota exceeded). Це не лікується прапорцем.\n"
+    "Робочий шлях для книги-дзеркала:\n"
+    "  1. Власник створює порожню таблицю своїм Google-акаунтом;\n"
+    "  2. ділиться нею на сервіс-акаунт як Редактора;\n"
+    "  3. PYTHONPATH=. .venv/bin/python scripts/provision_sheets.py \\\n"
+    "         --env-file .env.prod --attach-book <URL> --for <акаунт>\n"
+    "Скрипт оформить «Товари», роздасть read-only і запише stock_view_book_id."
+)
+
+
+def _is_drive_quota_error(exc: Exception) -> bool:
+    """Отличить «у SA нет Drive» от прочих сбоев Google.
+
+    Важно именно отличить: остальные ошибки создания книги — про конкретный
+    аккаунт, и цикл обязан идти дальше. Эта — общая, и ещё двадцать таких же
+    сообщений подряд только спрячут причину.
+    """
+    return "storage quota" in str(exc).lower()
 
 
 async def provision_client_view_books(
     gc: gspread.Client, clients: list[tuple[str, str, str]], emails: list[str]
 ) -> int:
-    """Создать по книге-зеркалу на клиента, записать id в БД, раздать read-only.
+    """Создать по книге-зеркалу на аккаунт, записать id в БД, раздать read-only.
 
     Порядок: создать книгу → записать `stock_view_book_id` (свой короткий сеанс,
     БД-соединение не висит на медленных вызовах Drive) → только потом шаринг. Так ни
@@ -381,21 +416,23 @@ async def provision_client_view_books(
     """
     sm = get_sessionmaker()
     created = 0
-    for user_id, label, source_tab in clients:
+    for account_id, label, source_tab in clients:
         try:
             book = gc.create(f"Склад — {label}")
             format_view_book(gc, book, source_tab)  # оформить «Товари» как основной «Склад»
-        except Exception as exc:  # админ-скрипт: логируем и продолжаем со след. клиентом
+        except Exception as exc:  # админ-скрипт: логируем и продолжаем со след. аккаунтом
+            if _is_drive_quota_error(exc):
+                raise SystemExit(NO_DRIVE_QUOTA_HINT) from exc
             print(f"  ! {label}: не вдалося створити книгу: {exc}")
             continue
         # book_id фиксируем в БД СРАЗУ после создания — до шаринга: даже если шаринг
         # упадёт, книга «отслежена» и повторный прогон не создаст дубль-сироту.
         async with sm() as session:
-            user = await session.get(User, uuid.UUID(user_id))
-            if user is None:
-                print(f"  ! {label}: клієнта вже нема в БД — книга {book.url} осиротіла")
+            account = await session.get(ClientAccount, uuid.UUID(account_id))
+            if account is None:
+                print(f"  ! {label}: акаунта вже нема в БД — книга {book.url} осиротіла")
                 continue
-            user.stock_view_book_id = book.id
+            account.stock_view_book_id = book.id
             await session.commit()
         try:
             share_readonly(book, emails)
@@ -444,32 +481,40 @@ async def _resolve_client(ref: str) -> tuple[str, str, str]:
     подтяжка остатков не найдёт лист). Требует ровно одно совпадение, иначе `SystemExit`.
     """
     ref = ref.strip()
-    cond = User.telegram_id == int(ref) if ref.isdigit() else User.full_name.ilike(f"%{ref}%")
     sm = get_sessionmaker()
     async with sm() as session:
+        if ref.isdigit():
+            # Телефон/telegram_id указывает на человека — от него идём к его аккаунту.
+            cond = ClientAccount.id.in_(
+                select(ClientAccountMembership.account_id)
+                .join(User, User.id == ClientAccountMembership.user_id)
+                .where(User.telegram_id == int(ref))
+            )
+        else:
+            cond = ClientAccount.name.ilike(f"%{ref}%")
         rows = (
             await session.execute(
-                select(User.id, User.full_name, User.telegram_id, User.stock_sheet_key).where(
-                    User.role == UserRole.client, cond
+                select(ClientAccount.id, ClientAccount.name, ClientAccount.stock_sheet_key).where(
+                    cond
                 )
             )
         ).all()
     if not rows:
-        raise SystemExit(f"Клієнта за '{ref}' не знайдено (role=client).")
+        raise SystemExit(f"Акаунта за '{ref}' не знайдено.")
     if len(rows) > 1:
-        names = ", ".join(f"{n or '—'} ({t})" for _, n, t, _ in rows)
-        raise SystemExit(f"За '{ref}' кілька клієнтів: {names}. Уточніть telegram_id.")
-    uid, name, tg, ssk = rows[0]
-    return str(uid), (name or str(tg)), (ssk or name or str(tg))
+        names = ", ".join(f"{n or '—'} ({i})" for i, n, _ in rows)
+        raise SystemExit(f"За '{ref}' кілька акаунтів: {names}. Уточніть telegram_id.")
+    aid, name, ssk = rows[0]
+    return str(aid), (name or str(aid)), (ssk or name or str(aid))
 
 
-async def _save_view_book_id(user_id: str, book_id: str) -> None:
+async def _save_view_book_id(account_id: str, book_id: str) -> None:
     sm = get_sessionmaker()
     async with sm() as session:
-        user = await session.get(User, uuid.UUID(user_id))
-        if user is None:
-            raise SystemExit("Клієнта вже нема в БД.")
-        user.stock_view_book_id = book_id
+        account = await session.get(ClientAccount, uuid.UUID(account_id))
+        if account is None:
+            raise SystemExit("Акаунта вже нема в БД.")
+        account.stock_view_book_id = book_id
         await session.commit()
 
 
@@ -1405,19 +1450,19 @@ def main() -> None:
         if not args.attach_for:
             raise SystemExit("--attach-book потребує --for <telegram_id|фрагмент ПІБ>")
         book_id = _extract_book_id(args.attach_book)
-        user_id, label, source_tab = _run_db(_resolve_client(args.attach_for))
+        account_id, label, source_tab = _run_db(_resolve_client(args.attach_for))
         url = attach_view_book(gc, book_id, source_tab)
-        _run_db(_save_view_book_id(user_id, book_id))
+        _run_db(_save_view_book_id(account_id, book_id))
         print(f"Привʼязано: {label} → {url}\nstock_view_book_id = {book_id}")
         return
 
     # --- Персональные книги-зеркала клиентов (read-only) ---
     if args.client_books:
-        pending = _run_db(clients_without_view_book())
-        print(f"\nКниги-зеркала для клиентов без stock_view_book_id: {len(pending)}")
+        pending = _run_db(accounts_without_view_book())
+        print(f"\nКниги-зеркала для аккаунтов без stock_view_book_id: {len(pending)}")
         if pending:
             created = _run_db(provision_client_view_books(gc, pending, emails))
-            print(f"stock_view_book_id записан для {created} з {len(pending)} клиентів.")
+            print(f"stock_view_book_id записан для {created} з {len(pending)} акаунтів.")
         # Наполнение строк «Товари» делает рантайм-синк при следующей операции клиента.
         return
 
