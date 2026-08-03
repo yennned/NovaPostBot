@@ -182,6 +182,15 @@ async def stock_ingest_job(
             await session.commit()
         else:
             await session.rollback()
+            # Признак остановки пишем ПОСЛЕ отката и своим коммитом: он должен
+            # пережить откат пачки, потому что читает его зеркало — иначе оно
+            # примет приёмку, приехавшую в лист, за ручную правку человека.
+            await stock_ingest.mark_halted(
+                session,
+                book_id=current_settings.sheets_stock_book_id,
+                reason=result.halted_reason,
+            )
+            await session.commit()
             if notifier is not None and stock_ingest.should_notify_halt(
                 current_settings.sheets_stock_book_id, result.halted_reason
             ):

@@ -39,6 +39,15 @@ class StockIntakeCursor(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: вовсе (fail closed) + сигнал владельцу. Угадывать здесь нечего.
     last_row_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    #: Почему ингест остановлен, или `NULL` — он здоров. Хранится в БД, а не в памяти
+    #: процесса, потому что читатель здесь другой: **зеркало**. Пока ингест стоит,
+    #: приёмка меняет ячейку «Кількість», а зеркало видит расхождение с
+    #: `mirrored_quantity` и не может отличить её от правки человека — применяет
+    #: движением `manual` вместо `intake`, а превысившую `STOCK_MANUAL_DELTA_LIMIT`
+    #: отклоняет и возвращает в ячейку значение из PG, то есть стирает приёмку из
+    #: листа. Признак останова снимает эту слепоту.
+    halted_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
     last_ingested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

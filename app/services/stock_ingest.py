@@ -200,9 +200,12 @@ async def ingest_intake_history(
         backlog=window.truncated,
         reanchored_from=reanchored_from,
     )
-    # Проход дошёл до конца — значит прошлая остановка разобрана. Забываем, что о
-    # ней уже сообщали: иначе следующая такая же осталась бы без сигнала до
-    # перезапуска воркера, то есть тем тише, чем чаще она повторяется.
+    # Проход дошёл до конца — значит прошлая остановка разобрана. Снимаем признак
+    # (его читает зеркало) и забываем, что о ней уже сообщали: иначе следующая
+    # такая же осталась бы без сигнала до перезапуска воркера, то есть тем тише,
+    # чем чаще она повторяется.
+    if cursor.halted_reason is not None:
+        await cursors.set_halted(cursor, reason=None)
     _forget_halt(book_id)
     return IngestResult(
         applied=applied,
@@ -226,6 +229,20 @@ def _comment(event: IntakeEvent) -> str:
     if event.who:
         parts.append(event.who)
     return " · ".join(parts)
+
+
+async def mark_halted(session: AsyncSession, *, book_id: str, reason: str) -> None:
+    """Записать остановку в водораздел — ОТДЕЛЬНОЙ транзакцией, после отката прохода.
+
+    Внутри `ingest_intake_history` это сделать нельзя: проход с остановкой
+    откатывается целиком (`stock_ingest_job`), и признак уехал бы вместе с ним. А
+    он нужен зеркалу, которое иначе примет приёмку за ручную правку.
+    """
+    cursors = StockIntakeCursorRepository(session)
+    cursor = await cursors.get(book_id=book_id, tab=HISTORY_TAB)
+    if cursor is None or cursor.halted_reason == reason:
+        return
+    await cursors.set_halted(cursor, reason=reason)
 
 
 def should_notify_halt(book_id: str, reason: str) -> bool:

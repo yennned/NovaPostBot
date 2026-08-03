@@ -32,6 +32,16 @@ class StockIntakeCursorRepository(BaseRepository):
         await self._add(cursor)
         return cursor
 
+    async def set_halted(self, cursor: StockIntakeCursor, *, reason: str | None) -> None:
+        """Отметить остановку ингеста (или снять отметку).
+
+        Пишется отдельно от дельт и водораздела, потому что уезжает другой
+        транзакцией: проход с остановкой откатывается целиком (`stock_ingest_job`),
+        а признак обязан пережить этот откат — иначе зеркало о нём не узнает.
+        """
+        cursor.halted_reason = reason
+        await self.session.flush()
+
     async def rebase(self, cursor: StockIntakeCursor, *, row: int) -> None:
         """Переставить водораздел на ТУ ЖЕ строку, уехавшую на новый номер.
 
