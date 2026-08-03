@@ -57,21 +57,28 @@ def test_parse_reply_markup_is_bottom_panel() -> None:
 
 
 def test_error_markers_match_real_error_texts() -> None:
-    """Маркеры должны совпадать с текстами боевого errors-router.
+    """Маркеры должны совпадать с боевыми текстами отказа.
 
-    Разъедутся — прогон перестанет отличать «экран отрисован» от «хендлер упал и
-    пользователю показали заглушку», и отчёт станет ложно-зелёным.
+    Разъедутся — прогон перестанет отличать «экран отрисован» от «клиент получил
+    отказ», и отчёт станет ложно-зелёным.
+
+    Источников два, и это не небрежность. Первый — глобальный errors-router:
+    хендлер упал, показана заглушка. Второй — отказ НП на самом сабмите: хендлер
+    отработал штатно, но документа нет. Второй маркер добавлен после прогона
+    2026-08-03, где такой отказ не попал в отчёт вовсе.
     """
-    from app.bot.handlers import errors
+    from app.bot.handlers import errors, ttn
+    from app.services.exceptions import TtnCreationFailed
 
     live_texts = (
         errors._UNEXPECTED_TEXT,
         errors._KEY_UNREADABLE_TEXT,
         errors._STOCK_UNAVAILABLE_TEXT,
+        ttn._submit_error_text(TtnCreationFailed("Description is not valid"), {}),
     )
     for marker in ERROR_MARKERS:
         assert any(marker in text for text in live_texts), (
-            f"маркер «{marker}» не знайдено в errors.py"
+            f"маркер «{marker}» не знайдено в боєвих текстах"
         )
 
 
@@ -382,3 +389,131 @@ async def test_category_pick_is_silent_without_real_categories() -> None:
 
     assert persona.taps == []
     assert persona.defects == []
+
+
+def test_verdict_counts_attempts_not_only_error_screens() -> None:
+    """Вердикт обязан видеть знаменатель.
+
+    Прежде вердикт складывался только из находок, а находки рождались из экранов
+    ошибки. Отказ НП на сабмите (`Description is not valid`) экраном ошибки не
+    считался, и прогон 2026-08-03 отчитался 🟢 ЧИСТО, потеряв 17 попыток из 60:
+    клиент проходил всю форму и не получал документ.
+
+    Мутация: вернуть `_check_throughput`, смотрящий только на `submitted`
+    без разбора причин, — пропадёт критичность отказа НП.
+    """
+    from scripts.e2e.validate import _check_throughput
+
+    summaries = [
+        {
+            "persona": "veronika",
+            "cascade": {
+                "created": [
+                    {"submitted": True, "ttn_number": "1"},
+                    {"submitted": False, "reject_reason": "❌ Не вдалося створити ТТН: bad"},
+                    {"submitted": False, "failed_at": "cart"},
+                ],
+                "dry_runs": [],
+            },
+        }
+    ]
+    findings = _check_throughput(summaries)
+
+    rejected = {f["detail"]: f["severity"] for f in findings}
+    assert any("Не вдалося створити ТТН" in d and s == "high" for d, s in rejected.items())
+    assert any("cart" in d and s == "medium" for d, s in rejected.items())
+    assert all("1 з 3" in f["detail"] for f in findings), "у знахідки має бути знаменник"
+
+
+def test_verdict_is_critical_when_nothing_was_created() -> None:
+    """Ноль созданных ТТН — критично, остальные метрики отчёта тогда пусты.
+
+    Прогон, где 100 % сабмитов упали, имеет отличный p95: отказ быстрее успеха.
+    """
+    from scripts.e2e.validate import _check_throughput
+
+    findings = _check_throughput(
+        [{"persona": "x", "cascade": {"created": [{"submitted": False}] * 5}}]
+    )
+
+    assert [f["severity"] for f in findings] == ["high"]
+    assert findings[0]["rule"] == "ttn_created"
+
+
+def test_throughput_silent_without_cascade() -> None:
+    """Прогон без каскада (одни сценарии-пробники) не должен выдумывать находок."""
+    from scripts.e2e.validate import _check_throughput
+
+    assert _check_throughput([{"persona": "x", "cascade": {}}]) == []
+
+
+def test_collect_findings_runs_the_throughput_check() -> None:
+    """Проверка обязана быть подключена, а не просто существовать.
+
+    Прогон 2026-08-03 отчитался 🟢 ЧИСТО не потому, что проверок не было, а
+    потому что ни одна не смотрела на знаменатель. Отдельно проверяем факт
+    вызова: выпавшую из цепочки проверку иначе не отличить от молчаливой.
+
+    Мутация: убрать `_check_throughput` из `collect_findings` — тест покраснеет.
+    """
+    from scripts.e2e.validate import collect_findings
+
+    findings = collect_findings(
+        steps=[],
+        before={"shipments": []},
+        after={"shipments": [], "movements": [], "users": []},
+        summaries=[{"persona": "x", "cascade": {"created": [{"submitted": False}]}}],
+    )
+
+    assert [f["rule"] for f in findings] == ["ttn_created"]
+
+
+def test_submit_failure_is_an_error_marker() -> None:
+    """Отказ НП на сабмите — маркер отказа, а не «просто экран».
+
+    Мутация: убрать `SUBMIT_FAILED_MARKER` из `ERROR_MARKERS` — тест покраснеет.
+    Без этого прогон считает такой шаг успешным: заглушки errors-router нет,
+    исходящее сообщение есть, молчания нет.
+    """
+    from scripts.e2e.lib import SUBMIT_FAILED_MARKER
+
+    assert SUBMIT_FAILED_MARKER in ERROR_MARKERS
+
+
+def test_validate_import_does_not_load_prod_env() -> None:
+    """Импорт валидатора не должен переводить процесс на боевое окружение.
+
+    `load_stand_env` делает `load_dotenv(".env.prod", override=True)`: боевые
+    `DATABASE_URL`, `BOT_TOKEN`, ключи. При загрузке на импорте любой тест, зовущий
+    `get_settings.cache_clear()`, дальше работал бы с продом — а гейт безопасной
+    тестовой БД в `conftest` отрабатывает один раз на старте сессии и этого уже
+    не заметит.
+
+    Поймано полным прогоном: после добавления тестов на вердикт два чужих теста
+    начали видеть боевой `np_sender_warehouse_ref`.
+
+    Мутация: вынести `load_stand_env(...)` из-под `if __name__ == "__main__"`.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from scripts.e2e.env import DEFAULT_ENV_FILE
+
+    if not DEFAULT_ENV_FILE.exists():
+        return  # на CI боевого файла нет — травить нечем
+
+    probe = (
+        "import os;"
+        "before = os.environ.get('NP_SENDER_WAREHOUSE_REF');"
+        "import scripts.e2e.validate;"
+        "print(before == os.environ.get('NP_SENDER_WAREHOUSE_REF'))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=os.getcwd(),
+        env={**os.environ, "PYTHONPATH": os.getcwd()},
+    )
+    assert out.stdout.strip().endswith("True"), out.stdout + out.stderr
