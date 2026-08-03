@@ -209,9 +209,16 @@ async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
             await h.double_tap("\\+5|cab:ttn:qd:5")
         if h.maybe():
             await p.tap_data("cab:ttn:qnum")
-            await h.garbage_then(GARBAGE_QTY_POOL, "2", count=1)
-        if not await p.tap_data("cab:ttn:qok"):
+            # «Правильное» значение — 1, а не 2: степпер открывается и у позиции,
+            # где на остатке ровно одна штука, и тогда двойка тоже отвергается
+            # («Кількість має бути 1–1»). Экран отказа кнопок не несёт, следующий
+            # тап по `qok` писал `missing_button` — то есть каскад сам себе
+            # выдумывал находку. Единица проходит всегда: пикер не открывает
+            # степпер при нулевом доступном остатке.
+            await h.garbage_then(GARBAGE_QTY_POOL, "1", count=1)
+        if not p.screen.find_data("cab:ttn:qok"):
             break
+        await p.tap_data("cab:ttn:qok")
         added += 1
 
         if n < items - 1 and not p.screen.find_data("cab:ttn:pick:"):

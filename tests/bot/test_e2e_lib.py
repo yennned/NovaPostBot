@@ -517,3 +517,79 @@ def test_validate_import_does_not_load_prod_env() -> None:
         env={**os.environ, "PYTHONPATH": os.getcwd()},
     )
     assert out.stdout.strip().endswith("True"), out.stdout + out.stderr
+
+
+async def test_stepper_never_taps_a_button_that_is_not_there() -> None:
+    """Отказ степпера не должен превращаться в выдуманную находку.
+
+    Позиция с остатком 1 отвергает и «2» («Кількість має бути 1–1»). Экран
+    отказа кнопок не несёт, а следующий безусловный тап по `cab:ttn:qok`
+    записывал `missing_button` — каскад сам себе выдумывал дефект бота. Живой
+    прогон 2026-08-03 такую находку и дал.
+
+    Мутация: вернуть `if not await p.tap_data("cab:ttn:qok")` — появится дефект.
+    """
+    from scripts.e2e.cascade import _fill_cart
+    from scripts.e2e.lib import Button, Screen
+
+    PICKER = [Button(text="Кава · 1 шт", data="cab:ttn:pick:0")]
+    STEPPER = [
+        Button(text="+1", data="cab:ttn:qd:1"),
+        Button(text="✏️", data="cab:ttn:qnum"),
+        Button(text="✅ Ок", data="cab:ttn:qok"),
+    ]
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = Screen(inline=list(PICKER))
+            self.defects: list[dict] = []
+            self.taps: list[str] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            if data and data.startswith("cab:ttn:pick:"):
+                self.screen = Screen(inline=list(STEPPER))
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+        async def send(self, text: str):
+            # Бот ответил «Кількість має бути 1–1» — экран отказа без кнопок.
+            self.screen = Screen(inline=[])
+            return {}
+
+    class _Human:
+        rng = type(
+            "R",
+            (),
+            {
+                "randrange": staticmethod(lambda *a: 0),
+                "sample": staticmethod(lambda pool, k: list(pool)[:k]),
+            },
+        )()
+        p = None
+
+        def maybe(self) -> bool:
+            return True
+
+        async def double_tap(self, pattern: str):
+            return None
+
+        async def pause(self) -> None:
+            return None
+
+        async def garbage_then(self, pool, good, *, count=2):
+            for value in [*list(pool)[:count], good]:
+                await self.p.send(value)
+
+    persona = _Persona()
+    human = _Human()
+    human.p = persona
+    await _fill_cart(persona, human, items=1)
+
+    assert persona.defects == [], f"каскад выдумал дефект: {persona.defects}"
