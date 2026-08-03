@@ -36,7 +36,7 @@ import gspread
 from app.config import get_settings
 from app.db.base import get_engine, get_sessionmaker
 from app.db.models.client_account import ClientAccount, ClientAccountMembership
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import ClientAccountStatus
 from app.db.models.user import User
 from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB, ViewRow, _view_data_row
 from app.sheets.client import _STOCK_EXPECTED_HEADERS
@@ -44,6 +44,7 @@ from app.sheets.history import HISTORY_TAB
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Колонки листа «Склад». Первые 5 (Артикул..Ціна) — каноничны для чтения ботом и
 # живут единым источником в app/sheets/client (_STOCK_EXPECTED_HEADERS); здесь только
@@ -178,20 +179,35 @@ def authorize() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-async def active_client_tabs() -> list[str]:
-    """ПІБ активных клиентов из БД (= имена листов, stock_sheet_key)."""
-    sm = get_sessionmaker()
-    async with sm() as session:
-        rows = (
-            await session.execute(
-                select(User.full_name, User.telegram_id).where(
-                    User.role == UserRole.client,
-                    User.status == UserStatus.active,
-                )
-            )
-        ).all()
-    # full_name или telegram_id — точно как stock_sheet_key(client).
-    return [(name or str(tg)).strip() for name, tg in rows if (name or tg)]
+async def active_client_tabs(session: AsyncSession | None = None) -> list[str]:
+    """Имена листов складов — по АККАУНТАМ, ровно как их адресует бот.
+
+    Раньше здесь выбирались `User` с `role=client`, и это было наследство модели
+    «лист на человека». Миграция `d4e5f6a7b8c0` снесла `users.stock_sheet_key`:
+    склад принадлежит бизнес-аккаунту, у работника своего листа нет. Запрос по
+    `User` пережил её и давал двойной промах — работнику аккаунта (он тоже
+    `role=client`) заводился лишний лист по его ПІБ, а аккаунту, чьё имя не
+    совпадает с ПІБ владельца, лист не заводился вовсе. Второе тише и хуже: бот
+    читает несуществующую вкладку, то есть показывает пустой склад, а «Внести»
+    падает «немає листа».
+
+    Имя считается тем же выражением, что `stock_sheet_key()` в
+    `app/services/inventory_backend.py`. Разойдись они — провижн и читатель снова
+    смотрели бы в разные вкладки.
+
+    `session` — для тестов: без него функция открывает свою, и незакоммиченные
+    данные вызывающего ей не видны.
+    """
+    stmt = select(ClientAccount.stock_sheet_key, ClientAccount.name, ClientAccount.id).where(
+        ClientAccount.status == ClientAccountStatus.active
+    )
+    if session is not None:
+        rows = (await session.execute(stmt)).all()
+    else:
+        sm = get_sessionmaker()
+        async with sm() as own:
+            rows = (await own.execute(stmt)).all()
+    return [(key or (name or "").strip() or str(aid)) for key, name, aid in rows]
 
 
 def open_or_create(gc: gspread.Client, book_id: str, title: str) -> tuple[Any, bool]:

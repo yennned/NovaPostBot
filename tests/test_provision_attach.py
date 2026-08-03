@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import inspect
 
+from app.db.models.enums import UserRole, UserStatus
+from app.db.repositories import UserRepository
 from scripts.provision_sheets import (
     BREAKDOWN_END_COL,
     PANEL_GAP_COL,
     PANEL_LABEL_COL,
     _extract_book_id,
+    active_client_tabs,
     breakdown_formula,
     breakdown_headers,
     readonly_summary_cells,
     side_summary_cells,
     write_readonly_summary,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.conftest import account_of, employee_of
 
 _BOOK_ID = "1AbC_dEf-GhIjKlMnOpQrStUvWxYz0123456789"
 
@@ -253,3 +259,49 @@ def test_panel_keeps_exactly_one_separator_column():
     """
     assert PANEL_LABEL_COL == PANEL_GAP_COL + 1
     assert BREAKDOWN_END_COL - PANEL_LABEL_COL == 4  # I, J, K, L
+
+
+# --- D4: имена вкладок провижна = адресация бота ----------------------------
+
+
+async def test_tabs_are_named_by_account_not_by_person(db_session: AsyncSession):
+    """Вкладки заводятся по аккаунтам, ровно как их адресует бот.
+
+    Промах здесь двойной и тихий. Работник аккаунта — тоже `role=client`, и по
+    старому запросу ему заводился лишний лист по его ПІБ. А аккаунту, чьё имя не
+    совпадает с ПІБ владельца, лист не заводился вовсе — бот читал бы
+    несуществующую вкладку, то есть показывал пустой склад, а «Внести» падало бы
+    «немає листа».
+    """
+    owner = await UserRepository(db_session).create(
+        telegram_id=990001,
+        full_name="Володимир Власник",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+    account = await account_of(db_session, owner)
+    account.name = "Кавова крамниця"  # имя аккаунта ≠ ПІБ владельца
+    account.stock_sheet_key = "Кавова крамниця"
+    # Работник заводится настоящим путём (приглашение + активация), а не руками:
+    # он тоже `role=client`, и именно на нём старый запрос заводил лишний лист.
+    employee = await employee_of(db_session, owner, phone="+380990000002", telegram_id=990002)
+    await db_session.flush()
+
+    tabs = await active_client_tabs(db_session)
+
+    assert "Кавова крамниця" in tabs
+    assert "Володимир Власник" not in tabs, "лист принадлежит аккаунту, а не человеку"
+    assert employee.full_name not in tabs, "у работника своего листа нет"
+    assert len(tabs) == 1, "один аккаунт — одна вкладка, сколько бы в нём ни было людей"
+
+
+def test_tab_name_matches_the_readers_key_expression():
+    """Провижн и читатель обязаны считать имя вкладки ОДИНАКОВО.
+
+    Разойдись выражения — провижн заведёт одну вкладку, а бот пойдёт в другую, и
+    расхождение проявится как молча пустой склад.
+    """
+    source = inspect.getsource(active_client_tabs)
+    assert "stock_sheet_key" in source
+    assert "ClientAccountStatus.active" in source
+    assert "UserRole.client" not in source, "выбор по роли человека — прежняя модель"
