@@ -418,3 +418,81 @@ def test_dispatch_scan_time_never_falls_back_to_date_created():
         )
         is None
     )
+
+
+# --- Description: белый список НП --------------------------------------------
+#
+# Живой прогон 2026-08-03 дал 3 отказа `Description is not valid` из 60 ТТН, все
+# три — на названиях с `100%`. Символы ниже сняты пробником по боевому
+# `InternetDocument.save`, а не выведены из документации: у НП его нет.
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Символы, на которых прогон реально умер.
+        ("Кава Ferarra 100% Arabica Мелена 250 г", "Кава Ferarra 100 відс. Arabica Мелена 250 г"),
+        # Прочее отвергнутое НП, у чего есть эквивалент.
+        ("Ноутбук 15–17 дюймів", "Ноутбук 15-17 дюймів"),
+        ("Коробка 10×20", "Коробка 10x20"),
+        ("Ціна 500₴", "Ціна 500 грн"),
+        ("Термос 90°", "Термос 90 град"),
+        # Отвергнутое без эквивалента — выбрасывается, текст остаётся читаемым.
+        ("Кава {преміум} ~ 250 г", "Кава преміум 250 г"),
+        ("Кава ☕ 250 г", "Кава 250 г"),
+        # Диакритика разлагается, а не выбрасывается: «Cafe» читается, «Caf» нет.
+        ("Café Crème", "Cafe Creme"),
+        ("Straße 250 г", "Strasse 250 г"),
+        # Украинские буквы НП принимает — их разлагать нельзя.
+        ("Їжа ґудзик ёлка", "Їжа ґудзик ёлка"),
+        # Принимаемая пунктуация не трогается.
+        ('Кава "Львівська" (мелена) №1, 250 г/уп.', 'Кава "Львівська" (мелена) №1, 250 г/уп.'),
+        # Пустой результат — не пустое поле: НП отвергнет и его.
+        ("中文", "Товари"),
+        ("", "Товари"),
+    ],
+)
+def test_description_matches_np_whitelist(raw, expected):
+    from app.novaposhta.mapping import description
+
+    assert description(raw) == expected
+
+
+def test_description_collapses_spaces_left_by_dropped_chars():
+    """Выброшенный символ не должен оставлять после себя двойной пробел."""
+    from app.novaposhta.mapping import description
+
+    assert description("Кава ☕ ☕ 250 г") == "Кава 250 г"
+
+
+def test_description_truncates_to_np_limit():
+    """Срез по лимиту НП, и без хвостового пробела от разрезанного слова."""
+    from app.novaposhta.mapping import NP_DESCRIPTION_LIMIT, description
+
+    result = description("Кава " * 100)
+    assert len(result) <= NP_DESCRIPTION_LIMIT
+    assert result == result.strip()
+    # Именно срез, а не «влезло целиком».
+    assert len(result) > NP_DESCRIPTION_LIMIT - 10
+
+
+def test_to_save_props_cleans_description():
+    """Чистка обязана стоять на границе с НП, а не только в хендлере.
+
+    Хендлер — не единственный вызывающий: воркер, скрипты и будущий код идут в
+    `to_save_props` напрямую, и для них отказ НП выглядел бы необъяснимым.
+    """
+    props = to_save_props(_draft(description="Кава 100% arabica"))
+    assert props["Description"] == "Кава 100 відс. arabica"
+
+
+def test_description_keeps_chars_np_actually_accepts():
+    """Белый список не должен резать больше, чем режет НП.
+
+    Первый вариант списка выбрасывал `&` (7 боевых названий), `#` и украинский
+    апостроф `ʼ` — все три НП принимает. Пробник это и поймал; здесь он закреплён.
+    """
+    from app.novaposhta.mapping import description
+
+    assert description("Кава Bar & Co #1") == "Кава Bar & Co #1"
+    assert description("Мʼясо копчене 250 г") == "Мʼясо копчене 250 г"

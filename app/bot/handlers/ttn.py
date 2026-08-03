@@ -58,6 +58,8 @@ from app.bot.types import EffectiveContext
 from app.novaposhta.cache import NPReferenceCache
 from app.novaposhta.client import NovaPoshtaClient
 from app.novaposhta.exceptions import NovaPoshtaError
+from app.novaposhta.mapping import NP_DESCRIPTION_LIMIT
+from app.novaposhta.mapping import description as np_description
 from app.services import address, pricing, sender_profile
 from app.services.exceptions import (
     ClientServiceError,
@@ -504,7 +506,9 @@ async def _ensure_card_defaults(state: FSMContext) -> dict:
     _apply_insured_defaults(data, cart, updates)
     if data.get("description") is None:
         names = list(dict.fromkeys(e["name"] for e in cart.values()))
-        updates["description"] = (", ".join(names)[:100]) or "Товари"
+        # Чистим то, что покажем на карточке: клиент подтверждает описание, и оно
+        # обязано совпадать с уходящим в НП — иначе на ярлыке напечатано другое.
+        updates["description"] = np_description(", ".join(names))
     if data.get("payment_method") is None:
         updates["payment_method"] = "prepay"
     if data.get("payer_type") is None:
@@ -2034,7 +2038,13 @@ async def receive_edit(
         if not raw:
             await message.answer(texts.description_invalid())
             return
-        updates["description"] = raw[:100]
+        # НП принимает описание по белому списку и на посторонний символ отвечает
+        # отказом всей ТТН — уже после того, как клиент прошёл форму до конца.
+        # Поэтому чистим здесь, но молча не подменяем: человек видит, что уйдёт.
+        cleaned = np_description(raw)
+        if cleaned != " ".join(raw.split())[:NP_DESCRIPTION_LIMIT]:
+            await message.answer(texts.description_cleaned(cleaned))
+        updates["description"] = cleaned
     elif field == "cod_amount":
         amount = _parse_money(raw, positive=True)
         if amount is None:
