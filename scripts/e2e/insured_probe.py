@@ -35,7 +35,7 @@ load_stand_env(_env_file)
 
 from decimal import Decimal  # noqa: E402
 
-from scripts.e2e.lib import Persona, build_persona  # noqa: E402
+from scripts.e2e.lib import Persona, build_persona, open_stepper  # noqa: E402
 
 RECIPIENT_NAME = "Тестенко Тарас Тарасович"
 RECIPIENT_PHONE = "380671234567"
@@ -116,13 +116,7 @@ async def _open_card(persona: Persona) -> str:
             await persona.tap_data(prefix)
             break
 
-    # Позиция с нулевым остатком степпер не открывает — перебираем, пока откроется.
-    for attempt in range(8):
-        if not await persona.tap_data("cab:ttn:pick:", nth=attempt):
-            break
-        if persona.screen.find_data("cab:ttn:qok"):
-            break
-    if not persona.screen.find_data("cab:ttn:qok"):
+    if not await open_stepper(persona):
         return ""
     await persona.tap_data("cab:ttn:qok")
 

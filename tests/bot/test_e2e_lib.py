@@ -22,7 +22,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 from scripts.e2e.cascade import TtnBudget
-from scripts.e2e.lib import ERROR_MARKERS, Screen, _parse_markup
+from scripts.e2e.lib import ERROR_MARKERS, Button, Screen, _parse_markup
 
 
 def test_parse_inline_markup_keeps_text_and_data() -> None:
@@ -519,37 +519,211 @@ def test_validate_import_does_not_load_prod_env() -> None:
     assert out.stdout.strip().endswith("True"), out.stdout + out.stderr
 
 
-async def test_stepper_never_taps_a_button_that_is_not_there() -> None:
-    """Отказ степпера не должен превращаться в выдуманную находку.
+class _StepperPersona:
+    """Персона на фейковом пикере со степпером — с контрактом настоящей.
 
-    Позиция с остатком 1 отвергает и «2» («Кількість має бути 1–1»). Экран
-    отказа кнопок не несёт, а следующий безусловный тап по `cab:ttn:qok`
-    записывал `missing_button` — каскад сам себе выдумывал дефект бота. Живой
-    прогон 2026-08-03 такую находку и дал.
+    Важны две верности, обе оплачены разбором. Первая: `tap` возвращает
+    **непустой** результат на успехе и `{}` только когда кнопки нет
+    (`Persona.tap`, lib.py) — иначе цикл перебора позиций замыкается на первой же
+    удачной, и то, что тест якобы покрывает, не выполняется. Вторая: бот на
+    **правильном** количестве перерисовывает степпер (`receive_qty` →
+    `build_stepper_kb`), и только на неправильном отвечает текстом без кнопок.
+    Фейк, стирающий клавиатуру на любом вводе, закрепил бы неверное поведение.
+    """
 
-    Мутация: вернуть `if not await p.tap_data("cab:ttn:qok")` — появится дефект.
+    def __init__(self, *, available: int = 7, stepper_survives_valid: bool = True) -> None:
+        self.available = available
+        self.stepper_survives_valid = stepper_survives_valid
+        # Третья позиция — чтобы ранний выход был наблюдаем: перебор обязан
+        # остановиться на той, что открыла степпер, а не домотать страницу.
+        self._picker = [
+            Button(text="🚫 Кава стара · 0 шт", data="cab:ttn:pick:0"),
+            Button(text=f"Кава · {available} шт", data="cab:ttn:pick:1"),
+            Button(text="🚫 Чай · 0 шт", data="cab:ttn:pick:2"),
+        ]
+        self._stepper = [
+            Button(text="−1", data="cab:ttn:qd:-1"),
+            Button(text="+1", data="cab:ttn:qd:1"),
+            Button(text="+5", data="cab:ttn:qd:5"),
+            Button(text=f"Макс ({available})", data="cab:ttn:qmax"),
+            Button(text="✏️ Ввести число", data="cab:ttn:qnum"),
+            Button(text="✓ Додати", data="cab:ttn:qok"),
+        ]
+        self._cart = [
+            Button(text="✏️", data="cab:ttn:cedit:0"),
+            Button(text="🛒 Кошик", data="cab:ttn:cart"),
+        ]
+        self.screen = Screen(inline=list(self._picker))
+        self.defects: list[dict] = []
+        self.taps: list[str] = []
+        self.typed: list[str] = []
+
+    async def tap(self, pattern: str, *, data: str | None = None):
+        if data is None:
+            button = self.screen.find(pattern)
+            if button is None or button.data is None:
+                self.defects.append({"kind": "missing_button", "target": pattern})
+                return {}
+            data = button.data
+        self.taps.append(data)
+        if data == "cab:ttn:pick:0":  # позиция с нулевым остатком степпер не открывает
+            return {"ok": True}
+        if data.startswith("cab:ttn:pick:") or data.startswith("cab:ttn:cedit:"):
+            self.screen = Screen(inline=list(self._stepper))
+        elif data == "cab:ttn:qok":
+            # Бот возвращает на пикер, где живёт кнопка кошика.
+            self.screen = Screen(inline=[*self._picker, *self._cart[1:]])
+        elif data == "cab:ttn:cart":
+            # Правка обязана ЗАМЕНЯТЬ количество — сумма не меняется.
+            self.screen = Screen(text="сума товарів: 150.00", inline=list(self._cart))
+        return {"ok": True}
+
+    async def tap_data(self, prefix: str, *, nth: int = 0):
+        matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+        if len(matches) <= nth:
+            self.defects.append({"kind": "missing_button", "target": prefix})
+            return {}
+        return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    async def send(self, text: str):
+        self.typed.append(text)
+        try:
+            value = int(text)
+        except ValueError:
+            value = -1
+        if 1 <= value <= self.available and self.stepper_survives_valid:
+            self.screen = Screen(inline=list(self._stepper))
+        else:
+            # «❌ Кількість має бути 1–N» — текст без клавиатуры.
+            self.screen = Screen(inline=[])
+        return {"ok": True}
+
+
+class _StepperHuman:
+    """Всё «может быть» — да; мусор и пауза детерминированы."""
+
+    def __init__(self, persona) -> None:
+        self.p = persona
+        self.rng = type("R", (), {"randrange": staticmethod(lambda *a: 0)})()
+
+    def maybe(self) -> bool:
+        return True
+
+    async def double_tap(self, pattern: str):
+        await self.p.tap(pattern)
+        await self.p.tap(pattern)
+
+    async def pause(self) -> None:
+        return None
+
+    async def garbage_then(self, pool, good, *, count=2):
+        for value in [*list(pool)[:count], good]:
+            await self.p.send(value)
+
+
+async def test_cart_fills_and_invents_no_defects_at_stock_of_one() -> None:
+    """Позиция с остатком 1: товар добавлен, дефектов ноль.
+
+    Каскад вводил в поле количества «правильное» 2. У позиции, где на остатке
+    ровно одна штука, двойка тоже отвергается («Кількість має бути 1–1»), экран
+    отказа кнопок не несёт, и следующий тап по `cab:ttn:qok` писал
+    `missing_button` — каскад сам себе выдумывал дефект бота (живой прогон
+    2026-08-03).
+
+    Мутация: вернуть в `_valid_qty` константу «2» — появится дефект.
     """
     from scripts.e2e.cascade import _fill_cart
+
+    persona = _StepperPersona(available=1)
+    added = await _fill_cart(persona, _StepperHuman(persona), items=1)
+
+    assert added == 1, "товар обязан попасть в кошик"
+    # Перебор позиций работает: первая с нулевым остатком степпер не открыла.
+    assert persona.taps[:2] == ["cab:ttn:pick:0", "cab:ttn:pick:1"]
+    assert persona.typed[-1] == "1", f"введено непринимаемое количество: {persona.typed}"
+    assert "cab:ttn:qok" in persona.taps, "подтверждение количества не нажато"
+    assert persona.defects == [], f"каскад выдумал дефект: {persona.defects}"
+
+
+async def test_manual_quantity_still_produces_multi_unit_lines() -> None:
+    """Ручной ввод не должен схлопывать корзину в одну штуку.
+
+    Простая замена «2» на «1» дефект бы убрала, но многоштучных позиций этот путь
+    не давал бы вовсе — а на них держатся сверка кошика, гейт oversell и
+    арифметика брони. Потолок читается с кнопки «Макс (N)».
+
+    Мутация: вернуть константу «1» — тест покраснеет.
+    """
+    from scripts.e2e.cascade import _valid_qty
     from scripts.e2e.lib import Button, Screen
 
-    PICKER = [Button(text="Кава · 1 шт", data="cab:ttn:pick:0")]
-    STEPPER = [
-        Button(text="+1", data="cab:ttn:qd:1"),
-        Button(text="✏️", data="cab:ttn:qnum"),
-        Button(text="✅ Ок", data="cab:ttn:qok"),
-    ]
+    class _P:
+        screen = Screen(inline=[Button(text="Макс (9)", data="cab:ttn:qmax")])
 
-    class _Persona:
+    class _H:
+        rng = type("R", (), {"randrange": staticmethod(lambda n: n - 1)})()
+
+    # Потолок держим на 3: корзина прогона не должна выкупать склад.
+    assert _valid_qty(_P(), _H()) == "3"
+
+
+async def test_stepper_regression_is_still_reported() -> None:
+    """Если степпер пропал после ПРАВИЛЬНОГО количества — это дефект бота.
+
+    Самый опасный размен при починке ложной находки — заглушить настоящую.
+    Проверка «кнопка на экране есть?» вместо тапа сделала бы именно это: реальная
+    поломка экрана количества прошла бы молча, а отчёт остался бы зелёным.
+
+    Мутация: заменить `if not await p.tap_data("cab:ttn:qok")` на проверку
+    `p.screen.find_data(...)` — дефект пропадёт.
+    """
+    from scripts.e2e.cascade import _fill_cart
+
+    persona = _StepperPersona(available=7, stepper_survives_valid=False)
+    added = await _fill_cart(persona, _StepperHuman(persona), items=1)
+
+    assert added == 0
+    assert [d["target"] for d in persona.defects] == ["cab:ttn:qok"], (
+        f"поломка экрана количества осталась незамеченной: {persona.defects}"
+    )
+
+
+async def test_open_stepper_skips_positions_without_stock() -> None:
+    """Перебор доходит до позиции, которая степпер открывает, и не врёт про кнопки.
+
+    Идиома была скопирована в трёх драйверах, и правка доставалась им по одному:
+    разбор PR #165 нашёл её только в каскаде. Здесь она одна и покрыта.
+
+    Мутация: убрать проверку `find_data("cab:ttn:qok")` внутри цикла — перебор
+    домотает страницу до конца и тапнет позицию, которая уже не нужна.
+    """
+    from scripts.e2e.lib import open_stepper
+
+    persona = _StepperPersona(available=4)
+    assert await open_stepper(persona) is True
+    # Ровно две: на второй степпер открылся, третью трогать незачем.
+    assert persona.taps == ["cab:ttn:pick:0", "cab:ttn:pick:1"]
+    assert persona.defects == []
+
+
+async def test_open_stepper_reports_when_nothing_opens() -> None:
+    """Ни одна позиция степпер не открыла — False, и это НЕ выдуманный дефект.
+
+    Пикер кончился честно: `tap_data` на отсутствующей `nth` пишет
+    `missing_button`, поэтому перебор обязан останавливаться на числе позиций,
+    которое на экране, а не на фиксированной шестёрке.
+    """
+    from scripts.e2e.lib import Button, Screen, open_stepper
+
+    class _P:
         def __init__(self) -> None:
-            self.screen = Screen(inline=list(PICKER))
+            self.screen = Screen(inline=[Button(text="🚫 Кава · 0 шт", data="cab:ttn:pick:0")])
             self.defects: list[dict] = []
             self.taps: list[str] = []
 
         async def tap(self, pattern: str, *, data: str | None = None):
             self.taps.append(data or pattern)
-            if data and data.startswith("cab:ttn:pick:"):
-                self.screen = Screen(inline=list(STEPPER))
-            return {}
+            return {"ok": True}
 
         async def tap_data(self, prefix: str, *, nth: int = 0):
             matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
@@ -558,38 +732,6 @@ async def test_stepper_never_taps_a_button_that_is_not_there() -> None:
                 return {}
             return await self.tap(matches[nth].text, data=matches[nth].data)
 
-        async def send(self, text: str):
-            # Бот ответил «Кількість має бути 1–1» — экран отказа без кнопок.
-            self.screen = Screen(inline=[])
-            return {}
-
-    class _Human:
-        rng = type(
-            "R",
-            (),
-            {
-                "randrange": staticmethod(lambda *a: 0),
-                "sample": staticmethod(lambda pool, k: list(pool)[:k]),
-            },
-        )()
-        p = None
-
-        def maybe(self) -> bool:
-            return True
-
-        async def double_tap(self, pattern: str):
-            return None
-
-        async def pause(self) -> None:
-            return None
-
-        async def garbage_then(self, pool, good, *, count=2):
-            for value in [*list(pool)[:count], good]:
-                await self.p.send(value)
-
-    persona = _Persona()
-    human = _Human()
-    human.p = persona
-    await _fill_cart(persona, human, items=1)
-
-    assert persona.defects == [], f"каскад выдумал дефект: {persona.defects}"
+    persona = _P()
+    assert await open_stepper(persona) is False
+    assert persona.defects == [], "перебор не должен выдумывать отсутствующие позиции"
