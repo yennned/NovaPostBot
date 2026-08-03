@@ -602,10 +602,20 @@ def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = Non
     with contextlib.suppress(gspread.WorksheetNotFound):
         book.del_worksheet(book.worksheet(SUMMARY_TITLE))
     _drop_empty_defaults(book)  # убрать дефолтную «Лист1»/«Sheet1»
-    ws.batch_clear(["A2:G1000"])  # снять старые данные/преамбулу
     rows = _read_stock_rows(gc, source_tab)  # текущие остатки из основного «Складу»
-    if rows:
-        ws.update(values=rows, range_name=f"A2:F{1 + len(rows)}")
+    if rows is not None:
+        # Чистим ВЕСЬ лист, а не первые 1000 строк: у крупнейшего клиента их 1636, и
+        # жёсткая граница оставляла бы хвост от прошлого оформления жить дальше —
+        # позиции, которых на складе давно нет, но которые клиент продолжает видеть.
+        # Чистка идёт ПОСЛЕ успешного чтения: иначе сбой Google стирал бы остаток.
+        ws.batch_clear([f"A2:G{max(2, ws.row_count)}"])
+        if rows:
+            # Свежий лист заводится на 1000 строк (`ensure_worksheet`), а у крупнейшего
+            # клиента позиций 1636: без расширения сетки запись упала бы на «Range
+            # exceeds grid limits» — то есть книга-зеркало для него не оформлялась вовсе.
+            if ws.row_count < 1 + len(rows):
+                ws.add_rows(1 + len(rows) - ws.row_count)
+            ws.update(values=rows, range_name=f"A2:F{1 + len(rows)}")
     meta = next(
         (s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == ws.id),
         {},
@@ -615,23 +625,27 @@ def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = Non
     write_readonly_summary(book, ws)  # read-only-панель «Зведення» (I–L): статичный разрез
 
 
-def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list]:
+def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list] | None:
     """Остатки клиента из основного «Складу» (лист `source_tab`) → строки «Товари» A–F.
 
     Порядок колонок — единый источник `_view_data_row` (тот же, что пишет рантайм-синк):
     строим `ViewRow` из записей «Складу» и прогоняем через него, чтобы контракт A–F жил
-    в одном месте. Нет книги/листа/доступа → пусто (best-effort, не падаем, не маскируем
-    под ошибку доступа к книге-зеркалу — её attach ловит отдельно).
+    в одном месте.
+
+    `None` — **не прочитали** (нет книги, листа, доступа); `[]` — прочитали, и там пусто.
+    Разница не косметическая: вызывающий по этому решает, чистить ли лист-зеркало. Раньше
+    оба случая возвращали `[]`, и сбой чтения на секунду означал бы стереть клиенту весь
+    видимый остаток — молча и до следующего провижна.
     """
     stock_id = get_settings().sheets_stock_book_id
     if not stock_id or not source_tab:
-        return []
+        return None
     try:
         ws = gc.open_by_key(stock_id).worksheet(source_tab)
         records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     except Exception as exc:
         print(f"  ! остатки з основного «Складу» не прочитані ({exc}) — оформлюю без даних.")
-        return []
+        return None
     rows = []
     for r in records:
         if not r.get("Артикул"):
