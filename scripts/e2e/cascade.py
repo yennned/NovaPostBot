@@ -330,8 +330,23 @@ async def _one_ttn(p: Persona, h: Human, *, index: int, submit: bool) -> dict[st
     # видел «бот не ответил ничем» и выносил 🔴 «признак падения в хендлере».
     # Пять критических находок live2 — ровно это. Красный вердикт от ошибки
     # харнесса хуже отсутствующего: настоящий сигнал в нём тонет.
+    # Правка оплаты — двухэкранная: «✏️ Оплата» уводит на выбор способа, и на том
+    # экране кнопки «Відправити» нет. Тап без выбора бросал ТТН прямо здесь —
+    # `failed_at: card` на трети сценариев прогона live4, и выглядело это как
+    # дефект бота, а не харнесса. Живой человек, открыв выбор, выбирает.
     if h.maybe() and p.screen.find_data("cab:ttn:edit:pay"):
         await p.tap_data("cab:ttn:edit:pay")
+        if h.maybe() and p.screen.find_data("cab:ttn:setpm:cod"):
+            await p.tap_data("cab:ttn:setpm:cod")
+            # Наложенный платёж спрашивает сумму ещё одним экраном — и на нём
+            # «Відправити» тоже нет. Берём сумму корзины: это единственный
+            # вариант без свободного ввода.
+            if p.screen.find_data("cab:ttn:cod:cart"):
+                await p.tap_data("cab:ttn:cod:cart")
+            elif p.screen.find_data("cab:ttn:card"):
+                await p.tap_data("cab:ttn:card")
+        elif p.screen.find_data("cab:ttn:setpm:prepay"):
+            await p.tap_data("cab:ttn:setpm:prepay")
     if h.maybe() and p.screen.find_data("cab:ttn:recompute"):
         await p.tap_data("cab:ttn:recompute")
     if h.maybe() and p.screen.find_data("cab:ttn:edit:city"):
@@ -342,6 +357,12 @@ async def _one_ttn(p: Persona, h: Human, *, index: int, submit: bool) -> dict[st
             await _resolve_city(p)
             if p.screen.find_data("cab:ttn:wh:"):
                 await p.tap_data("cab:ttn:wh:")
+
+    # Страховка на будущие двухэкранные правки: любая из них может оставить нас не
+    # на карточке, и тогда сценарий бросает ТТН с `failed_at: card` — то есть врёт
+    # про бота. Человек в этом месте жмёт «◀ До картки», а не уходит из формы.
+    if not p.screen.find_data("cab:ttn:send") and p.screen.find_data("cab:ttn:card"):
+        await p.tap_data("cab:ttn:card")
 
     result["card_reached"] = bool(p.screen.find_data("cab:ttn:send"))
     if not result["card_reached"]:
