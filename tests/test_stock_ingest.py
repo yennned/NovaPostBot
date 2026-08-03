@@ -378,6 +378,59 @@ async def test_duplicate_rows_keep_ingest_halted(db_session: AsyncSession, monke
     assert result.reanchored_from is None
 
 
+async def test_intake_moves_the_mirror_baseline_with_the_stock(
+    db_session: AsyncSession, monkeypatch
+):
+    """Приёмка двигает не только остаток, но и базу зеркала.
+
+    Число в ячейку «Кількість» вписал Apps Script до нас — значит после переноса
+    ячейка и база обязаны сойтись, иначе следующий проход зеркала увидит ту же
+    приёмку как расхождение и попробует «применить» её второй раз.
+
+    Мутация: убрать `already_in_sheet=True` — база останется на 10.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1330, sheet_key="Магазин")
+    balances = StockBalanceRepository(db_session)
+    reader, worksheet = _reader([])
+    await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    # Так выглядит позиция, которую зеркало уже вело: остаток 10, база 10.
+    await balances.apply_movement(
+        account_id=account.id, sku="SKU-1", delta=10, movement_type=StockMovementType.intake
+    )
+    balance = await balances.get(account_id=account.id, sku="SKU-1")
+    assert balance is not None
+    balance.mirrored_quantity = 10
+    await db_session.flush()
+
+    worksheet.rows.append(_event("Магазин", "SKU-1", 5, at="02.08.2026 09:00:00"))
+    await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    assert balance.quantity == 15
+    assert balance.mirrored_quantity == 15
+
+
+async def test_intake_does_not_invent_a_mirror_baseline(db_session: AsyncSession, monkeypatch):
+    """Позиции, которую зеркало ни разу не вело, база не выдумывается.
+
+    `mirrored_quantity is None` — это «сравнивать не с чем», а не «ноль». Подставь
+    сюда дельту приёмки, и первый же проход зеркала счёл бы разницу между ячейкой
+    и этим числом правкой человека.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1331, sheet_key="Магазин")
+    reader, worksheet = _reader([])
+    await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    worksheet.rows.append(_event("Магазин", "NEW-1", 4))
+    await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    balance = await StockBalanceRepository(db_session).get(account_id=account.id, sku="NEW-1")
+    assert balance is not None and balance.quantity == 4
+    assert balance.mirrored_quantity is None
+
+
 async def test_healthy_pass_forgets_previous_halt(monkeypatch):
     """Разобранная остановка забывается — следующая обязана снова позвать человека.
 

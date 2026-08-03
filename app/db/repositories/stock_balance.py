@@ -212,12 +212,26 @@ class StockBalanceRepository(BaseRepository):
         shipment_id: uuid.UUID | None = None,
         actor_user_id: uuid.UUID | None = None,
         comment: str | None = None,
+        already_in_sheet: bool = False,
     ) -> StockMovement:
         """Изменить остаток и записать движение — атомарно, с честными before/after.
 
         Единственная точка мутации количества. Всё остальное (приёмка, отгрузка,
         возврат, ручная коррекция) ходит сюда, поэтому инвариант «сумма физических
         дельт == quantity» держится по построению, а не по дисциплине вызывающих.
+
+        `already_in_sheet` — эту дельту в ячейку «Кількість» уже вписал кто-то другой,
+        и Postgres лишь догоняет лист. Ровно один такой случай: приёмка, где число в
+        ячейку кладёт Apps Script по кнопке «Внести», а ингест потом переносит её из
+        журнала. Тогда вместе с остатком двигается и `mirrored_quantity` — база, по
+        которой зеркало отличает правку человека от собственного отставания.
+
+        Без этого сдвига база остаётся на «до приёмки», и любое изменение остатка со
+        стороны PG между двумя проходами зеркала (отгрузка ТТН — а бот работает
+        круглосуточно) делает разницу «ячейка против базы» неотличимой от ручной
+        правки. Зеркало применяет её честной дельтой — и **откатывает отгрузку**.
+        Окно узкое, пока зеркало ходит раз в 5 минут, и широкое всякий раз, когда оно
+        не ходит: ночью оно под гейтом рабочих часов.
         """
         locked = await self.lock_for_update(account_id=account_id, skus=[sku])
         balance = locked.get(sku)
@@ -229,6 +243,10 @@ class StockBalanceRepository(BaseRepository):
         # Бронь количество не двигает: её держит статус ТТН, а не остаток.
         after = before + delta if movement_type in PHYSICAL_MOVEMENT_TYPES else before
         balance.quantity = after
+        # `mirrored_quantity is None` — строку ещё ни разу не зеркалили: базы нет, и
+        # выдумывать её здесь нельзя. Зеркало заведёт её само первой же записью.
+        if already_in_sheet and balance.mirrored_quantity is not None:
+            balance.mirrored_quantity += delta
 
         movement = StockMovement(
             client_id=client_id,

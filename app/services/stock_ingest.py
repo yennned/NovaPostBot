@@ -178,6 +178,11 @@ async def ingest_intake_history(
             delta=event.quantity,
             movement_type=StockMovementType.intake,
             comment=_comment(event),
+            # Число в ячейке «Кількість» уже увеличил Apps Script по кнопке «Внести» —
+            # PG здесь догоняет лист, а не ведёт его. Значит вместе с остатком должна
+            # двигаться и база зеркала, иначе следующий его проход увидит ту же
+            # приёмку ещё раз и примет её за правку человека.
+            already_in_sheet=True,
         )
         applied += 1
 

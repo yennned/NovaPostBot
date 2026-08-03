@@ -387,6 +387,68 @@ async def test_intake_already_in_pg_is_not_reported_as_a_manual_edit(
     assert balance is not None and balance.mirrored_quantity == 30
 
 
+async def test_shipment_between_mirror_passes_survives_an_intake(
+    db_session: AsyncSession, monkeypatch
+):
+    """Отгрузка, случившаяся между приёмкой и проходом зеркала, не откатывается.
+
+    Самый дорогой сценарий во всей связке, и он не гипотетический: бот принимает
+    ТТН круглосуточно, а зеркало ходит раз в 5 минут — и вовсе не ходит ночью, где
+    окно растягивается на всё нерабочее время.
+
+    Было 10, приёмка добавила 5 (Apps Script вписал 15 в ячейку, ингест перенёс в
+    PG), затем ушла ТТН на 3 → в PG 12, в ячейке 15. Если приёмка не сдвинула
+    `mirrored_quantity`, зеркало видит «ячейка 15 против базы 10» и не может
+    списать это на своё отставание (`quantity` 12 ≠ 15) — применяет «правку» +3 и
+    **возвращает отгруженный товар на склад**, после чего гейт от oversell
+    разрешает продать его второй раз.
+
+    Мутация: убрать `already_in_sheet=True` из ингеста или сам сдвиг базы в
+    `apply_movement` — остаток станет 15 и появится движение `manual`.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1560)
+    repo = StockBalanceRepository(db_session)
+    await _seed(db_session, account.id, "A", 10, mirrored=10)
+
+    # Приёмка: число в ячейке уже 15, PG догоняет лист.
+    await repo.apply_movement(
+        account_id=account.id,
+        sku="A",
+        delta=5,
+        movement_type=StockMovementType.intake,
+        already_in_sheet=True,
+    )
+    # Отгрузка ТТН — своей стороной, листа она не касается.
+    await repo.apply_movement(
+        account_id=account.id,
+        sku="A",
+        delta=-3,
+        movement_type=StockMovementType.ttn_dispatch,
+    )
+    await db_session.flush()
+
+    mirror, worksheet = _mirror([["A", "Кава", "", 15, "", 0, 15]])
+    result = await stock_mirror.mirror_account(
+        db_session, account, mirror=mirror, settings=settings
+    )
+
+    assert result.edits == ()
+    manual = list(
+        await db_session.scalars(
+            select(StockMovement).where(
+                StockMovement.account_id == account.id,
+                StockMovement.movement_type == StockMovementType.manual,
+            )
+        )
+    )
+    assert manual == []
+    balance = await repo.get(account_id=account.id, sku="A")
+    assert balance is not None and balance.quantity == 12
+    # И ячейку зеркало привело к остатку — клиент видит 12, а не 15.
+    assert worksheet.values[1][3] == 12
+
+
 async def test_halted_intake_leaves_quantity_alone(db_session: AsyncSession, monkeypatch):
     """Ингест стоит — «Кількість» не наша, и трогать её нельзя ни в какую сторону.
 
