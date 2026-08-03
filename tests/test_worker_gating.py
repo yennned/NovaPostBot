@@ -1,4 +1,10 @@
-"""Тесты гейта воркера по рабочему расписанию (ночью не будим Neon)."""
+"""Гейт воркера по рабочему расписанию: что ночью спит, а что обязано не спать.
+
+Гейт экономит квоту Google и НП, а не «сон Neon» (это обоснование разобрано в
+`worker._should_run_daytime`). Отсюда и граница: дорогие ночью проходы — трекинг,
+зеркало, сверка — под гейтом; ингест приёмки, который стоит одно чтение в минуту и
+без которого остаток до утра слепнет, — нет.
+"""
 
 from __future__ import annotations
 
@@ -77,6 +83,37 @@ async def test_poll_tracking_gated_runs_when_open(monkeypatch):
     )
     assert result == "ran"
     assert called is True
+
+
+async def test_stock_ingest_runs_at_night_and_on_weekends(monkeypatch):
+    """Ингест приёмки НЕ под гейтом рабочих часов — и это проверяется явно.
+
+    Пока он там был, приёмка, внесённая в 20:30, доезжала в Postgres только к утру:
+    клиент видел вчерашний остаток, а гейт от oversell отказывал в ТТН на товар,
+    который лежит на складе. Зеркало и трекинг ночью спят по-прежнему — они стоят
+    чтение и запись на аккаунт, а ингест стоит одно чтение в минуту.
+    """
+    calls = 0
+
+    async def fake_job(**kwargs):
+        nonlocal calls
+        calls += 1
+        return "ran"
+
+    monkeypatch.setattr(worker, "stock_ingest_job", fake_job)
+    assert (
+        await worker.stock_ingest_tick(notifier=None, settings=SETTINGS, now=_at(22, 23)) == "ran"
+    )
+    assert await worker.stock_ingest_tick(notifier=None, settings=SETTINGS, now=_at(28, 3)) == "ran"
+    assert calls == 2
+
+    # Зеркало для контраста осталось под гейтом: тест обязан падать, если кто-то
+    # снимет гейт заодно и с него, не подумав про цену прохода.
+    monkeypatch.setattr(worker, "stock_mirror_job", fake_job)
+    assert (
+        await worker.stock_mirror_gated(notifier=None, settings=SETTINGS, now=_at(22, 23)) is None
+    )
+    assert calls == 2
 
 
 async def test_clear_expired_duty_gated_runs_after_close(monkeypatch):

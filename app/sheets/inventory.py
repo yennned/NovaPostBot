@@ -49,9 +49,16 @@ class GoogleSheetsStockSource:
         result: list[StockRow] = []
         for row in rows:
             sku = _lookup(row, *_SKU_KEYS)
-            name = _lookup(row, *_NAME_KEYS)
-            if not sku or not name:
+            # Ключ строки — артикул, и только он. Раньше строка без «Назви» молча
+            # выбрасывалась: позиция с остатком, но с незаполненным названием
+            # исчезала из backfill и из сверки — то есть её остаток нигде не
+            # существовал, а сверка при этом показывала «розбіжностей немає».
+            # Пустое название подставляем артикулом, ровно как делает зеркало
+            # (`StockSheetMirror.read_snapshot`), чтобы два читателя одного листа
+            # видели один и тот же набор строк.
+            if not sku:
                 continue
+            name = _lookup(row, *_NAME_KEYS) or sku
             result.append(
                 StockRow(
                     sku=sku,

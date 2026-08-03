@@ -217,6 +217,12 @@ def report_text(result: AccountReconcileResult) -> str | None:
     if result.sheet_only:
         listed = ", ".join(result.sheet_only[:10])
         lines.append(f"• у листі є артикули, яких немає в боті: {listed} (не імпортуємо)")
+    # Обратное направление молчало, хотя оно хуже: позицию, которой нет в листе,
+    # оператор не видит вовсе — ни остатка, ни того, что она вообще есть. Именно так
+    # выглядит «в таблиці не всі товари», и сверка обязана это называть.
+    if result.pg_only:
+        listed = ", ".join(result.pg_only[:10])
+        lines.append(f"• у боті є артикули, яких немає в листі: {listed} (оператор їх не бачить)")
     if result.error:
         lines.append(f"• лист не читається: {result.error}")
     if not lines:

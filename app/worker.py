@@ -100,13 +100,24 @@ async def low_stock_gated(*, notifier, settings: Settings, now: datetime | None 
     return await low_stock_job(notifier=notifier, settings=settings)
 
 
-async def stock_ingest_gated(*, notifier, settings: Settings, now: datetime | None = None):
-    """Ингест приёмки — в рабочие часы: приёмку вносят работники склада, а они
-    вне окна не работают. Ночью это была бы минута за минутой пустого чтения Google."""
-    at = now or _now(settings)
-    if not _should_run_daytime(settings, at):
-        _log.debug("worker.skip", job="stock_ingest", reason="closed")
-        return None
+async def stock_ingest_tick(*, notifier, settings: Settings, now: datetime | None = None):
+    """Ингест приёмки — круглосуточно, БЕЗ гейта рабочих часов.
+
+    Гейт здесь был, и обоснование звучало разумно: «приёмку вносят работники склада,
+    а они вне окна не работают». Оно оказалось предположением о людях, а цена ошибки
+    несимметрична. Раз чтение остатка переключено на PG (`INVENTORY_SOURCE=pg`),
+    приёмка, внесённая в 20:30, до утра не видна **никому**: клиент видит вчерашний
+    остаток, а гейт от oversell отказывает в ТТН на товар, который физически на складе
+    лежит. Двенадцать часов такой слепоты неотличимы от «бот потерял приёмку» — ровно
+    та жалоба, ради которой всё это чинится.
+
+    Экономия, которую гейт давал, при этом мнимая: проход стоит ОДНО чтение Google в
+    минуту, то есть ~1.7 % минутной квоты service-account (60 read/min), и суточных
+    лимитов у Sheets API нет. Дорогие ночью — трекинг НП и зеркало (чтение + запись на
+    каждый аккаунт); они под гейтом и остаются.
+
+    `now` больше не влияет ни на что и оставлен ради единообразия сигнатур джоб.
+    """
     return await stock_ingest_job(notifier=notifier, settings=settings)
 
 
@@ -203,7 +214,7 @@ async def main() -> None:
     # баланс из одних приходов, без стартового остатка.
     if settings.stock_ingest_enabled:
         scheduler.add_job(
-            stock_ingest_gated,
+            stock_ingest_tick,
             trigger="interval",
             seconds=settings.stock_ingest_seconds,
             kwargs={"notifier": notifier, "settings": settings},

@@ -45,8 +45,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db.models.client_account import ClientAccount
 from app.db.models.enums import StockMovementType
-from app.db.repositories import ShipmentRepository, StockBalanceRepository
+from app.db.repositories import (
+    ShipmentRepository,
+    StockBalanceRepository,
+    StockIntakeCursorRepository,
+)
 from app.services.inventory_backend import stock_sheet_key
+from app.sheets.history import HISTORY_TAB
 from app.sheets.mirror import MirrorSheetError, SheetSnapshot, StockSheetMirror
 from app.sheets.runtime import run_on_sheets_executor, run_sheets_read
 from app.sheets.source import StockSheetNotFound
@@ -77,6 +82,8 @@ class AccountMirrorResult:
     #: SKU, которые есть в PG, но не видны в листе: оператор их не увидит вовсе.
     invisible_skus: tuple[str, ...] = field(default=())
     error: str | None = None
+    #: Ингест приёмки остановлен → количество в этот проход не трогали вовсе.
+    intake_halted: bool = False
 
 
 async def mirror_account(
@@ -85,7 +92,18 @@ async def mirror_account(
     *,
     mirror: StockSheetMirror,
     settings: Settings | None = None,
+    intake_halted: bool = False,
 ) -> AccountMirrorResult:
+    """Свести лист «Склад» аккаунта с Postgres.
+
+    `intake_halted` — ингест приёмки остановлен. Тогда колонку «Кількість» не
+    трогаем вовсе: приёмка продолжает менять ячейку по кнопке «Внести», а для
+    зеркала это неотличимо от правки человека. Применить — значит записать приход
+    движением `manual` вместо `intake`; отклонить (приход больше
+    `STOCK_MANUAL_DELTA_LIMIT`) — значит вернуть в ячейку значение из PG и стереть
+    приёмку из листа, где она была единственной. Резерв пишем как обычно: он
+    считается из статусов ТТН и к приёмке отношения не имеет.
+    """
     cfg = settings or get_settings()
     key = stock_sheet_key(account)
     try:
@@ -106,11 +124,15 @@ async def mirror_account(
     # Вердикты считаются ДО цикла, чтобы узнать, есть ли вообще правки: журнал
     # авторов читается только когда есть кого приписывать. Пустой лист — самый
     # частый случай, и платить за него лишним чтением Google незачем.
-    verdicts = {
-        row.sku: _edit_verdict(row.quantity, balance.mirrored_quantity, balance.quantity, cfg)
-        for row in snapshot.rows
-        if (balance := balances.get(row.sku)) is not None
-    }
+    verdicts = (
+        {}
+        if intake_halted
+        else {
+            row.sku: _edit_verdict(row.quantity, balance.mirrored_quantity, balance.quantity, cfg)
+            for row in snapshot.rows
+            if (balance := balances.get(row.sku)) is not None
+        }
+    )
     authors: dict[tuple[str, int], str] = {}
     if any(verdict is not None and verdict[0] for verdict in verdicts.values()):
         # Листа `_Правки` может не быть (Apps Script в книге не установлен) —
@@ -169,14 +191,19 @@ async def mirror_account(
                     comment=f"{comment} · {author}" if author else comment,
                 )
 
-        if balance.quantity != row.quantity:
-            updates.append((row.row, snapshot.quantity_col, balance.quantity))
+        # Пока ингест стоит, «Кількість» не наша: в ячейке может лежать приёмка,
+        # про которую Postgres ещё не знает. Записать туда своё число — стереть её.
+        # `mirrored_quantity` тоже не двигаем: это база, по которой распознаётся
+        # правка человека, и сдвинуть её сейчас значило бы принять приёмку за
+        # исходную точку и потерять её дельту навсегда.
+        if not intake_halted:
+            if balance.quantity != row.quantity:
+                updates.append((row.row, snapshot.quantity_col, balance.quantity))
+            balance.mirrored_quantity = balance.quantity
         if snapshot.reserve_col is not None:
             want = int(reserved.get(row.sku, 0))
             if row.reserve != want:
                 updates.append((row.row, snapshot.reserve_col, want))
-        # База для следующего цикла — то, что после этой записи будет в ячейке.
-        balance.mirrored_quantity = balance.quantity
 
     if updates:
         # Запись ретраебельна (полная перезапись значений, не дельта), но идёт через
@@ -194,6 +221,7 @@ async def mirror_account(
         edits=tuple(edits),
         unknown_skus=tuple(sorted(set(unknown))),
         invisible_skus=invisible,
+        intake_halted=intake_halted,
     )
 
 
@@ -229,15 +257,28 @@ async def mirror_all_accounts(
 ) -> list[AccountMirrorResult]:
     cfg = settings or get_settings()
     sheet = mirror or StockSheetMirror()
+    # Состояние ингеста читаем ОДИН раз на проход, а не по аккаунту: водораздел один
+    # на книгу, и остановка касается всех её листов сразу.
+    cursor = await StockIntakeCursorRepository(session).get(
+        book_id=cfg.sheets_stock_book_id, tab=HISTORY_TAB
+    )
+    intake_halted = cursor is not None and cursor.halted_reason is not None
+    if intake_halted:
+        logger.warning("stock_mirror.intake_halted", reason=cursor.halted_reason)
     accounts = (await session.scalars(select(ClientAccount).order_by(ClientAccount.name))).all()
     results = []
     for account in accounts:
-        results.append(await mirror_account(session, account, mirror=sheet, settings=cfg))
+        results.append(
+            await mirror_account(
+                session, account, mirror=sheet, settings=cfg, intake_halted=intake_halted
+            )
+        )
     logger.info(
         "stock_mirror.pass",
         accounts=len(results),
         cells=sum(r.cells_written for r in results),
         edits=sum(len(r.edits) for r in results),
         errors=sum(1 for r in results if r.error),
+        intake_halted=intake_halted,
     )
     return results

@@ -36,13 +36,15 @@ import gspread
 from app.config import get_settings
 from app.db.base import get_engine, get_sessionmaker
 from app.db.models.client_account import ClientAccount, ClientAccountMembership
-from app.db.models.enums import UserRole, UserStatus
+from app.db.models.enums import ClientAccountStatus
 from app.db.models.user import User
 from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB, ViewRow, _view_data_row
 from app.sheets.client import _STOCK_EXPECTED_HEADERS
+from app.sheets.history import HISTORY_TAB
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Колонки листа «Склад». Первые 5 (Артикул..Ціна) — каноничны для чтения ботом и
 # живут единым источником в app/sheets/client (_STOCK_EXPECTED_HEADERS); здесь только
@@ -59,10 +61,18 @@ def _col_a1(col0: int) -> str:
 
 
 # Панель «Зведення» справа от данных A–G (0-based колонки): тонкий разрыв, лейблы, значения.
+# H — ЕДИНСТВЕННЫЙ разделитель: всё, что правее, панель, и второго разрыва в ней нет.
 PANEL_GAP_COL = len(STOCK_HEADERS)  # H — разрыв сразу после данных
 PANEL_LABEL_COL = PANEL_GAP_COL + 1  # I — лейблы
 PANEL_VALUE_COL = PANEL_GAP_COL + 2  # J — значения/селекторы (дропдауны)
 _PANEL_VALUE_A1 = _col_a1(PANEL_VALUE_COL)  # «J» — для формул-ссылок на селекторы
+# Разрез по категориям — I..L, ниже интерактивных блоков. Он заменил отдельный лист
+# «📊 Зведення»: тот строился по ОДНОМУ (первому непустому) листу книги, то есть
+# показывал разрез одного клиента, подписанный как свод всей книги.
+BREAKDOWN_END_COL = PANEL_LABEL_COL + 4  # exclusive: I,J,K,L
+#: Сколько строк под разрезом форматируем. Категорий у аккаунта десятки, не тысячи;
+#: формула спиллится сама, а формат числа заранее ставится с запасом.
+BREAKDOWN_FORMAT_ROWS = 200
 INTAKE_HEADERS = [
     "Дата",
     "Артикул",
@@ -85,8 +95,15 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+#: Отдельный лист сводки из ранней версии. Больше не создаётся — разрез по
+#: категориям переехал в панель на листе каждого клиента; имя осталось, чтобы
+#: провижн умел этот лист снести.
 SUMMARY_TITLE = "📊 Зведення"
 PROTECT_DESC = "Залишки править лише бот/Script (owner/dev — за винятком)"
+HISTORY_PROTECT_DESC = (
+    "Журнал приймання. Не редагувати і не видаляти рядки вручну: по ньому бот "
+    "переносить залишок. Прибирання — меню «📦 Склад»."
+)
 _DEFAULT_TABS = {"Sheet1", "Аркуш1", "Лист1"}
 
 
@@ -162,20 +179,35 @@ def authorize() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-async def active_client_tabs() -> list[str]:
-    """ПІБ активных клиентов из БД (= имена листов, stock_sheet_key)."""
-    sm = get_sessionmaker()
-    async with sm() as session:
-        rows = (
-            await session.execute(
-                select(User.full_name, User.telegram_id).where(
-                    User.role == UserRole.client,
-                    User.status == UserStatus.active,
-                )
-            )
-        ).all()
-    # full_name или telegram_id — точно как stock_sheet_key(client).
-    return [(name or str(tg)).strip() for name, tg in rows if (name or tg)]
+async def active_client_tabs(session: AsyncSession | None = None) -> list[str]:
+    """Имена листов складов — по АККАУНТАМ, ровно как их адресует бот.
+
+    Раньше здесь выбирались `User` с `role=client`, и это было наследство модели
+    «лист на человека». Миграция `d4e5f6a7b8c0` снесла `users.stock_sheet_key`:
+    склад принадлежит бизнес-аккаунту, у работника своего листа нет. Запрос по
+    `User` пережил её и давал двойной промах — работнику аккаунта (он тоже
+    `role=client`) заводился лишний лист по его ПІБ, а аккаунту, чьё имя не
+    совпадает с ПІБ владельца, лист не заводился вовсе. Второе тише и хуже: бот
+    читает несуществующую вкладку, то есть показывает пустой склад, а «Внести»
+    падает «немає листа».
+
+    Имя считается тем же выражением, что `stock_sheet_key()` в
+    `app/services/inventory_backend.py`. Разойдись они — провижн и читатель снова
+    смотрели бы в разные вкладки.
+
+    `session` — для тестов: без него функция открывает свою, и незакоммиченные
+    данные вызывающего ей не видны.
+    """
+    stmt = select(ClientAccount.stock_sheet_key, ClientAccount.name, ClientAccount.id).where(
+        ClientAccount.status == ClientAccountStatus.active
+    )
+    if session is not None:
+        rows = (await session.execute(stmt)).all()
+    else:
+        sm = get_sessionmaker()
+        async with sm() as own:
+            rows = (await own.execute(stmt)).all()
+    return [(key or (name or "").strip() or str(aid)) for key, name, aid in rows]
 
 
 def open_or_create(gc: gspread.Client, book_id: str, title: str) -> tuple[Any, bool]:
@@ -570,10 +602,20 @@ def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = Non
     with contextlib.suppress(gspread.WorksheetNotFound):
         book.del_worksheet(book.worksheet(SUMMARY_TITLE))
     _drop_empty_defaults(book)  # убрать дефолтную «Лист1»/«Sheet1»
-    ws.batch_clear(["A2:G1000"])  # снять старые данные/преамбулу
     rows = _read_stock_rows(gc, source_tab)  # текущие остатки из основного «Складу»
-    if rows:
-        ws.update(values=rows, range_name=f"A2:F{1 + len(rows)}")
+    if rows is not None:
+        # Чистим ВЕСЬ лист, а не первые 1000 строк: у крупнейшего клиента их 1636, и
+        # жёсткая граница оставляла бы хвост от прошлого оформления жить дальше —
+        # позиции, которых на складе давно нет, но которые клиент продолжает видеть.
+        # Чистка идёт ПОСЛЕ успешного чтения: иначе сбой Google стирал бы остаток.
+        ws.batch_clear([f"A2:G{max(2, ws.row_count)}"])
+        if rows:
+            # Свежий лист заводится на 1000 строк (`ensure_worksheet`), а у крупнейшего
+            # клиента позиций 1636: без расширения сетки запись упала бы на «Range
+            # exceeds grid limits» — то есть книга-зеркало для него не оформлялась вовсе.
+            if ws.row_count < 1 + len(rows):
+                ws.add_rows(1 + len(rows) - ws.row_count)
+            ws.update(values=rows, range_name=f"A2:F{1 + len(rows)}")
     meta = next(
         (s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == ws.id),
         {},
@@ -583,23 +625,27 @@ def format_view_book(gc: gspread.Client, book: Any, source_tab: str | None = Non
     write_readonly_summary(book, ws)  # read-only-панель «Зведення» (I–L): статичный разрез
 
 
-def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list]:
+def _read_stock_rows(gc: gspread.Client, source_tab: str | None) -> list[list] | None:
     """Остатки клиента из основного «Складу» (лист `source_tab`) → строки «Товари» A–F.
 
     Порядок колонок — единый источник `_view_data_row` (тот же, что пишет рантайм-синк):
     строим `ViewRow` из записей «Складу» и прогоняем через него, чтобы контракт A–F жил
-    в одном месте. Нет книги/листа/доступа → пусто (best-effort, не падаем, не маскируем
-    под ошибку доступа к книге-зеркалу — её attach ловит отдельно).
+    в одном месте.
+
+    `None` — **не прочитали** (нет книги, листа, доступа); `[]` — прочитали, и там пусто.
+    Разница не косметическая: вызывающий по этому решает, чистить ли лист-зеркало. Раньше
+    оба случая возвращали `[]`, и сбой чтения на секунду означал бы стереть клиенту весь
+    видимый остаток — молча и до следующего провижна.
     """
     stock_id = get_settings().sheets_stock_book_id
     if not stock_id or not source_tab:
-        return []
+        return None
     try:
         ws = gc.open_by_key(stock_id).worksheet(source_tab)
         records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     except Exception as exc:
         print(f"  ! остатки з основного «Складу» не прочитані ({exc}) — оформлюю без даних.")
-        return []
+        return None
     rows = []
     for r in records:
         if not r.get("Артикул"):
@@ -635,6 +681,44 @@ def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
         if pr.get("description") == PROTECT_DESC:
             reqs.append({"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}})
     return reqs
+
+
+def protect_history(book: Any) -> bool:
+    """Повесить предупреждение на лист «Історія». `False` — листа ещё нет.
+
+    Лист заводит лениво Apps Script при первом «Внести» (`ensureHistory_`), там же
+    ставится защита. Здесь — для книг, где журнал появился раньше этой защиты.
+
+    `warningOnly`, а не запрет, и это не полумера: строки в журнал пишет Apps Script
+    **от имени нажавшего «Внести»**, а не сервис-аккаунт. Жёсткий protected range
+    без всех этих людей в `editors` остановил бы саму приёмку — то есть защита
+    сломала бы то, что защищает.
+    """
+    try:
+        ws = book.worksheet(HISTORY_TAB)
+    except gspread.WorksheetNotFound:
+        return False
+    meta = next(
+        s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == ws.id
+    )
+    reqs = [
+        {"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}}
+        for pr in meta.get("protectedRanges", []) or []
+        if pr.get("description") == HISTORY_PROTECT_DESC
+    ]
+    reqs.append(
+        {
+            "addProtectedRange": {
+                "protectedRange": {
+                    "range": {"sheetId": ws.id},
+                    "description": HISTORY_PROTECT_DESC,
+                    "warningOnly": True,
+                }
+            }
+        }
+    )
+    book.batch_update({"requests": reqs})
+    return True
 
 
 def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
@@ -801,114 +885,6 @@ def _to_decimal(raw) -> Decimal:
         return Decimal(0)
 
 
-def build_summary(book: Any, data_ws: Any) -> None:
-    """Лист «📊 Зведення»: KPI (с валютой — бот его НЕ читает) + живой pivot по категориям."""
-    records = data_ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
-    positions = sum(1 for r in records if r.get("Артикул") and r.get("Назва"))
-    units = sum(int(_to_decimal(r.get("Кількість", 0))) for r in records)
-    value = sum(_to_decimal(r.get("Кількість", 0)) * _to_decimal(r.get("Ціна", 0)) for r in records)
-
-    try:
-        ws = book.worksheet(SUMMARY_TITLE)
-    except gspread.WorksheetNotFound:
-        ws = book.add_worksheet(title=SUMMARY_TITLE, rows=200, cols=8)
-    ws.clear()
-    sid = ws.id
-    ws.update(
-        values=[
-            [f"📊 Зведення складу — {data_ws.title}"],
-            [],
-            ["Позицій", positions],
-            ["Одиниць", units],
-            ["Вартість, ₴", float(value)],
-        ],
-        range_name="A1",
-    )
-
-    meta = next(
-        s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == sid
-    )
-    reqs = _clear_dynamic(meta, sid)
-    reqs.append({"mergeCells": {"range": _grid(sid, 0, 1, 0, 4), "mergeType": "MERGE_ALL"}})
-    reqs.append(
-        {
-            "repeatCell": {
-                "range": _grid(sid, 0, 1, 0, 4),
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": HEADER_BG,
-                        "horizontalAlignment": "CENTER",
-                        "textFormat": {"bold": True, "foregroundColor": HEADER_FG, "fontSize": 13},
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,textFormat)",
-            }
-        }
-    )
-    reqs.append(
-        {
-            "repeatCell": {
-                "range": _grid(sid, 2, 5, 0, 1),
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat",
-            }
-        }
-    )
-    reqs.append(
-        {
-            "repeatCell": {
-                "range": _grid(sid, 4, 5, 1, 2),
-                "cell": {
-                    "userEnteredFormat": {
-                        "numberFormat": {"type": "CURRENCY", "pattern": "#,##0.00 ₴"}
-                    }
-                },
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        }
-    )
-    reqs.append(
-        {
-            "updateCells": {
-                "start": {"sheetId": sid, "rowIndex": 7, "columnIndex": 0},
-                "fields": "pivotTable",
-                "rows": [
-                    {
-                        "values": [
-                            {
-                                "pivotTable": {
-                                    "source": _grid(data_ws.id, 0, len(records) + 1, 0, 5),
-                                    "rows": [
-                                        {
-                                            "sourceColumnOffset": 2,
-                                            "showTotals": True,
-                                            "sortOrder": "ASCENDING",
-                                        }
-                                    ],
-                                    "values": [
-                                        {
-                                            "summarizeFunction": "COUNTA",
-                                            "sourceColumnOffset": 0,
-                                            "name": "Позицій",
-                                        },
-                                        {
-                                            "summarizeFunction": "SUM",
-                                            "sourceColumnOffset": 3,
-                                            "name": "Одиниць",
-                                        },
-                                    ],
-                                    "valueLayout": "HORIZONTAL",
-                                }
-                            }
-                        ]
-                    }
-                ],
-            }
-        }
-    )
-    book.batch_update({"requests": reqs})
-
-
 # --- Общие билдеры batch-update запросов оформления панели «Зведення» ---------
 # Их зовут ОБЕ панели (write_side_summary — основная, write_readonly_summary —
 # зеркало), чтобы форматирование жило в одном месте и панели не расходились.
@@ -1034,25 +1010,77 @@ def side_summary_cells() -> list[list[str]]:
     ]
 
 
+def breakdown_headers() -> list[list[str]]:
+    """Баннер и шапка разреза по категориям (две строки, I..L)."""
+    return [
+        ["📊 Розріз за категоріями", "", "", ""],
+        ["Категорія", "Позицій", "Одиниць", "Вартість, ₴"],
+    ]
+
+
+def breakdown_formula() -> str:
+    """Одна формула на весь разрез: категория + три метрики, спилл вниз по I..L.
+
+    **Список категорий живой, а не зафиксированный на провижне.** В книге-зеркале
+    он статичный (`readonly_summary_cells`) — та книга read-only и переоформляется
+    привязкой. Здесь так нельзя: приёмка заводит категории каждый день, и застывший
+    список молча показывал бы неправду в рабочей книге.
+
+    **`SUMPRODUCT` с точным `=`, а не `COUNTIF`/`SUMIF`.** Критерий последних
+    трактует `* ? ~` как шаблон, поэтому категория вида «USB*C» дала бы счётчик,
+    не сходящийся с собственной вартістю. Та же причина расписана в
+    `readonly_summary_cells`.
+
+    **`IFERROR` снаружи** — у нового аккаунта категорий ещё нет, `FILTER` вернул бы
+    `#N/A` на всю панель.
+
+    Книга в локали с запятой → разделитель аргументов «;».
+    """
+    return (
+        '=IFERROR(LET(cats;SORT(UNIQUE(FILTER(C2:C;C2:C<>"")));'
+        "HSTACK(cats;"
+        'MAP(cats;LAMBDA(c;SUMPRODUCT((C2:C=c)*(A2:A<>""))));'
+        "MAP(cats;LAMBDA(c;SUMPRODUCT((C2:C=c)*D2:D)));"
+        'MAP(cats;LAMBDA(c;SUMPRODUCT((C2:C=c)*D2:D*E2:E)))));"")'
+    )
+
+
 def write_side_summary(book: Any, ws: Any) -> None:
-    """Интерактивная панель «Зведення» СПРАВА вплотную к данным (колонки I–J).
+    """Панель «Зведення» СПРАВА вплотную к данным: всё с колонки I, H — разделитель.
 
     Справа (а не внизу) → строки растут вниз (`appendRow` приёмки/бота) и панель их
     не задевает: итог автоматический и никогда не «сползает», без правки Apps Script.
-    Дропдауны (Data Validation) в ячейках-селекторах J7 (категорія) и J13 (товар —
-    комбинированная «Назва (Артикул)»); подсчёты — формулы из `side_summary_cells`.
-    Список товара — скрытая колонка-помощник L (`Назва (Артикул)`, ARRAYFORMULA),
+
+    Четыре блока сверху вниз: «Всього», «За категорією» (селектор J7), «За товаром»
+    (селектор J13) и **разрез по категориям** (I..L). Последний заменил отдельный
+    лист «📊 Зведення» — он строился по одному, первому непустому листу книги, то
+    есть показывал разрез одного клиента под видом свода всей книги.
+
+    Разрез стоит ПОСЛЕДНИМ не по вкусу: его формула спиллится вниз на столько строк,
+    сколько у аккаунта категорий, и любая занятая ячейка под ней превратила бы весь
+    блок в `#REF!`.
+
+    Список товара — скрытая колонка-помощник N (`Назва (Артикул)`, ARRAYFORMULA),
     чтобы дропдаун искался и по назві, и по артикулу и авто-захватывал новые строки.
+    Именно N, а не L: L теперь занята последней колонкой разреза.
+
     Бот читает A:E с `expected_headers`, лишние колонки справа чтение не ломают
     (см. app/sheets/client.py).
     """
     sid = ws.id
     lbl, val, end = PANEL_LABEL_COL, PANEL_VALUE_COL, PANEL_VALUE_COL + 1
-    helper_col = PANEL_VALUE_COL + 2  # L — скрытый список «Назва (Артикул)» для дропдауна товара
+    brk_end = BREAKDOWN_END_COL  # exclusive: разрез занимает I..L
+    # N, а не M: одна пустая колонка между видимой панелью и служебным списком —
+    # запас, чтобы вставка колонки в конец разреза не наехала на помощника.
+    helper_col = BREAKDOWN_END_COL + 1
     helper_a1 = _col_a1(helper_col)
     cells = side_summary_cells()
     last = len(cells)  # число строк панели (exclusive-граница разделов, идущих до конца)
     panel_range = f"{_col_a1(lbl)}1:{_PANEL_VALUE_A1}{last}"
+    # Пустая строка между интерактивной частью и разрезом — иначе баннер разреза
+    # прилипает к «Вартість» блока «За товаром» и читается как его продолжение.
+    brk_head = last + 2  # 21 — баннер разреза
+    brk_first = brk_head + 2  # 23 — первая строка данных (спилл формулы)
     records = ws.get_all_records(default_blank="", expected_headers=STOCK_READ_HEADERS)
     cats = sorted({str(r.get("Категорія", "")).strip() for r in records if r.get("Категорія")})
     safe_title = ws.title.replace("'", "''")
@@ -1063,18 +1091,42 @@ def write_side_summary(book: Any, ws: Any) -> None:
     book.batch_update(
         {
             "requests": [
-                {"unmergeCells": {"range": _grid(sid, r, r + 1, lbl, end)}} for r in (0, 5, 11)
+                *({"unmergeCells": {"range": _grid(sid, r, r + 1, lbl, end)}} for r in (0, 5, 11)),
+                {"unmergeCells": {"range": _grid(sid, brk_head - 1, brk_head, lbl, brk_end)}},
             ]
         }
     )
-    # Лист «Складу» создан ровно под A–J (10 колонок) → расширяем сетку под колонку L.
+    # Лист «Складу» создан ровно под A–J (10 колонок) → расширяем сетку под колонку N.
     if ws.col_count < helper_col + 1:
         ws.add_cols(helper_col + 1 - ws.col_count)
-    # Скрытая колонка-помощник L: список «Назва (Артикул)» для дропдауна товара.
+    # Прежний спилл разреза стираем ДО записи: если категорий стало меньше, хвост
+    # старых строк остался бы висеть под новым блоком как настоящие данные.
+    #
+    # Заодно чистим K и L выше разреза. До переезда колонки-помощника там (в L2)
+    # жила её ARRAYFORMULA: оставь её — и она упрётся в заголовки разреза, повиснув
+    # `#REF!` прямо в панели. Замечено прогоном на живом листе, а не рассуждением.
+    ws.batch_clear(
+        [
+            f"{_col_a1(val + 1)}1:{_col_a1(brk_end - 1)}{brk_head - 1}",
+            f"{_col_a1(lbl)}{brk_head}:{_col_a1(brk_end - 1)}",
+        ]
+    )
+    # Скрытая колонка-помощник N: список «Назва (Артикул)» для дропдауна товара.
     # ARRAYFORMULA по открытому A2:A → авто-захват новых строк; пустые строки → "".
     ws.update(
         values=[['=ARRAYFORMULA(IF(A2:A="";"";B2:B&" ("&A2:A&")"))']],
         range_name=f"{helper_a1}2",
+        value_input_option=ValueInputOption.user_entered,
+    )
+    ws.update(
+        values=breakdown_headers(),
+        range_name=f"{_col_a1(lbl)}{brk_head}:{_col_a1(brk_end - 1)}{brk_head + 1}",
+    )
+    # Формула пишется ОДНОЙ ячейкой: заполни соседние J..L пустыми строками — и спилл
+    # упрётся в них `#REF!`, потому что для Sheets пустая строка тоже занятая ячейка.
+    ws.update(
+        values=[[breakdown_formula()]],
+        range_name=f"{_col_a1(lbl)}{brk_first}",
         value_input_option=ValueInputOption.user_entered,
     )
     # raw=True по умолчанию → формулы стали бы текстом; форсим USER_ENTERED.
@@ -1097,6 +1149,8 @@ def write_side_summary(book: Any, ws: Any) -> None:
         _col_width_req(sid, PANEL_GAP_COL, 22),  # разрыв-разделитель (тонкий)
         _col_width_req(sid, lbl, 150),  # лейблы
         _col_width_req(sid, val, 124),  # значения/селекторы
+        # K и L существуют только ради разреза — ширина под «Одиниць»/«Вартість, ₴»
+        _col_width_req(sid, val + 1, 100, span=2),
         # база: лейблы bold слева, значения справа, всё по центру вертикали
         {
             "repeatCell": {
@@ -1160,7 +1214,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
                 },
             }
         },
-        # дропдаун товара: «Назва (Артикул)» з прихованої колонки-помічника L
+        # дропдаун товара: «Назва (Артикул)» з прихованої колонки-помічника N
         {
             "setDataValidation": {
                 "range": _grid(sid, 12, 13, val, end),
@@ -1174,7 +1228,7 @@ def write_side_summary(book: Any, ws: Any) -> None:
                 },
             }
         },
-        # прячем колонку-помощник L (служебный список для дропдауна товара)
+        # прячем колонку-помощник N (служебный список для дропдауна товара)
         {
             "updateDimensionProperties": {
                 "range": {
@@ -1188,6 +1242,53 @@ def write_side_summary(book: Any, ws: Any) -> None:
             }
         },
         _borders_req(sid, 0, last, lbl, end),
+        # --- разрез по категориям: баннер, шапка, форматы чисел, границы ---
+        # K и L могли быть скрыты: в L до переезда сидела колонка-помощник, а её
+        # прячут. Не показать их обратно — и разрез отрисуется в невидимые колонки,
+        # то есть «Одиниць» и «Вартість» просто не появятся на экране.
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sid,
+                    "dimension": "COLUMNS",
+                    "startIndex": val + 1,
+                    "endIndex": brk_end,
+                },
+                "properties": {"hiddenByUser": False},
+                "fields": "hiddenByUser",
+            }
+        },
+        _merge_req(sid, brk_head - 1, brk_head, lbl, brk_end),
+        _banner_req(sid, brk_head - 1, lbl, brk_end, SUBHEADER_BG, 10),
+        {
+            "repeatCell": {
+                "range": _grid(sid, brk_head, brk_head + 1, lbl, brk_end),
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "backgroundColor": BAND2,
+                        "verticalAlignment": "MIDDLE",
+                    }
+                },
+                "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment)",
+            }
+        },
+        # Форматы ставим с запасом вниз: формула спиллится сама, и подгонять диапазон
+        # под сегодняшнее число категорий значило бы переоформлять лист после каждой
+        # новой категории — то есть после каждой приёмки с новым товаром.
+        _numfmt_req(
+            sid, brk_first - 1, brk_first + BREAKDOWN_FORMAT_ROWS, val, val + 2, "NUMBER", _INT_FMT
+        ),
+        _numfmt_req(
+            sid,
+            brk_first - 1,
+            brk_first + BREAKDOWN_FORMAT_ROWS,
+            val + 2,
+            brk_end,
+            "CURRENCY",
+            _CURRENCY_FMT,
+        ),
+        _borders_req(sid, brk_head - 1, brk_head + 1, lbl, brk_end),
     ]
     book.batch_update({"requests": reqs})
 
@@ -1482,17 +1583,22 @@ def main() -> None:
         print(f"«Склад» only-missing: заводим {stock_tabs or '(нечего)'}")
     client_ws = [ensure_worksheet(stock, tab, STOCK_HEADERS) for tab in stock_tabs]
     _drop_empty_defaults(stock)
+    print(
+        f"«{HISTORY_TAB}»: попередження про ручну правку "
+        f"{'поставлено' if protect_history(stock) else 'пропущено (листа ще немає)'}"
+    )
     # одна выборка метаданных на книгу → идемпотентная чистка прежнего оформления
     meta_map = {s["properties"]["sheetId"]: s for s in stock.fetch_sheet_metadata()["sheets"]}
-    summary_src = None
     for ws in client_ws:
-        rows = style_stock_worksheet(stock, ws, meta_map.get(ws.id, {}))
+        style_stock_worksheet(stock, ws, meta_map.get(ws.id, {}))
         write_available_formula(ws)  # Доступно (G) = Кількість − Резерв (ARRAYFORMULA)
-        write_side_summary(stock, ws)  # авто-итог + фильтры справа на каждом листе
-        if summary_src is None and rows > 0:
-            summary_src = ws
-    if summary_src is not None:
-        build_summary(stock, summary_src)
+        write_side_summary(stock, ws)  # панель с колонки I: итоги, фильтры, разрез
+    # Отдельный лист сводки больше не нужен — разрез по категориям живёт в панели на
+    # листе КАЖДОГО клиента. Прежний строился по одному, первому непустому листу
+    # книги, то есть показывал разрез одного клиента под видом свода всей книги.
+    with contextlib.suppress(gspread.WorksheetNotFound):
+        stock.del_worksheet(stock.worksheet(SUMMARY_TITLE))
+        print(f"лист «{SUMMARY_TITLE}» видалено — зведення тепер у панелі кожного листа")
     share(stock, emails)
 
     # --- «Приймання» ---
