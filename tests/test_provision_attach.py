@@ -5,7 +5,12 @@ from __future__ import annotations
 import inspect
 
 from scripts.provision_sheets import (
+    BREAKDOWN_END_COL,
+    PANEL_GAP_COL,
+    PANEL_LABEL_COL,
     _extract_book_id,
+    breakdown_formula,
+    breakdown_headers,
     readonly_summary_cells,
     side_summary_cells,
     write_readonly_summary,
@@ -205,3 +210,46 @@ def test_drive_quota_error_is_recognised():
 
     assert _is_drive_quota_error(quota) is True
     assert _is_drive_quota_error(other) is False
+
+
+# --- D3: разрез по категориям в основной панели (замена листа «Зведення») ----
+
+
+def test_breakdown_is_one_spilling_formula_over_four_columns():
+    """Разрез — ОДНА формула, а не строка на категорию.
+
+    Строка на категорию (как в read-only-зеркале) фиксирует список на момент
+    провижна. В рабочей книге приёмка заводит категории каждый день, и застывший
+    список молча показывал бы неправду там, где по нему принимают решения.
+    """
+    assert breakdown_headers()[1] == ["Категорія", "Позицій", "Одиниць", "Вартість, ₴"]
+    formula = breakdown_formula()
+    # Живой список: категории берутся из данных, а не перечислены литералами.
+    assert "UNIQUE(FILTER(C2:C" in formula
+    assert "HSTACK" in formula, "четыре колонки должны раскладываться одной формулой"
+    # Пустой лист → пустой разрез, а не #N/A на всю панель.
+    assert formula.startswith("=IFERROR(")
+
+
+def test_breakdown_compares_categories_exactly_not_by_pattern():
+    """`SUMPRODUCT` с `=`, а не `COUNTIF`/`SUMIF`.
+
+    Критерий COUNTIF/SUMIF трактует `* ? ~` как шаблон: категория вида «USB*C»
+    дала бы счётчик позиций, не сходящийся с собственной вартістю, — и разрез
+    перестал бы биться с блоком «Всього» ровно на тех данных, где это заметят
+    последним. Та же причина уже расписана в `readonly_summary_cells`.
+    """
+    formula = breakdown_formula()
+    assert "COUNTIF" not in formula
+    assert "SUMIF" not in formula
+    assert formula.count("SUMPRODUCT") == 3  # позиції, одиниці, вартість
+
+
+def test_panel_keeps_exactly_one_separator_column():
+    """H — единственный разрыв, дальше панель идёт сплошняком с I.
+
+    Разъедь колонки — и «оставь одну колонку как разделитель» превратится в
+    решето из пустых столбцов между блоками.
+    """
+    assert PANEL_LABEL_COL == PANEL_GAP_COL + 1
+    assert BREAKDOWN_END_COL - PANEL_LABEL_COL == 4  # I, J, K, L
