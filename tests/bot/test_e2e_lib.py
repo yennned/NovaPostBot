@@ -299,3 +299,86 @@ async def test_spread_stops_at_the_end_of_the_catalogue() -> None:
 
     assert persona.taps == ["cab:ttn:pcat:1"]
     assert persona.defects == []
+
+
+async def test_category_pick_never_taps_reset_chip() -> None:
+    """«Сузить категорией» обязано сужать, а не снимать фильтр.
+
+    `cab:ttn:pcat:all` — первый чип в клавиатуре всегда (`category_chips`
+    ставит «Всі» перед категориями), поэтому тап по префиксу `cab:ttn:pcat:`
+    попадал именно в него: пикер возвращался на первую страницу полного
+    каталога, разбег отменялся, и корзина набиралась из тех же шести верхних
+    SKU, чей остаток уже выкуплен бронями прогона. Живой прогон 2026-08-03:
+    13 ТТН из 60 умерли с пустой корзиной, и в отчёте это выглядело как дефект
+    бота.
+
+    Мутация: вернуть `p.tap_data("cab:ttn:pcat:")` — тап уйдёт в `all`.
+    """
+    from scripts.e2e.cascade import _pick_category
+    from scripts.e2e.lib import Button
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = type(
+                "S",
+                (),
+                {
+                    "inline": [
+                        Button(text="• Всі", data="cab:ttn:pcat:all"),
+                        Button(text="Кава", data="cab:ttn:pcat:0"),
+                        Button(text="Чай", data="cab:ttn:pcat:1"),
+                    ]
+                },
+            )()
+            self.taps: list[str] = []
+            self.defects: list[dict] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    class _Human:
+        rng = type("R", (), {"randrange": staticmethod(lambda *a: 0)})()
+
+    persona = _Persona()
+    await _pick_category(persona, _Human())
+
+    assert persona.taps == ["cab:ttn:pcat:0"]
+    assert "cab:ttn:pcat:all" not in persona.taps
+
+
+async def test_category_pick_is_silent_without_real_categories() -> None:
+    """Только «Всі» на экране — не тапаем ничего и не пишем дефект.
+
+    Иначе у аккаунта без категорий каскад сам бы себе выдумывал `missing_button`.
+    """
+    from scripts.e2e.cascade import _pick_category
+    from scripts.e2e.lib import Button
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = type(
+                "S", (), {"inline": [Button(text="• Всі", data="cab:ttn:pcat:all")]}
+            )()
+            self.taps: list[str] = []
+            self.defects: list[dict] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            return {}
+
+    class _Human:
+        rng = type("R", (), {"randrange": staticmethod(lambda *a: 0)})()
+
+    persona = _Persona()
+    await _pick_category(persona, _Human())
+
+    assert persona.taps == []
+    assert persona.defects == []

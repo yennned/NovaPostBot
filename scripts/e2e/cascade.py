@@ -138,21 +138,45 @@ async def _spread_over_catalogue(p: Persona, h: Human) -> None:
     Человек с таким каталогом первые шесть строк тоже не покупает: он сначала
     выбирает категорию, потом листает. Отсюда и порядок здесь.
 
-    Тапаем ▶ по тексту и только когда кнопка на экране есть: `tap_data` на
-    отсутствующей кнопке пишет `missing_button` в дефекты, и разбег сам стал бы
-    источником ложных находок. По префиксу `cab:ttn:page:` тапать тоже нельзя —
-    он общий у ◀ и ▶, и со второй страницы первой совпадёт ◀, то есть «разбег»
-    ходил бы туда-сюда между двумя страницами.
+    Разбег обязан быть виден: `tap_data` на отсутствующей кнопке пишет
+    `missing_button` в дефекты, и сам разбег стал бы источником ложных находок —
+    поэтому и категория, и листание идут через хелперы с проверкой экрана.
     """
-    chips = [b for b in p.screen.inline if b.data and b.data.startswith("cab:ttn:pcat:")]
-    if chips:
-        chip = chips[h.rng.randrange(len(chips))]
-        await p.tap(chip.text, data=chip.data)
+    await _pick_category(p, h)
     for _ in range(h.rng.randrange(0, 7)):
-        forward = next((b for b in p.screen.inline if b.text == "▶" and b.data), None)
-        if forward is None:
+        if not await _page_forward(p):
             return
-        await p.tap(forward.text, data=forward.data)
+
+
+async def _page_forward(p: Persona) -> bool:
+    """Перелистнуть вперёд. По префиксу `cab:ttn:page:` тапать нельзя — он общий
+    у ◀ и ▶, и со второй страницы первой совпадёт ◀, то есть «листание» топталось
+    бы между двумя страницами."""
+    forward = next((b for b in p.screen.inline if b.text == "▶" and b.data), None)
+    if forward is None:
+        return False
+    await p.tap(forward.text, data=forward.data)
+    return True
+
+
+async def _pick_category(p: Persona, h: Human) -> None:
+    """Выбрать категорию — настоящую, не «всі».
+
+    `cab:ttn:pcat:all` — тоже чип категории, и по префиксу он совпадает первым.
+    Тап по нему не сужает выбор, а **снимает** фильтр и возвращает пикер на первую
+    страницу полного каталога — то есть отменяет разбег. Живой прогон 2026-08-03:
+    13 ТТН из 60 умерли с пустой корзиной именно так, и выглядело это как «бот не
+    даёт добавить товар».
+    """
+    chips = [
+        b
+        for b in p.screen.inline
+        if b.data and b.data.startswith("cab:ttn:pcat:") and b.data != "cab:ttn:pcat:all"
+    ]
+    if not chips:
+        return
+    chip = chips[h.rng.randrange(len(chips))]
+    await p.tap(chip.text, data=chip.data)
 
 
 async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
@@ -161,14 +185,17 @@ async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
     await _spread_over_catalogue(p, h)
     for n in range(items):
         if h.maybe():  # полистать страницы
-            await p.tap_data("cab:ttn:page:")
+            await _page_forward(p)
         if h.maybe():  # сузить категорией
-            await p.tap_data("cab:ttn:pcat:")
+            await _pick_category(p, h)
 
         # Позиция с нулевым доступным остатком степпер не открывает — бот
         # отвечает алертом и оставляет пикер. Человек в этом месте просто тычет
         # в следующий товар, поэтому перебираем, пока степпер не появится.
-        for attempt in range(6):
+        # Перебираем всю страницу, а не первые шесть: у крупного аккаунта верхние
+        # позиции первыми и выкупаются бронями самого прогона.
+        picks = sum(1 for b in p.screen.inline if b.data and b.data.startswith("cab:ttn:pick:"))
+        for attempt in range(max(picks, 1)):
             if not await p.tap_data("cab:ttn:pick:", nth=attempt):
                 break
             if p.screen.find_data("cab:ttn:qok"):
