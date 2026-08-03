@@ -188,3 +188,114 @@ async def test_cascade_without_pace_keeps_old_behaviour(monkeypatch, tmp_path) -
     )
 
     assert slept == []
+
+
+async def test_spread_walks_forward_and_never_taps_a_missing_button() -> None:
+    """Разбег по каталогу идёт ВПЕРЁД и не выдумывает кнопок.
+
+    Две ловушки разом. Первая: `cab:ttn:page:` — общий префикс у ◀ и ▶, и со
+    второй страницы первой совпадает ◀; «разбег» по префиксу ходил бы туда-сюда
+    между двумя страницами, а все ТТН прогона тянули бы одни и те же шесть
+    верхних SKU. Вторая: `tap_data` на отсутствующей кнопке пишет
+    `missing_button` в дефекты — разбег стал бы источником ложных находок.
+
+    Мутация: заменить поиск «▶» на `tap_data("cab:ttn:page:")` — офсеты пойдут
+    вниз, и первый assert покраснеет.
+    """
+
+    from scripts.e2e.cascade import _spread_over_catalogue
+    from scripts.e2e.lib import Button
+
+    class _Screen:
+        def __init__(self) -> None:
+            self.offset = 0
+            self.inline: list[Button] = []
+            self._render()
+
+        def _render(self) -> None:
+            self.inline = [Button(text="🍏 Напої", data="cab:ttn:pcat:1")]
+            if self.offset > 0:
+                self.inline.append(Button(text="◀", data=f"cab:ttn:page:{self.offset - 6}"))
+            if self.offset < 24:  # каталог на пять страниц
+                self.inline.append(Button(text="▶", data=f"cab:ttn:page:{self.offset + 6}"))
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = _Screen()
+            self.defects: list[dict] = []
+            self.taps: list[str] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            if data and data.startswith("cab:ttn:page:"):
+                self.screen.offset = int(data.rsplit(":", 1)[1])
+                self.screen._render()
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            """Как настоящий: первая совпавшая кнопка, иначе дефект.
+
+            Нужен, чтобы мутация «тапать по префиксу `cab:ttn:page:`» краснела
+            по существу — уходом офсетов назад, — а не `AttributeError` фейка.
+            """
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    class _Rng:
+        """Детерминированно: первая категория и ровно четыре шага вперёд.
+
+        Со случайным seed длина разбега плавает, и «шаг назад» пряталcя бы за
+        прогоном длиной в один шаг — тест был бы зелёным по удаче.
+        """
+
+        @staticmethod
+        def randrange(*args: int) -> int:
+            return 4 if len(args) == 2 else 0
+
+    class _Human:
+        rng = _Rng()
+
+    persona = _Persona()
+    await _spread_over_catalogue(persona, _Human())
+
+    pages = [int(t.rsplit(":", 1)[1]) for t in persona.taps if t.startswith("cab:ttn:page:")]
+    assert pages == [6, 12, 18, 24], "разбег обязан двигаться вперёд"
+    assert persona.screen.offset == pages[-1]
+    assert persona.defects == [], "разбег не должен порождать дефектов"
+
+
+async def test_spread_stops_at_the_end_of_the_catalogue() -> None:
+    """Каталог короче разбега — упираемся в конец и выходим, а не тапаем пустоту."""
+    import random
+
+    from scripts.e2e.cascade import _spread_over_catalogue
+    from scripts.e2e.lib import Button
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = type("S", (), {"inline": [Button(text="🍏", data="cab:ttn:pcat:1")]})()
+            self.defects: list[dict] = []
+            self.taps: list[str] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    class _Human:
+        rng = random.Random(1)
+
+    persona = _Persona()
+    await _spread_over_catalogue(persona, _Human())
+
+    assert persona.taps == ["cab:ttn:pcat:1"]
+    assert persona.defects == []

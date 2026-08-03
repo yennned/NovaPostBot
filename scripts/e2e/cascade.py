@@ -126,9 +126,39 @@ async def _open_ttn(p: Persona, h: Human) -> bool:
     return bool(p.screen.find_data("cab:ttn:pick:") or p.screen.find_data("cab:ttn:page:"))
 
 
+async def _spread_over_catalogue(p: Persona, h: Human) -> None:
+    """Разойтись по каталогу перед набором корзины.
+
+    Пикер всегда открывается на первой странице, а в листе крупного аккаунта 1636
+    позиций по 5–15 штук в каждой. Без разбега все ТТН прогона тянут одни и те же
+    шесть верхних SKU: их доступный остаток обнуляют брони самого прогона, и он
+    останавливается о гейт oversell на втором десятке ТТН — то есть упирается не в
+    то, ради чего затевался. Живой прогон 2026-08-03 встал ровно так.
+
+    Человек с таким каталогом первые шесть строк тоже не покупает: он сначала
+    выбирает категорию, потом листает. Отсюда и порядок здесь.
+
+    Тапаем ▶ по тексту и только когда кнопка на экране есть: `tap_data` на
+    отсутствующей кнопке пишет `missing_button` в дефекты, и разбег сам стал бы
+    источником ложных находок. По префиксу `cab:ttn:page:` тапать тоже нельзя —
+    он общий у ◀ и ▶, и со второй страницы первой совпадёт ◀, то есть «разбег»
+    ходил бы туда-сюда между двумя страницами.
+    """
+    chips = [b for b in p.screen.inline if b.data and b.data.startswith("cab:ttn:pcat:")]
+    if chips:
+        chip = chips[h.rng.randrange(len(chips))]
+        await p.tap(chip.text, data=chip.data)
+    for _ in range(h.rng.randrange(0, 7)):
+        forward = next((b for b in p.screen.inline if b.text == "▶" and b.data), None)
+        if forward is None:
+            return
+        await p.tap(forward.text, data=forward.data)
+
+
 async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
     """Набрать корзину. Человек листает, фильтрует, ошибается количеством."""
     added = 0
+    await _spread_over_catalogue(p, h)
     for n in range(items):
         if h.maybe():  # полистать страницы
             await p.tap_data("cab:ttn:page:")
