@@ -1369,7 +1369,21 @@ def main() -> None:
         default="",
         help="клиент для --attach-book: telegram_id или фрагмент ПІБ",
     )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="файл окружения стенда (напр. .env.prod) — завести листы на боевых книгах",
+    )
     args = parser.parse_args()
+
+    # Окружение стенда — до первого `get_settings()` (он кеширован). Через dotenv,
+    # а не `source .env.prod` в шелле: `GOOGLE_SA_JSON` там лежит инлайн-JSON, и
+    # шелл срезает кавычки — ключ приезжает битым, а ошибка выглядит как «плохой
+    # сервис-аккаунт».
+    if args.env_file:
+        from scripts.e2e.env import load_stand_env
+
+        print(f"Окружение: {load_stand_env(args.env_file)}")
 
     settings = get_settings()
     db_tabs = _run_db(active_client_tabs())
