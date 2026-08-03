@@ -209,7 +209,7 @@ async def stock_mirror_job(
         await session.commit()
         if notifier is not None:
             for result in results:
-                applied = [(e.sku, e.was, e.now) for e in result.edits if e.applied]
+                applied = [(e.sku, e.was, e.now, e.author) for e in result.edits if e.applied]
                 rejected = [(e.sku, e.was, e.now, e.reason) for e in result.edits if not e.applied]
                 await notifications.notify_stock_manual_edits(
                     session,

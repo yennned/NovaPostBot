@@ -15,7 +15,11 @@
    правка. Правка применяется движением `manual` с честной дельтой, попадает в
    `stock_movements` и уходит пушем владельцу — то есть становится **строже**
    сегодняшнего положения, когда фиксация правки зависит от того, вспомнил ли
-   человек её записать.
+   человек её записать. **Автора** зеркало узнать само не может: оно приходит в
+   лист через пять минут и видит только новое число. Его пишет Apps Script книги
+   «Склад» (`scripts/stock_apps_script.gs`) в лист `_Правки`, откуда зеркало
+   забирает его **одним чтением и только в тот цикл, когда правку заметило**.
+   Скрипта в книге нет — правка применяется как раньше, без автора.
 3. **Пишет обратно** только `Кількість` и `Резерв`, и только изменившиеся ячейки.
 
 **Предохранитель.** Правка, уводящая остаток в минус или превышающая
@@ -57,6 +61,9 @@ class ManualEdit:
     now: int
     applied: bool
     reason: str = ""
+    #: Кто правил ячейку, по журналу `_Правки` книги «Склад». Пусто — Apps Script
+    #: в книге не установлен либо Google не отдал адрес правившего.
+    author: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +103,21 @@ async def mirror_account(
     balances = {b.sku: b for b in await balances_repo.list_for_account(account.id)}
     reserved = await ShipmentRepository(session).reserved_by_account(account.id)
 
+    # Вердикты считаются ДО цикла, чтобы узнать, есть ли вообще правки: журнал
+    # авторов читается только когда есть кого приписывать. Пустой лист — самый
+    # частый случай, и платить за него лишним чтением Google незачем.
+    verdicts = {
+        row.sku: _edit_verdict(row.quantity, balance.mirrored_quantity, balance.quantity, cfg)
+        for row in snapshot.rows
+        if (balance := balances.get(row.sku)) is not None
+    }
+    authors: dict[tuple[str, int], str] = {}
+    if any(verdict is not None and verdict[0] for verdict in verdicts.values()):
+        # Листа `_Правки` может не быть (Apps Script в книге не установлен) —
+        # `read_edit_authors` вернёт пусто, и автор останется неизвестным. Правку
+        # это не отменяет: до появления журнала она применялась вообще без автора.
+        authors = await run_sheets_read(mirror.read_edit_authors, key)
+
     updates: list[tuple[int, int, int]] = []
     edits: list[ManualEdit] = []
     unknown: list[str] = []
@@ -116,24 +138,27 @@ async def mirror_account(
             price=row.price,
         )
 
-        verdict = _edit_verdict(row.quantity, balance.mirrored_quantity, balance.quantity, cfg)
+        verdict = verdicts.get(row.sku)
         if verdict is not None:
             applied, reason = verdict
+            author = authors.get((row.sku, row.quantity), "")
             edit = ManualEdit(
                 sku=row.sku,
                 was=balance.mirrored_quantity or 0,
                 now=row.quantity,
                 applied=applied,
                 reason=reason,
+                author=author,
             )
             edits.append(edit)
             if applied:
+                comment = f"ручна правка в листі «{key}»: {edit.was} → {edit.now}"
                 await balances_repo.apply_movement(
                     account_id=account.id,
                     sku=row.sku,
                     delta=row.quantity - balance.quantity,
                     movement_type=StockMovementType.manual,
-                    comment=f"ручна правка в листі «{key}»: {edit.was} → {edit.now}",
+                    comment=f"{comment} · {author}" if author else comment,
                 )
 
         if balance.quantity != row.quantity:
