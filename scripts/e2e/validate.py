@@ -107,6 +107,16 @@ _AFTER_QUERIES = {
         select action, count(*) as n from audit_logs
         where created_at > now() - interval '6 hours' group by action order by 2 desc
     """,
+    # Брони сабмита. До переключения остатка на Postgres их не существовало вовсе
+    # (`_hold_stock` на пути Sheets возвращает None), поэтому и в срезе их не было —
+    # а с `INVENTORY_SOURCE=pg` каждая попытка создаёт строку, и залипшая бронь
+    # занижает доступный остаток: клиент не может продать собственный товар.
+    "holds": """
+        select id::text, account_id::text, sku, quantity, submit_key,
+               shipment_id::text, released_at::text, expires_at::text,
+               expires_at < now() as expired
+        from stock_holds where released_at is null
+    """,
 }
 
 
@@ -244,7 +254,41 @@ def _check_invariants(before: dict[str, Any], after: dict[str, Any]) -> list[dic
                 }
             )
 
-    # 4. Никто лишний не появился в БД.
+    # 4. Бронь сабмита не пережила свою попытку.
+    #
+    # Активная бронь сама по себе не дефект: сабмит мог быть в полёте в момент
+    # среза. Дефект — две другие вещи. Первая: бронь привязана к ТТН, но не снята;
+    # `attach` делает это одним `update`, так что расхождение означает, что остаток
+    # вычтен дважды — статусом отправления и бронью поверх него. Вторая: бронь
+    # пережила свой TTL, то есть процесс упал между фазами сабмита, а дворник
+    # (`stock_hold_sweep_job`) до неё не дошёл — доступный остаток занижен, и
+    # клиент не может продать собственный товар.
+    for row in after.get("holds", []):
+        if row.get("shipment_id"):
+            findings.append(
+                {
+                    "severity": "high",
+                    "rule": "hold_released_on_attach",
+                    "detail": (
+                        f"бронь {row['sku']}×{row['quantity']} привʼязана до ТТН "
+                        f"{row['shipment_id']}, але не знята — залишок вирахувано двічі"
+                    ),
+                }
+            )
+        elif row.get("expired"):
+            findings.append(
+                {
+                    "severity": "high",
+                    "rule": "hold_swept",
+                    "detail": (
+                        f"бронь {row['sku']}×{row['quantity']} (submit_key "
+                        f"{row['submit_key']}) пережила TTL до {row['expires_at']} — "
+                        "доступний залишок занижено"
+                    ),
+                }
+            )
+
+    # 5. Никто лишний не появился в БД.
     before_users = {row["id"] for row in before.get("users", [])}
     for row in after["users"]:
         if row["id"] not in before_users:
