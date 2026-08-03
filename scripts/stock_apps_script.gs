@@ -35,6 +35,12 @@ var EDITS_TAB = '_Правки';
 var EDITS_HEADERS = ['Час', 'Лист', 'Артикул', 'Було', 'Стало', 'Хто'];
 var HISTORY_TAB = 'Історія';
 var EDITS_KEEP_DAYS = 90;
+var HISTORY_KEEP_DAYS = 90;
+//: Сколько последних строк «Історія» не трогать НИКОГДА, как бы стары они ни были.
+//: Водораздел ингеста — это последняя перенесённая строка журнала; удали её, и бот
+//: перестанет понимать, докуда дошёл. Обычно она у самого конца (ингест ходит раз в
+//: минуту), но если он стоял сутки — уедет вглубь. Хвост и есть этот запас.
+var HISTORY_KEEP_TAIL = 50;
 
 // ───────────────────────────── меню ─────────────────────────────
 
@@ -43,6 +49,7 @@ function onOpen() {
     .createMenu('📦 Склад')
     .addItem('🧾 Журнал правок', 'showEdits')
     .addItem('🧹 Прибрати правки, старші за 90 днів', 'trimEdits')
+    .addItem('📦 Прибрати історію приймання, старішу за 90 днів', 'trimHistory')
     .addItem('⏱ Прибирати щодня автоматично', 'enableDailyTrim')
     .addToUi();
 }
@@ -92,6 +99,60 @@ function trimEdits() {
   }
   if (keepFrom > 0) sheet.deleteRows(2, keepFrom);
   SpreadsheetApp.getActive().toast('Прибрано рядків: ' + keepFrom, '📦 Склад', 5);
+}
+
+/**
+ * Прибрать старые строки «Історія» — легально и безопасно.
+ *
+ * ЗАЧЕМ ОТДЕЛЬНАЯ КНОПКА. Журнал растёт вечно, и рано или поздно в него лезут
+ * руками. Раньше это останавливало ингест: он держит водораздел по НОМЕРУ строки,
+ * а удаление сдвигает все номера ниже. Теперь бот умеет найти свой водораздел по
+ * отпечатку и переставить номер сам (`app/services/stock_ingest.py`), поэтому
+ * удаление сверху безопасно — но только сверху и только заведомо старого.
+ *
+ * ДВЕ ГРАНИЦЫ, И ОБЕ НУЖНЫ. Возраст (90 дней) отсекает то, что ингест давно
+ * перенёс: он ходит раз в минуту. Хвост (`HISTORY_KEEP_TAIL`) страхует от случая,
+ * когда ингест стоял долго и водораздел уехал вглубь: удалить саму строку-
+ * водораздел значит вернуть ровно ту остановку, от которой мы уходим.
+ */
+function trimHistory() {
+  var ui = SpreadsheetApp.getUi();
+  var sheet = SpreadsheetApp.getActive().getSheetByName(HISTORY_TAB);
+  if (!sheet) { ui.alert('Листа «' + HISTORY_TAB + '» ще немає.'); return; }
+
+  var last = sheet.getLastRow();
+  var total = last - 1; // без шапки
+  if (total <= HISTORY_KEEP_TAIL) {
+    ui.alert('Прибирати нічого: у журналі ' + Math.max(total, 0) + ' рядків.');
+    return;
+  }
+
+  var times = sheet.getRange(2, 1, total, 1).getValues();
+  var edge = new Date().getTime() - HISTORY_KEEP_DAYS * 24 * 60 * 60 * 1000;
+  var old = 0;
+  for (var i = 0; i < times.length; i++) {
+    var when = times[i][0] instanceof Date ? times[i][0].getTime() : 0;
+    if (when >= edge) break;   // журнал append-only → дальше только свежее
+    old = i + 1;
+  }
+  // Хвост неприкосновенен, каким бы старым он ни был.
+  var removable = Math.min(old, total - HISTORY_KEEP_TAIL);
+  if (removable <= 0) {
+    ui.alert('Прибирати нічого: усе старе входить в останні ' + HISTORY_KEEP_TAIL + ' рядків.');
+    return;
+  }
+
+  var resp = ui.alert(
+    'Прибрати історію приймання',
+    'Видалити ' + removable + ' найстаріших рядків (старіші за ' + HISTORY_KEEP_DAYS +
+      ' днів)?\nЗалишиться: ' + (total - removable) + '.\n\n' +
+      'Залишок у боті це не змінює — рядки давно перенесені.',
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  sheet.deleteRows(2, removable);
+  ui.alert('Прибрано рядків: ' + removable + '.');
 }
 
 // ─────────────────────────── служебное ───────────────────────────

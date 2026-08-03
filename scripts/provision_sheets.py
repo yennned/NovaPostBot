@@ -40,6 +40,7 @@ from app.db.models.enums import UserRole, UserStatus
 from app.db.models.user import User
 from app.services.client_sheet_sync import _VIEW_HEADERS, _VIEW_TAB, ViewRow, _view_data_row
 from app.sheets.client import _STOCK_EXPECTED_HEADERS
+from app.sheets.history import HISTORY_TAB
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from sqlalchemy import select
@@ -87,6 +88,10 @@ SCOPES = [
 
 SUMMARY_TITLE = "📊 Зведення"
 PROTECT_DESC = "Залишки править лише бот/Script (owner/dev — за винятком)"
+HISTORY_PROTECT_DESC = (
+    "Журнал приймання. Не редагувати і не видаляти рядки вручну: по ньому бот "
+    "переносить залишок. Прибирання — меню «📦 Склад»."
+)
 _DEFAULT_TABS = {"Sheet1", "Аркуш1", "Лист1"}
 
 
@@ -635,6 +640,44 @@ def _clear_dynamic(sheet_meta: dict, sid: int) -> list[dict]:
         if pr.get("description") == PROTECT_DESC:
             reqs.append({"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}})
     return reqs
+
+
+def protect_history(book: Any) -> bool:
+    """Повесить предупреждение на лист «Історія». `False` — листа ещё нет.
+
+    Лист заводит лениво Apps Script при первом «Внести» (`ensureHistory_`), там же
+    ставится защита. Здесь — для книг, где журнал появился раньше этой защиты.
+
+    `warningOnly`, а не запрет, и это не полумера: строки в журнал пишет Apps Script
+    **от имени нажавшего «Внести»**, а не сервис-аккаунт. Жёсткий protected range
+    без всех этих людей в `editors` остановил бы саму приёмку — то есть защита
+    сломала бы то, что защищает.
+    """
+    try:
+        ws = book.worksheet(HISTORY_TAB)
+    except gspread.WorksheetNotFound:
+        return False
+    meta = next(
+        s for s in book.fetch_sheet_metadata()["sheets"] if s["properties"]["sheetId"] == ws.id
+    )
+    reqs = [
+        {"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}}
+        for pr in meta.get("protectedRanges", []) or []
+        if pr.get("description") == HISTORY_PROTECT_DESC
+    ]
+    reqs.append(
+        {
+            "addProtectedRange": {
+                "protectedRange": {
+                    "range": {"sheetId": ws.id},
+                    "description": HISTORY_PROTECT_DESC,
+                    "warningOnly": True,
+                }
+            }
+        }
+    )
+    book.batch_update({"requests": reqs})
+    return True
 
 
 def style_stock_worksheet(book: Any, ws: Any, sheet_meta: dict) -> int:
@@ -1482,6 +1525,10 @@ def main() -> None:
         print(f"«Склад» only-missing: заводим {stock_tabs or '(нечего)'}")
     client_ws = [ensure_worksheet(stock, tab, STOCK_HEADERS) for tab in stock_tabs]
     _drop_empty_defaults(stock)
+    print(
+        f"«{HISTORY_TAB}»: попередження про ручну правку "
+        f"{'поставлено' if protect_history(stock) else 'пропущено (листа ще немає)'}"
+    )
     # одна выборка метаданных на книгу → идемпотентная чистка прежнего оформления
     meta_map = {s["properties"]["sheetId"]: s for s in stock.fetch_sheet_metadata()["sheets"]}
     summary_src = None
