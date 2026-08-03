@@ -259,6 +259,15 @@ async def _cancel_in_db_only(shipment_id: Any) -> None:
         ).scalar_one()
         owner = (await session.execute(select(User).where(User.id == row.client_id))).scalar_one()
 
+        # Уборка идёт по «новым с прошлого среза», а срез живёт неделями — в выборку
+        # попадают и ТТН, отменённые прошлыми прогонами. Второй `ttn_cancel` завысил
+        # бы журнал ровно так же, как его отсутствие занижало, и ни одна проверка
+        # этого не увидела бы: бронь не физический тип, инвариант остатка молчит.
+        from app.db.repositories import ShipmentRepository
+
+        if await ShipmentRepository(session).movement_exists(row.id, StockMovementType.ttn_cancel):
+            return
+
         await shipments.apply_cancel(
             session, shipment=row, account_id=row.account_id, actor_user_id=owner.id
         )
