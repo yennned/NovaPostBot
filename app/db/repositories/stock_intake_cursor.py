@@ -32,6 +32,17 @@ class StockIntakeCursorRepository(BaseRepository):
         await self._add(cursor)
         return cursor
 
+    async def rebase(self, cursor: StockIntakeCursor, *, row: int) -> None:
+        """Переставить водораздел на ТУ ЖЕ строку, уехавшую на новый номер.
+
+        Отдельно от `advance`, потому что смысл другой: ничего не перенесено, а
+        значит `last_ingested_at` двигать нельзя — иначе «когда последний раз ехала
+        приёмка» стало бы отвечать «когда последний раз чинился водораздел».
+        Отпечаток не трогаем сознательно: строку нашли именно по нему, и он верен.
+        """
+        cursor.last_row = row
+        await self.session.flush()
+
     async def advance(
         self, cursor: StockIntakeCursor, *, row: int, fingerprint: str | None
     ) -> None:

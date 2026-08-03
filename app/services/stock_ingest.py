@@ -51,6 +51,9 @@ class IngestResult:
     #: разошёлся отпечаток строки-водораздела.
     halted_reason: str | None = None
     unknown_tabs: tuple[str, ...] = field(default=())
+    #: С какого номера водораздел пришлось переставить: журнал прибрали, строка
+    #: уехала, мы нашли её по отпечатку. `None` — штатный проход.
+    reanchored_from: int | None = None
 
 
 #: Об остановке ингеста владельцу сообщаем один раз на процесс, а не каждый проход:
@@ -120,24 +123,44 @@ async def ingest_intake_history(
         logger.info("stock_ingest.cursor_created", book_id=book_id, row=end)
         return IngestResult(last_row=end)
 
-    window = await run_sheets_read(
-        history.read_window, cursor.last_row, max(1, cfg.stock_ingest_batch_limit)
-    )
+    batch_limit = max(1, cfg.stock_ingest_batch_limit)
+    window = await run_sheets_read(history.read_window, cursor.last_row, batch_limit)
 
     expected = cursor.last_row_fingerprint
+    reanchored_from: int | None = None
     if expected is not None and window.watermark_fingerprint != expected:
-        reason = (
-            f"строка-водораздел {cursor.last_row} листа «{HISTORY_TAB}» змінилася "
-            "(рядки видалили або вставили) — інгест зупинено"
+        # Номер водораздела разошёлся с его отпечатком. Самый частый повод —
+        # прибирание журнала: удалили старые, давно перенесённые строки, и всё, что
+        # ниже, поехало вверх. Сама строка при этом жива, и по отпечатку её видно.
+        matches = await run_sheets_read(history.locate_fingerprint, expected)
+        if len(matches) != 1:
+            reason = (
+                f"строка-водораздел {cursor.last_row} листа «{HISTORY_TAB}» змінилася "
+                "(рядки видалили або вставили) — інгест зупинено"
+            )
+            logger.error(
+                "stock_ingest.fingerprint_mismatch",
+                book_id=book_id,
+                row=cursor.last_row,
+                expected=expected,
+                actual=window.watermark_fingerprint,
+                matches=len(matches),
+            )
+            return IngestResult(last_row=cursor.last_row, halted_reason=reason)
+
+        # Ровно одно попадание — двусмысленности нет: продолжаем с той же строки по
+        # новому адресу. Ноль попаданий (водораздел удалили) и несколько (журнал
+        # содержит одинаковые строки) остаются остановкой: там угадывать нечего, а
+        # ошибка в любую сторону — молчаливая порча остатка.
+        reanchored_from, moved_to = cursor.last_row, matches[0]
+        logger.warning(
+            "stock_ingest.reanchored", book_id=book_id, was=reanchored_from, now=moved_to
         )
-        logger.error(
-            "stock_ingest.fingerprint_mismatch",
-            book_id=book_id,
-            row=cursor.last_row,
-            expected=expected,
-            actual=window.watermark_fingerprint,
-        )
-        return IngestResult(last_row=cursor.last_row, halted_reason=reason)
+        await cursors.rebase(cursor, row=moved_to)
+        # Перечитываем окно с нового адреса, а не ждём следующего прохода: это одно
+        # событие, и обработать его наполовину значило бы оставить в БД водораздел,
+        # про который никто не знает, перенёс он что-нибудь или нет.
+        window = await run_sheets_read(history.read_window, moved_to, batch_limit)
 
     accounts = await _accounts_by_sheet_key(session)
     balances = StockBalanceRepository(session)
@@ -175,13 +198,19 @@ async def ingest_intake_history(
         skipped_unknown_tab=sum(unknown.values()),
         last_row=last_row,
         backlog=window.truncated,
+        reanchored_from=reanchored_from,
     )
+    # Проход дошёл до конца — значит прошлая остановка разобрана. Забываем, что о
+    # ней уже сообщали: иначе следующая такая же осталась бы без сигнала до
+    # перезапуска воркера, то есть тем тише, чем чаще она повторяется.
+    _forget_halt(book_id)
     return IngestResult(
         applied=applied,
         skipped_unknown_tab=sum(unknown.values()),
         last_row=last_row,
         backlog=window.truncated,
         unknown_tabs=tuple(sorted(unknown)),
+        reanchored_from=reanchored_from,
     )
 
 
@@ -206,3 +235,10 @@ def should_notify_halt(book_id: str, reason: str) -> bool:
         return False
     _halt_notified.add(key)
     return True
+
+
+def _forget_halt(book_id: str) -> None:
+    """Забыть отметки об остановках этой книги — её ингест снова здоров."""
+    prefix = f"{book_id}\x1f"
+    for key in [key for key in _halt_notified if key.startswith(prefix)]:
+        _halt_notified.discard(key)

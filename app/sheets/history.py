@@ -149,6 +149,32 @@ class IntakeHistoryReader:
             return 1
         return max(1, len(worksheet.col_values(1)))
 
+    def locate_fingerprint(self, fingerprint: str) -> list[int]:
+        """Номера строк (1-based), чей отпечаток равен заданному.
+
+        Нужен, когда номер водораздела перестал совпадать с его отпечатком: строку
+        могли не тронуть вовсе, а просто сдвинуть, удалив что-то выше неё. Тогда
+        сама строка в листе есть, и её можно найти — а найдя, продолжить ровно с
+        того места, где остановились.
+
+        Возвращается **список**, а не первое попадание: одинаковые строки в журнале
+        реальны. `applyToStock_` берёт один `new Date()` на всю пачку, поэтому два
+        «Внести» в одну секунду с теми же позициями дают побайтово равные строки, а
+        значит и равные отпечатки. Выбрать из них «правильную» нельзя ничем —
+        решает вызывающий, здесь мы только показываем, сколько их.
+        """
+        try:
+            worksheet = self.client.get_stock_worksheet(HISTORY_TAB)
+        except StockSheetNotFound:
+            return []
+        last = max(1, len(worksheet.col_values(1)))
+        rows = worksheet.get(f"A1:{_LAST_COLUMN}{last}")
+        return [
+            number
+            for number, raw in enumerate(rows, start=1)
+            if fingerprint_row(raw) == fingerprint
+        ]
+
 
 def _empty_window(watermark_row: int) -> IntakeHistoryWindow:
     return IntakeHistoryWindow(

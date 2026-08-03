@@ -71,8 +71,20 @@ def _reader(rows: list[list[Any]]) -> tuple[IntakeHistoryReader, _FakeWorksheet]
     return IntakeHistoryReader(client=_FakeSheetsClient(worksheet)), worksheet
 
 
-def _event(tab: str, sku: str, qty: int, who: str = "склад@example.com") -> list[Any]:
-    return ["01.08.2026 10:00:00", tab, sku, qty, "", who]
+def _event(
+    tab: str,
+    sku: str,
+    qty: int,
+    who: str = "склад@example.com",
+    at: str = "01.08.2026 10:00:00",
+) -> list[Any]:
+    """Строка журнала. `at` — чтобы строки отличались отпечатком там, где это важно.
+
+    По умолчанию время у всех одинаковое, и это не небрежность: `applyToStock_`
+    берёт один `new Date()` на всю пачку, так что равные строки в журнале —
+    штатная реальность, а не искусственный случай.
+    """
+    return [at, tab, sku, qty, "", who]
 
 
 async def _account(session: AsyncSession, telegram_id: int, *, sheet_key: str):
@@ -288,4 +300,94 @@ async def test_halt_is_reported_once_per_process(monkeypatch):
     # Другая книга — свой сигнал.
     assert stock_ingest.should_notify_halt("book-2", "журнал змінився") is True
     stock_ingest.reset_halt_notifications()
+    assert stock_ingest.should_notify_halt("book-1", "журнал змінився") is True
+
+
+async def test_trimmed_journal_reanchors_instead_of_halting(db_session: AsyncSession, monkeypatch):
+    """Прибрали журнал сверху — ингест находит свой водораздел и едет дальше.
+
+    Это самый частый повод для расхождения отпечатка: человек удалил старые,
+    давно перенесённые строки, и всё, что ниже, поехало вверх. Сама строка-
+    водораздел при этом жива. Останавливаться здесь значило бы звать человека
+    каждый раз, когда другой человек прибрался, — и приучить его чинить руками то,
+    что чинится само.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1310, sheet_key="Магазин")
+    reader, worksheet = _reader(
+        [
+            _event("Магазин", "SKU-A", 1, at="01.08.2026 10:00:00"),
+            _event("Магазин", "SKU-B", 2, at="01.08.2026 10:01:00"),
+            _event("Магазин", "SKU-C", 3, at="01.08.2026 10:02:00"),
+        ]
+    )
+    await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    cursors = StockIntakeCursorRepository(db_session)
+    cursor = await cursors.get(book_id="book-1", tab=HISTORY_TAB)
+    assert cursor is not None and cursor.last_row == 4  # шапка + три события
+
+    # Новая приёмка приехала, а потом кто-то прибрал самую старую строку.
+    worksheet.rows.append(_event("Магазин", "SKU-D", 7, at="01.08.2026 11:00:00"))
+    worksheet.rows.pop(1)  # SKU-A: водораздел SKU-C уезжает с 4-й строки на 3-ю
+
+    result = await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    assert result.halted_reason is None, "водораздел жив — останавливаться не на чем"
+    assert result.reanchored_from == 4
+    assert result.applied == 1
+    assert await _quantity(db_session, account.id, "SKU-D") == 7
+    # Сама строка-водораздел не переигрывается: она уже учтена в количествах листа
+    # (её застал первый проход), и применить её после переякоривания значило бы
+    # задвоить ровно ту приёмку, ради целости которой всё это и делается.
+    assert await _quantity(db_session, account.id, "SKU-C") == 0
+
+    cursor = await cursors.get(book_id="book-1", tab=HISTORY_TAB)
+    assert cursor is not None and cursor.last_row == 4
+
+    # И повтор прохода по прибранному журналу ничего не задваивает.
+    again = await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+    assert (again.applied, again.reanchored_from) == (0, None)
+    assert await _quantity(db_session, account.id, "SKU-D") == 7
+
+
+async def test_duplicate_rows_keep_ingest_halted(db_session: AsyncSession, monkeypatch):
+    """Два одинаковых отпечатка — переякориться нельзя, и мы этого не делаем.
+
+    `applyToStock_` берёт один `new Date()` на всю пачку, поэтому два «Внести» в
+    одну секунду с теми же позициями дают побайтово равные строки. Выбрать из них
+    «правильную» нечем, а ошибка в любую сторону — потерянная или задвоенная
+    приёмка. Значит остановка, как и раньше.
+    """
+    settings = _settings(monkeypatch)
+    await _account(db_session, 1311, sheet_key="Магазин")
+    reader, worksheet = _reader(
+        [
+            _event("Магазин", "SKU-Y", 1, at="01.08.2026 10:00:00"),
+            _event("Магазин", "SKU-X", 2, at="01.08.2026 10:05:00"),
+            _event("Магазин", "SKU-X", 2, at="01.08.2026 10:05:00"),  # близнец
+        ]
+    )
+    await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    worksheet.rows.pop(1)  # прибрали SKU-Y → водораздел ищется по отпечатку-близнецу
+
+    result = await stock_ingest.ingest_intake_history(db_session, reader=reader, settings=settings)
+
+    assert result.halted_reason is not None
+    assert result.reanchored_from is None
+
+
+async def test_healthy_pass_forgets_previous_halt(monkeypatch):
+    """Разобранная остановка забывается — следующая обязана снова позвать человека.
+
+    Отметка «уже сообщали» живёт на процесс. Не снимай её после починки — и второй
+    такой же сбой прошёл бы молча, тем вернее, чем чаще он повторяется.
+    """
+    stock_ingest.reset_halt_notifications()
+    assert stock_ingest.should_notify_halt("book-1", "журнал змінився") is True
+    assert stock_ingest.should_notify_halt("book-1", "журнал змінився") is False
+
+    stock_ingest._forget_halt("book-1")
+
     assert stock_ingest.should_notify_halt("book-1", "журнал змінився") is True
