@@ -139,6 +139,14 @@ async def mirror_account(
         )
 
         verdict = verdicts.get(row.sku)
+        # Ячейка разошлась с `mirrored_quantity`, но с `quantity` уже совпала —
+        # значит PG про это изменение знает и правил его не человек. Так выглядит
+        # каждая приёмка: Apps Script прибавил в лист, ингест той же цифрой
+        # прибавил в PG, а зеркало ещё не переписывало ячейку. Считать это ручной
+        # правкой значит слать владельцу «правка: 10 → 30» на каждое «Внести» и
+        # писать в журнал движение с нулевой дельтой.
+        if verdict is not None and row.quantity == balance.quantity:
+            verdict = None
         if verdict is not None:
             applied, reason = verdict
             author = authors.get((row.sku, row.quantity), "")

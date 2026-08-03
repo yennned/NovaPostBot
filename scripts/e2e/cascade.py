@@ -126,19 +126,76 @@ async def _open_ttn(p: Persona, h: Human) -> bool:
     return bool(p.screen.find_data("cab:ttn:pick:") or p.screen.find_data("cab:ttn:page:"))
 
 
+async def _spread_over_catalogue(p: Persona, h: Human) -> None:
+    """Разойтись по каталогу перед набором корзины.
+
+    Пикер всегда открывается на первой странице, а в листе крупного аккаунта 1636
+    позиций по 5–15 штук в каждой. Без разбега все ТТН прогона тянут одни и те же
+    шесть верхних SKU: их доступный остаток обнуляют брони самого прогона, и он
+    останавливается о гейт oversell на втором десятке ТТН — то есть упирается не в
+    то, ради чего затевался. Живой прогон 2026-08-03 встал ровно так.
+
+    Человек с таким каталогом первые шесть строк тоже не покупает: он сначала
+    выбирает категорию, потом листает. Отсюда и порядок здесь.
+
+    Разбег обязан быть виден: `tap_data` на отсутствующей кнопке пишет
+    `missing_button` в дефекты, и сам разбег стал бы источником ложных находок —
+    поэтому и категория, и листание идут через хелперы с проверкой экрана.
+    """
+    await _pick_category(p, h)
+    for _ in range(h.rng.randrange(0, 7)):
+        if not await _page_forward(p):
+            return
+
+
+async def _page_forward(p: Persona) -> bool:
+    """Перелистнуть вперёд. По префиксу `cab:ttn:page:` тапать нельзя — он общий
+    у ◀ и ▶, и со второй страницы первой совпадёт ◀, то есть «листание» топталось
+    бы между двумя страницами."""
+    forward = next((b for b in p.screen.inline if b.text == "▶" and b.data), None)
+    if forward is None:
+        return False
+    await p.tap(forward.text, data=forward.data)
+    return True
+
+
+async def _pick_category(p: Persona, h: Human) -> None:
+    """Выбрать категорию — настоящую, не «всі».
+
+    `cab:ttn:pcat:all` — тоже чип категории, и по префиксу он совпадает первым.
+    Тап по нему не сужает выбор, а **снимает** фильтр и возвращает пикер на первую
+    страницу полного каталога — то есть отменяет разбег. Живой прогон 2026-08-03:
+    13 ТТН из 60 умерли с пустой корзиной именно так, и выглядело это как «бот не
+    даёт добавить товар».
+    """
+    chips = [
+        b
+        for b in p.screen.inline
+        if b.data and b.data.startswith("cab:ttn:pcat:") and b.data != "cab:ttn:pcat:all"
+    ]
+    if not chips:
+        return
+    chip = chips[h.rng.randrange(len(chips))]
+    await p.tap(chip.text, data=chip.data)
+
+
 async def _fill_cart(p: Persona, h: Human, *, items: int) -> int:
     """Набрать корзину. Человек листает, фильтрует, ошибается количеством."""
     added = 0
+    await _spread_over_catalogue(p, h)
     for n in range(items):
         if h.maybe():  # полистать страницы
-            await p.tap_data("cab:ttn:page:")
+            await _page_forward(p)
         if h.maybe():  # сузить категорией
-            await p.tap_data("cab:ttn:pcat:")
+            await _pick_category(p, h)
 
         # Позиция с нулевым доступным остатком степпер не открывает — бот
         # отвечает алертом и оставляет пикер. Человек в этом месте просто тычет
         # в следующий товар, поэтому перебираем, пока степпер не появится.
-        for attempt in range(6):
+        # Перебираем всю страницу, а не первые шесть: у крупного аккаунта верхние
+        # позиции первыми и выкупаются бронями самого прогона.
+        picks = sum(1 for b in p.screen.inline if b.data and b.data.startswith("cab:ttn:pick:"))
+        for attempt in range(max(picks, 1)):
             if not await p.tap_data("cab:ttn:pick:", nth=attempt):
                 break
             if p.screen.find_data("cab:ttn:qok"):
@@ -300,8 +357,23 @@ async def _one_ttn(p: Persona, h: Human, *, index: int, submit: bool) -> dict[st
     # видел «бот не ответил ничем» и выносил 🔴 «признак падения в хендлере».
     # Пять критических находок live2 — ровно это. Красный вердикт от ошибки
     # харнесса хуже отсутствующего: настоящий сигнал в нём тонет.
+    # Правка оплаты — двухэкранная: «✏️ Оплата» уводит на выбор способа, и на том
+    # экране кнопки «Відправити» нет. Тап без выбора бросал ТТН прямо здесь —
+    # `failed_at: card` на трети сценариев прогона live4, и выглядело это как
+    # дефект бота, а не харнесса. Живой человек, открыв выбор, выбирает.
     if h.maybe() and p.screen.find_data("cab:ttn:edit:pay"):
         await p.tap_data("cab:ttn:edit:pay")
+        if h.maybe() and p.screen.find_data("cab:ttn:setpm:cod"):
+            await p.tap_data("cab:ttn:setpm:cod")
+            # Наложенный платёж спрашивает сумму ещё одним экраном — и на нём
+            # «Відправити» тоже нет. Берём сумму корзины: это единственный
+            # вариант без свободного ввода.
+            if p.screen.find_data("cab:ttn:cod:cart"):
+                await p.tap_data("cab:ttn:cod:cart")
+            elif p.screen.find_data("cab:ttn:card"):
+                await p.tap_data("cab:ttn:card")
+        elif p.screen.find_data("cab:ttn:setpm:prepay"):
+            await p.tap_data("cab:ttn:setpm:prepay")
     if h.maybe() and p.screen.find_data("cab:ttn:recompute"):
         await p.tap_data("cab:ttn:recompute")
     if h.maybe() and p.screen.find_data("cab:ttn:edit:city"):
@@ -312,6 +384,12 @@ async def _one_ttn(p: Persona, h: Human, *, index: int, submit: bool) -> dict[st
             await _resolve_city(p)
             if p.screen.find_data("cab:ttn:wh:"):
                 await p.tap_data("cab:ttn:wh:")
+
+    # Страховка на будущие двухэкранные правки: любая из них может оставить нас не
+    # на карточке, и тогда сценарий бросает ТТН с `failed_at: card` — то есть врёт
+    # про бота. Человек в этом месте жмёт «◀ До картки», а не уходит из формы.
+    if not p.screen.find_data("cab:ttn:send") and p.screen.find_data("cab:ttn:card"):
+        await p.tap_data("cab:ttn:card")
 
     result["card_reached"] = bool(p.screen.find_data("cab:ttn:send"))
     if not result["card_reached"]:

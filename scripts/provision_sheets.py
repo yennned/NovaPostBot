@@ -1349,6 +1349,11 @@ def main() -> None:
     parser.add_argument("--clients", default="", help="доп. имена листов (тестовые), через запятую")
     parser.add_argument("--dry-run", action="store_true", help="только показать план, без записи")
     parser.add_argument(
+        "--only-missing",
+        action="store_true",
+        help="трогать только те листы, которых ещё нет (новый клиент на живых книгах)",
+    )
+    parser.add_argument(
         "--client-books",
         action="store_true",
         help="создать персональные read-only книги-зеркала для клиентов без stock_view_book_id",
@@ -1364,7 +1369,21 @@ def main() -> None:
         default="",
         help="клиент для --attach-book: telegram_id или фрагмент ПІБ",
     )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="файл окружения стенда (напр. .env.prod) — завести листы на боевых книгах",
+    )
     args = parser.parse_args()
+
+    # Окружение стенда — до первого `get_settings()` (он кеширован). Через dotenv,
+    # а не `source .env.prod` в шелле: `GOOGLE_SA_JSON` там лежит инлайн-JSON, и
+    # шелл срезает кавычки — ключ приезжает битым, а ошибка выглядит как «плохой
+    # сервис-аккаунт».
+    if args.env_file:
+        from scripts.e2e.env import load_stand_env
+
+        print(f"Окружение: {load_stand_env(args.env_file)}")
 
     settings = get_settings()
     db_tabs = _run_db(active_client_tabs())
@@ -1406,7 +1425,17 @@ def main() -> None:
     stock, _ = open_or_create(gc, settings.sheets_stock_book_id, STOCK_TITLE)
     ensure_locale(stock)  # «;»-формулы панели требуют comma-decimal локали (uk_UA)
     style_header(stock, ensure_worksheet(stock, TEMPLATE_TAB, STOCK_HEADERS), len(STOCK_HEADERS))
-    client_ws = [ensure_worksheet(stock, tab, STOCK_HEADERS) for tab in tabs]
+    # `--only-missing` — про живые книги: полный проход переписывает шапку и
+    # переоформляет КАЖДЫЙ лист клиента, включая тот, где 1600 строк. Ради одного
+    # нового клиента платить этим не нужно, а на боевой книге ещё и рискованно.
+    # Отбор — по КАЖДОЙ книге отдельно: лист «Склад» у клиента может быть, а
+    # «Приймання» нет, и общий фильтр молча пропустил бы второй.
+    stock_tabs = tabs
+    if args.only_missing:
+        present = {ws.title for ws in stock.worksheets()}
+        stock_tabs = [tab for tab in tabs if tab not in present]
+        print(f"«Склад» only-missing: заводим {stock_tabs or '(нечего)'}")
+    client_ws = [ensure_worksheet(stock, tab, STOCK_HEADERS) for tab in stock_tabs]
     _drop_empty_defaults(stock)
     # одна выборка метаданных на книгу → идемпотентная чистка прежнего оформления
     meta_map = {s["properties"]["sheetId"]: s for s in stock.fetch_sheet_metadata()["sheets"]}
@@ -1426,7 +1455,12 @@ def main() -> None:
     tmpl_i = ensure_worksheet(intake, TEMPLATE_TAB, INTAKE_HEADERS)
     style_header(intake, tmpl_i, len(INTAKE_HEADERS))
     setup_intake_validation(intake, tmpl_i)
-    for tab in tabs:
+    intake_tabs = tabs
+    if args.only_missing:
+        present_i = {ws.title for ws in intake.worksheets()}
+        intake_tabs = [tab for tab in tabs if tab not in present_i]
+        print(f"«Приймання» only-missing: заводим {intake_tabs or '(нечего)'}")
+    for tab in intake_tabs:
         ws = ensure_worksheet(intake, tab, INTAKE_HEADERS)
         style_header(intake, ws, len(INTAKE_HEADERS))
         setup_intake_validation(intake, ws)

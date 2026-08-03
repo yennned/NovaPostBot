@@ -21,15 +21,25 @@ from typing import Any
 
 from scripts.e2e.env import ROOT, load_stand_env
 
-_env_file = None
-if "--env-file" in sys.argv:
-    _env_file = sys.argv[sys.argv.index("--env-file") + 1]
-    os.environ.setdefault("E2E_REDIS_URL", "redis://localhost:6379/9")
-load_stand_env(_env_file)
+# Окружение стенда поднимаем ТОЛЬКО при запуске скриптом. `load_stand_env` делает
+# `load_dotenv(override=True)` по `.env.prod`, то есть импорт этого модуля молча
+# переводил бы весь процесс на боевую БД и боевой токен. Для CLI это и нужно, а
+# вот тесту, которому нужна одна чистая функция отсюда, — категорически нет:
+# `get_settings.cache_clear()` в любом последующем тесте подхватил бы прод.
+# Поймано полным прогоном: два теста разъехались по чужому `np_sender_warehouse_ref`.
+# Так же устроен `prod_health.py` — он поднимает окружение внутри своей функции.
+if __name__ == "__main__":
+    _env_file = None
+    if "--env-file" in sys.argv:
+        _env_file = sys.argv[sys.argv.index("--env-file") + 1]
+        os.environ.setdefault("E2E_REDIS_URL", "redis://localhost:6379/9")
+    load_stand_env(_env_file)
 
-from app.db.base import get_sessionmaker  # noqa: E402
-from scripts.e2e.lib import ARTIFACTS  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+# Ниже блока выше намеренно: настройки кешированы (`lru_cache`), и при запуске
+# скриптом окружение стенда обязано лечь в `os.environ` до первого их чтения.
+from app.db.base import get_sessionmaker
+from scripts.e2e.lib import ARTIFACTS, SUBMIT_FAILED_MARKER
+from sqlalchemy import text
 
 SNAPSHOT_BEFORE = ROOT / "scripts" / "e2e" / "artifacts" / "snapshot_before.json"
 
@@ -114,6 +124,75 @@ async def _state_after() -> dict[str, Any]:
 # Инварианты
 # --------------------------------------------------------------------------- #
 OPEN_STATUSES = {"created", "confirmed", "dispatched", "in_transit"}
+
+
+def _cascade_attempts(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Все попытки создать ТТН из сводок каскада — и удачные, и нет."""
+    attempts: list[dict[str, Any]] = []
+    for summary in summaries:
+        cascade = summary.get("cascade") or {}
+        for key in ("created", "dry_runs"):
+            rows = cascade.get(key)
+            if isinstance(rows, list):
+                attempts.extend(row | {"persona": summary.get("persona", "?")} for row in rows)
+    return attempts
+
+
+def _check_throughput(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Доля дошедших до документа — со знаменателем.
+
+    Прежний вердикт смотрел только на список находок, а находки рождались из
+    экранов ошибки. Прогон, где клиент раз за разом проходит всю форму и не
+    получает ТТН, давал 🟢 ЧИСТО: 2026-08-03 так и вышло — 43 документа из 60
+    попыток, отчёт чистый. Знаменатель здесь ровно для того, чтобы «сколько
+    отказов» нельзя было не заметить.
+    """
+    attempts = _cascade_attempts(summaries)
+    if not attempts:
+        return []
+    findings: list[dict[str, Any]] = []
+    submitted = [a for a in attempts if a.get("submitted")]
+    if not submitted:
+        return [
+            {
+                "severity": "high",
+                "rule": "ttn_created",
+                "detail": (
+                    f"жодної ТТН не створено за {len(attempts)} спроб — "
+                    "решта метрик звіту нічого не означає"
+                ),
+            }
+        ]
+    reasons: dict[str, int] = {}
+    for attempt in attempts:
+        if attempt.get("submitted"):
+            continue
+        reason = attempt.get("reject_reason") or f"обірвано на кроці «{attempt.get('failed_at')}»"
+        reasons[reason] = reasons.get(reason, 0) + 1
+    for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
+        findings.append(
+            {
+                "severity": "high" if SUBMIT_FAILED_MARKER in reason else "medium",
+                "rule": "submit_rejected",
+                "detail": f"{count} з {len(attempts)} спроб без ТТН: {reason}",
+            }
+        )
+    return findings
+
+
+def collect_findings(
+    steps: list[dict[str, Any]],
+    before: dict[str, Any],
+    after: dict[str, Any],
+    summaries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Все проверки прогона в одном месте.
+
+    Собрано функцией, а не выражением в `main`, ради проверяемости самой
+    разводки: выпавшую из цепочки проверку иначе не отличить от проверки,
+    которой нечего сказать, — а именно так отчёт и становится ложно-зелёным.
+    """
+    return _check_logs(steps) + _check_invariants(before, after) + _check_throughput(summaries)
 
 
 def _check_invariants(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
@@ -258,6 +337,15 @@ async def _cancel_in_db_only(shipment_id: Any) -> None:
             )
         ).scalar_one()
         owner = (await session.execute(select(User).where(User.id == row.client_id))).scalar_one()
+
+        # Уборка идёт по «новым с прошлого среза», а срез живёт неделями — в выборку
+        # попадают и ТТН, отменённые прошлыми прогонами. Второй `ttn_cancel` завысил
+        # бы журнал ровно так же, как его отсутствие занижало, и ни одна проверка
+        # этого не увидела бы: бронь не физический тип, инвариант остатка молчит.
+        from app.db.repositories import ShipmentRepository
+
+        if await ShipmentRepository(session).movement_exists(row.id, StockMovementType.ttn_cancel):
+            return
 
         await shipments.apply_cancel(
             session, shipment=row, account_id=row.account_id, actor_user_id=owner.id
@@ -414,6 +502,15 @@ def _render(
         f"Кроків усього: **{len(steps)}** · персон: **{len(by_persona)}** · "
         f"нових відправлень: **{len(new_shipments)}**\n"
     )
+    # Пропускная способность — в шапке, а не в глубине отчёта: без знаменателя
+    # «нових відправлень: 43» читается как успех, хотя попыток было 60.
+    attempts = _cascade_attempts(summaries)
+    if attempts:
+        done = sum(1 for a in attempts if a.get("submitted"))
+        lines.append(
+            f"Дійшло до документа: **{done} з {len(attempts)}** "
+            f"({done / len(attempts):.0%}) спроб створити ТТН\n"
+        )
 
     lines.append("\n## Персони\n")
     lines.append("| Персона | Кроків | Мовчань | Винятків | Екранів помилки |")
@@ -518,7 +615,7 @@ async def main() -> int:
     before_ids = {row["id"] for row in before.get("shipments", [])}
     new_shipments = [row for row in after["shipments"] if row["id"] not in before_ids]
 
-    findings = _check_logs(steps) + _check_invariants(before, after)
+    findings = collect_findings(steps, before, after, summaries)
     np_report = await _np_reconcile(new_shipments, cleanup=args.cleanup, keep=args.keep)
 
     report = _render(" + ".join(args.run_id), steps, summaries, findings, np_report, new_shipments)

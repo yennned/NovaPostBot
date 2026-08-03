@@ -11,6 +11,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import pytest
+from app.config import get_settings
 from app.db.models.enums import StockMovementType, UserRole, UserStatus
 from app.db.repositories import StockBalanceRepository, UserRepository
 from app.services import stock_reconcile
@@ -20,6 +22,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.conftest import account_of
 
 _HEADER = ["Артикул", "Назва", "Категорія", "Кількість", "Ціна", "Резерв", "Доступно"]
+
+
+@pytest.fixture(autouse=True)
+def _pg_backend(monkeypatch):
+    """Сверка количеств применима только при `INVENTORY_SOURCE=pg`.
+
+    На `sheets` количество ведёт лист, а движение пишется без сдвига остатка —
+    и внутренний инвариант, и сравнение с листом расходятся по построению.
+    Поэтому `reconcile_account` там их не выполняет вовсе, а тесты про количества
+    гоняем в том режиме, где они имеют смысл. Сам гейт проверяется отдельно.
+    """
+    monkeypatch.setenv("INVENTORY_SOURCE", "pg")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class _FakeWorksheet:
@@ -223,3 +240,66 @@ async def test_unreleased_reserve_is_reported_even_when_sheet_agrees(db_session:
     assert result.ledger_drift == () and result.confirmed == () and result.pending == ()
     assert [(number, reserve) for _, number, reserve in result.unreleased] == [("59001806", -2)]
     assert "ТТН 59001806" in (stock_reconcile.report_text(result) or "")
+
+
+async def test_quantity_checks_are_silent_until_pg_owns_the_stock(
+    db_session: AsyncSession, monkeypatch
+):
+    """На `sheets` сверка количеств молчит — иначе она кричала бы всегда.
+
+    Разложим по шагам ровно то, что произошло бы в проде между backfill и
+    переключением: backfill завёл остаток движением `manual`, отправка записала
+    физический `ttn_dispatch`, но количество в PG не сдвинула (на `sheets` его
+    ведёт лист). Инвариант «сумма физических дельт == остаток» расходится, и лист
+    с PG — тоже. Обе тревоги верны по форме и пусты по сути: это не дефект, а
+    устройство пути записи.
+
+    Мутация: убрать гейт по бэкенду — оба assert покраснеют.
+    """
+    from decimal import Decimal
+
+    from app.db.models.enums import ShipmentStatus
+    from app.db.repositories import ShipmentItemDraft, ShipmentRepository, StockMovementRepository
+
+    stock_reconcile.reset_seen()
+    user = await UserRepository(db_session).create(
+        telegram_id=1807,
+        full_name="Клієнт 1807",
+        role=UserRole.client,
+        status=UserStatus.active,
+    )
+    account = await account_of(db_session, user)
+    account.stock_sheet_key = "Магазин"
+    await db_session.flush()
+    await _stock(db_session, account.id, "A", 10)  # backfill: PG == лист == 10
+
+    # Отправка на пути `sheets`: движение есть, остаток в PG не двигается.
+    created = await ShipmentRepository(db_session).create(
+        client_id=user.id,
+        recipient_name="Іван",
+        ttn_number="59001807",
+        status=ShipmentStatus.dispatched,
+        items=[ShipmentItemDraft(sku="A", name="Кава", quantity=3, unit_price=Decimal("100"))],
+    )
+    shipment = await ShipmentRepository(db_session).get_by_id(created.id)
+    await StockMovementRepository(db_session).record_for_items(
+        client_id=user.id,
+        account_id=account.id,
+        shipment_id=shipment.id,
+        actor_user_id=user.id,
+        items=shipment.items,
+        movement_type=StockMovementType.ttn_dispatch,
+        sign=-1,
+        comment="Списання",
+    )
+    await db_session.flush()
+
+    mirror, _ = _mirror([["A", "Кава", "", 7, "", 0, 7]])  # лист уже уменьшился
+
+    monkeypatch.setenv("INVENTORY_SOURCE", "sheets")
+    get_settings.cache_clear()
+    result = await stock_reconcile.reconcile_account(db_session, account, mirror=mirror)
+
+    assert result.ledger_drift == (), "на `sheets` расхождение журнала — норма пути записи"
+    assert result.confirmed == () and result.pending == (), "лист впереди PG — тоже норма"
+    assert stock_reconcile.report_text(result) is None

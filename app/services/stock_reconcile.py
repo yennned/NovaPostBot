@@ -14,6 +14,11 @@
 статусу ТТН. Именно эта слепота и дала дефекту «ТТН удалили в кабинете НП» прожить
 полтора года.
 
+**Что работает при каком бэкенде.** Проверка брони — при любом. Две остальные —
+только при `INVENTORY_SOURCE=pg`: на `sheets` количество ведёт лист, а в PG
+движение пишется без сдвига остатка, поэтому и внутренний инвариант, и сравнение с
+листом расходятся на каждой отправке — по построению, а не из-за дефекта.
+
 **Сравнение с листом** — вспомогательное и намеренно осторожное:
 
 - сверяется **только `Кількість`**. Описательными колонками владеет лист
@@ -38,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.client_account import ClientAccount
 from app.db.repositories import StockBalanceRepository
-from app.services.inventory_backend import stock_sheet_key
+from app.services.inventory_backend import build_inventory_backend, stock_sheet_key
 from app.sheets.mirror import MirrorSheetError, StockSheetMirror
 from app.sheets.runtime import run_sheets_read
 from app.sheets.source import StockSheetNotFound
@@ -91,19 +96,40 @@ async def reconcile_account(
 ) -> AccountReconcileResult:
     key = stock_sheet_key(account)
     repo = StockBalanceRepository(session)
-    ledger_drift = tuple(await repo.ledger_matches_balance(account.id))
-    if ledger_drift:
-        # Это баг в нашем коде, а не рассинхрон с Google. Отдельный уровень лога,
-        # потому что и реакция другая: чинить надо нас, а не таблицу.
-        logger.error(
-            "stock_reconcile.ledger_drift", account_id=str(account.id), items=len(ledger_drift)
-        )
+
+    # Бронь проверяем при любом бэкенде: `ttn_reserve`/`ttn_cancel` пишутся обеими
+    # ветками `apply_physical_movement` одинаково, и вопрос «закрылась ли ТТН без
+    # возврата брони» от источника остатка не зависит вовсе.
     unreleased = tuple(await repo.unreleased_reserves(account.id))
     if unreleased:
         logger.error(
             "stock_reconcile.unreleased_reserves",
             account_id=str(account.id),
             shipments=len(unreleased),
+        )
+
+    # Всё остальное имеет смысл ТОЛЬКО когда остаток ведёт Postgres.
+    #
+    # На `sheets` количество живёт в листе, а в PG движение пишется
+    # `record_for_items` — то есть журнал пополняется, `stock_balances.quantity` не
+    # двигается. После backfill (он и заводит эти строки) инвариант «сумма
+    # физических дельт == остаток» начинает расходиться на КАЖДОЙ отправке, и
+    # сравнение с листом — тоже: лист уменьшается, снимок в PG стоит. Обе тревоги
+    # были бы верны по форме и пусты по сути, а поток ложных тревог приучает
+    # игнорировать сверку — то есть делает её хуже отсутствия.
+    #
+    # Сделать PG «тенью» листа нельзя: `ck_stock_balances_quantity_non_negative`
+    # запретит списание у аккаунта, которому backfill не делали, и штатная
+    # отправка упала бы IntegrityError. Поэтому именно гейт, а не синхронизация.
+    if build_inventory_backend().name != "pg":
+        return AccountReconcileResult(account.id, key, unreleased=unreleased)
+
+    ledger_drift = tuple(await repo.ledger_matches_balance(account.id))
+    if ledger_drift:
+        # Это баг в нашем коде, а не рассинхрон с Google. Отдельный уровень лога,
+        # потому что и реакция другая: чинить надо нас, а не таблицу.
+        logger.error(
+            "stock_reconcile.ledger_drift", account_id=str(account.id), items=len(ledger_drift)
         )
 
     try:

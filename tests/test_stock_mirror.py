@@ -347,3 +347,41 @@ async def test_missing_edits_log_does_not_block_the_edit(db_session: AsyncSessio
     assert [(e.sku, e.applied, e.author) for e in result.edits] == [("A", True, "")]
     balance = await StockBalanceRepository(db_session).get(account_id=account.id, sku="A")
     assert balance is not None and balance.quantity == 7
+
+
+async def test_intake_already_in_pg_is_not_reported_as_a_manual_edit(
+    db_session: AsyncSession, monkeypatch
+):
+    """Приёмка, которую ингест уже перенёс, — не ручная правка.
+
+    Так выглядит каждое «Внести» при включённом ингесте: Apps Script прибавил в
+    лист, ингест той же цифрой прибавил в PG, а зеркало ещё не переписывало
+    ячейку. Ячейка ≠ `mirrored_quantity`, но ячейка == `quantity` — то есть PG про
+    изменение знает. Без этой ветки владельцу уходило бы «правка: 10 → 30» на
+    каждую приёмку, а в журнал ложилось бы движение `manual` с нулевой дельтой.
+
+    Мутация: убрать сравнение с `balance.quantity` — оба assert покраснеют.
+    """
+    settings = _settings(monkeypatch)
+    account = await _account(db_session, 1523)
+    # Ингест уже применил приёмку: в PG 30, зеркало в прошлый раз писало 10.
+    await _seed(db_session, account.id, "A", 30, mirrored=10)
+    mirror, _ = _mirror([["A", "Кава", "", 30, "", 0, 30]])
+
+    result = await stock_mirror.mirror_account(
+        db_session, account, mirror=mirror, settings=settings
+    )
+
+    assert result.edits == ()
+    manual = list(
+        await db_session.scalars(
+            select(StockMovement).where(
+                StockMovement.account_id == account.id,
+                StockMovement.movement_type == StockMovementType.manual,
+            )
+        )
+    )
+    assert manual == []
+    # База для следующего цикла всё равно обновлена — иначе «правка» вернулась бы.
+    balance = await StockBalanceRepository(db_session).get(account_id=account.id, sku="A")
+    assert balance is not None and balance.mirrored_quantity == 30

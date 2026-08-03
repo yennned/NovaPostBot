@@ -57,21 +57,28 @@ def test_parse_reply_markup_is_bottom_panel() -> None:
 
 
 def test_error_markers_match_real_error_texts() -> None:
-    """Маркеры должны совпадать с текстами боевого errors-router.
+    """Маркеры должны совпадать с боевыми текстами отказа.
 
-    Разъедутся — прогон перестанет отличать «экран отрисован» от «хендлер упал и
-    пользователю показали заглушку», и отчёт станет ложно-зелёным.
+    Разъедутся — прогон перестанет отличать «экран отрисован» от «клиент получил
+    отказ», и отчёт станет ложно-зелёным.
+
+    Источников два, и это не небрежность. Первый — глобальный errors-router:
+    хендлер упал, показана заглушка. Второй — отказ НП на самом сабмите: хендлер
+    отработал штатно, но документа нет. Второй маркер добавлен после прогона
+    2026-08-03, где такой отказ не попал в отчёт вовсе.
     """
-    from app.bot.handlers import errors
+    from app.bot.handlers import errors, ttn
+    from app.services.exceptions import TtnCreationFailed
 
     live_texts = (
         errors._UNEXPECTED_TEXT,
         errors._KEY_UNREADABLE_TEXT,
         errors._STOCK_UNAVAILABLE_TEXT,
+        ttn._submit_error_text(TtnCreationFailed("Description is not valid"), {}),
     )
     for marker in ERROR_MARKERS:
         assert any(marker in text for text in live_texts), (
-            f"маркер «{marker}» не знайдено в errors.py"
+            f"маркер «{marker}» не знайдено в боєвих текстах"
         )
 
 
@@ -188,3 +195,325 @@ async def test_cascade_without_pace_keeps_old_behaviour(monkeypatch, tmp_path) -
     )
 
     assert slept == []
+
+
+async def test_spread_walks_forward_and_never_taps_a_missing_button() -> None:
+    """Разбег по каталогу идёт ВПЕРЁД и не выдумывает кнопок.
+
+    Две ловушки разом. Первая: `cab:ttn:page:` — общий префикс у ◀ и ▶, и со
+    второй страницы первой совпадает ◀; «разбег» по префиксу ходил бы туда-сюда
+    между двумя страницами, а все ТТН прогона тянули бы одни и те же шесть
+    верхних SKU. Вторая: `tap_data` на отсутствующей кнопке пишет
+    `missing_button` в дефекты — разбег стал бы источником ложных находок.
+
+    Мутация: заменить поиск «▶» на `tap_data("cab:ttn:page:")` — офсеты пойдут
+    вниз, и первый assert покраснеет.
+    """
+
+    from scripts.e2e.cascade import _spread_over_catalogue
+    from scripts.e2e.lib import Button
+
+    class _Screen:
+        def __init__(self) -> None:
+            self.offset = 0
+            self.inline: list[Button] = []
+            self._render()
+
+        def _render(self) -> None:
+            self.inline = [Button(text="🍏 Напої", data="cab:ttn:pcat:1")]
+            if self.offset > 0:
+                self.inline.append(Button(text="◀", data=f"cab:ttn:page:{self.offset - 6}"))
+            if self.offset < 24:  # каталог на пять страниц
+                self.inline.append(Button(text="▶", data=f"cab:ttn:page:{self.offset + 6}"))
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = _Screen()
+            self.defects: list[dict] = []
+            self.taps: list[str] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            if data and data.startswith("cab:ttn:page:"):
+                self.screen.offset = int(data.rsplit(":", 1)[1])
+                self.screen._render()
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            """Как настоящий: первая совпавшая кнопка, иначе дефект.
+
+            Нужен, чтобы мутация «тапать по префиксу `cab:ttn:page:`» краснела
+            по существу — уходом офсетов назад, — а не `AttributeError` фейка.
+            """
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    class _Rng:
+        """Детерминированно: первая категория и ровно четыре шага вперёд.
+
+        Со случайным seed длина разбега плавает, и «шаг назад» пряталcя бы за
+        прогоном длиной в один шаг — тест был бы зелёным по удаче.
+        """
+
+        @staticmethod
+        def randrange(*args: int) -> int:
+            return 4 if len(args) == 2 else 0
+
+    class _Human:
+        rng = _Rng()
+
+    persona = _Persona()
+    await _spread_over_catalogue(persona, _Human())
+
+    pages = [int(t.rsplit(":", 1)[1]) for t in persona.taps if t.startswith("cab:ttn:page:")]
+    assert pages == [6, 12, 18, 24], "разбег обязан двигаться вперёд"
+    assert persona.screen.offset == pages[-1]
+    assert persona.defects == [], "разбег не должен порождать дефектов"
+
+
+async def test_spread_stops_at_the_end_of_the_catalogue() -> None:
+    """Каталог короче разбега — упираемся в конец и выходим, а не тапаем пустоту."""
+    import random
+
+    from scripts.e2e.cascade import _spread_over_catalogue
+    from scripts.e2e.lib import Button
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = type("S", (), {"inline": [Button(text="🍏", data="cab:ttn:pcat:1")]})()
+            self.defects: list[dict] = []
+            self.taps: list[str] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    class _Human:
+        rng = random.Random(1)
+
+    persona = _Persona()
+    await _spread_over_catalogue(persona, _Human())
+
+    assert persona.taps == ["cab:ttn:pcat:1"]
+    assert persona.defects == []
+
+
+async def test_category_pick_never_taps_reset_chip() -> None:
+    """«Сузить категорией» обязано сужать, а не снимать фильтр.
+
+    `cab:ttn:pcat:all` — первый чип в клавиатуре всегда (`category_chips`
+    ставит «Всі» перед категориями), поэтому тап по префиксу `cab:ttn:pcat:`
+    попадал именно в него: пикер возвращался на первую страницу полного
+    каталога, разбег отменялся, и корзина набиралась из тех же шести верхних
+    SKU, чей остаток уже выкуплен бронями прогона. Живой прогон 2026-08-03:
+    13 ТТН из 60 умерли с пустой корзиной, и в отчёте это выглядело как дефект
+    бота.
+
+    Мутация: вернуть `p.tap_data("cab:ttn:pcat:")` — тап уйдёт в `all`.
+    """
+    from scripts.e2e.cascade import _pick_category
+    from scripts.e2e.lib import Button
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = type(
+                "S",
+                (),
+                {
+                    "inline": [
+                        Button(text="• Всі", data="cab:ttn:pcat:all"),
+                        Button(text="Кава", data="cab:ttn:pcat:0"),
+                        Button(text="Чай", data="cab:ttn:pcat:1"),
+                    ]
+                },
+            )()
+            self.taps: list[str] = []
+            self.defects: list[dict] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            return {}
+
+        async def tap_data(self, prefix: str, *, nth: int = 0):
+            matches = [b for b in self.screen.inline if b.data and b.data.startswith(prefix)]
+            if len(matches) <= nth:
+                self.defects.append({"kind": "missing_button", "target": prefix})
+                return {}
+            return await self.tap(matches[nth].text, data=matches[nth].data)
+
+    class _Human:
+        rng = type("R", (), {"randrange": staticmethod(lambda *a: 0)})()
+
+    persona = _Persona()
+    await _pick_category(persona, _Human())
+
+    assert persona.taps == ["cab:ttn:pcat:0"]
+    assert "cab:ttn:pcat:all" not in persona.taps
+
+
+async def test_category_pick_is_silent_without_real_categories() -> None:
+    """Только «Всі» на экране — не тапаем ничего и не пишем дефект.
+
+    Иначе у аккаунта без категорий каскад сам бы себе выдумывал `missing_button`.
+    """
+    from scripts.e2e.cascade import _pick_category
+    from scripts.e2e.lib import Button
+
+    class _Persona:
+        def __init__(self) -> None:
+            self.screen = type(
+                "S", (), {"inline": [Button(text="• Всі", data="cab:ttn:pcat:all")]}
+            )()
+            self.taps: list[str] = []
+            self.defects: list[dict] = []
+
+        async def tap(self, pattern: str, *, data: str | None = None):
+            self.taps.append(data or pattern)
+            return {}
+
+    class _Human:
+        rng = type("R", (), {"randrange": staticmethod(lambda *a: 0)})()
+
+    persona = _Persona()
+    await _pick_category(persona, _Human())
+
+    assert persona.taps == []
+    assert persona.defects == []
+
+
+def test_verdict_counts_attempts_not_only_error_screens() -> None:
+    """Вердикт обязан видеть знаменатель.
+
+    Прежде вердикт складывался только из находок, а находки рождались из экранов
+    ошибки. Отказ НП на сабмите (`Description is not valid`) экраном ошибки не
+    считался, и прогон 2026-08-03 отчитался 🟢 ЧИСТО, потеряв 17 попыток из 60:
+    клиент проходил всю форму и не получал документ.
+
+    Мутация: вернуть `_check_throughput`, смотрящий только на `submitted`
+    без разбора причин, — пропадёт критичность отказа НП.
+    """
+    from scripts.e2e.validate import _check_throughput
+
+    summaries = [
+        {
+            "persona": "veronika",
+            "cascade": {
+                "created": [
+                    {"submitted": True, "ttn_number": "1"},
+                    {"submitted": False, "reject_reason": "❌ Не вдалося створити ТТН: bad"},
+                    {"submitted": False, "failed_at": "cart"},
+                ],
+                "dry_runs": [],
+            },
+        }
+    ]
+    findings = _check_throughput(summaries)
+
+    rejected = {f["detail"]: f["severity"] for f in findings}
+    assert any("Не вдалося створити ТТН" in d and s == "high" for d, s in rejected.items())
+    assert any("cart" in d and s == "medium" for d, s in rejected.items())
+    assert all("1 з 3" in f["detail"] for f in findings), "у знахідки має бути знаменник"
+
+
+def test_verdict_is_critical_when_nothing_was_created() -> None:
+    """Ноль созданных ТТН — критично, остальные метрики отчёта тогда пусты.
+
+    Прогон, где 100 % сабмитов упали, имеет отличный p95: отказ быстрее успеха.
+    """
+    from scripts.e2e.validate import _check_throughput
+
+    findings = _check_throughput(
+        [{"persona": "x", "cascade": {"created": [{"submitted": False}] * 5}}]
+    )
+
+    assert [f["severity"] for f in findings] == ["high"]
+    assert findings[0]["rule"] == "ttn_created"
+
+
+def test_throughput_silent_without_cascade() -> None:
+    """Прогон без каскада (одни сценарии-пробники) не должен выдумывать находок."""
+    from scripts.e2e.validate import _check_throughput
+
+    assert _check_throughput([{"persona": "x", "cascade": {}}]) == []
+
+
+def test_collect_findings_runs_the_throughput_check() -> None:
+    """Проверка обязана быть подключена, а не просто существовать.
+
+    Прогон 2026-08-03 отчитался 🟢 ЧИСТО не потому, что проверок не было, а
+    потому что ни одна не смотрела на знаменатель. Отдельно проверяем факт
+    вызова: выпавшую из цепочки проверку иначе не отличить от молчаливой.
+
+    Мутация: убрать `_check_throughput` из `collect_findings` — тест покраснеет.
+    """
+    from scripts.e2e.validate import collect_findings
+
+    findings = collect_findings(
+        steps=[],
+        before={"shipments": []},
+        after={"shipments": [], "movements": [], "users": []},
+        summaries=[{"persona": "x", "cascade": {"created": [{"submitted": False}]}}],
+    )
+
+    assert [f["rule"] for f in findings] == ["ttn_created"]
+
+
+def test_submit_failure_is_an_error_marker() -> None:
+    """Отказ НП на сабмите — маркер отказа, а не «просто экран».
+
+    Мутация: убрать `SUBMIT_FAILED_MARKER` из `ERROR_MARKERS` — тест покраснеет.
+    Без этого прогон считает такой шаг успешным: заглушки errors-router нет,
+    исходящее сообщение есть, молчания нет.
+    """
+    from scripts.e2e.lib import SUBMIT_FAILED_MARKER
+
+    assert SUBMIT_FAILED_MARKER in ERROR_MARKERS
+
+
+def test_validate_import_does_not_load_prod_env() -> None:
+    """Импорт валидатора не должен переводить процесс на боевое окружение.
+
+    `load_stand_env` делает `load_dotenv(".env.prod", override=True)`: боевые
+    `DATABASE_URL`, `BOT_TOKEN`, ключи. При загрузке на импорте любой тест, зовущий
+    `get_settings.cache_clear()`, дальше работал бы с продом — а гейт безопасной
+    тестовой БД в `conftest` отрабатывает один раз на старте сессии и этого уже
+    не заметит.
+
+    Поймано полным прогоном: после добавления тестов на вердикт два чужих теста
+    начали видеть боевой `np_sender_warehouse_ref`.
+
+    Мутация: вынести `load_stand_env(...)` из-под `if __name__ == "__main__"`.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from scripts.e2e.env import DEFAULT_ENV_FILE
+
+    if not DEFAULT_ENV_FILE.exists():
+        return  # на CI боевого файла нет — травить нечем
+
+    probe = (
+        "import os;"
+        "before = os.environ.get('NP_SENDER_WAREHOUSE_REF');"
+        "import scripts.e2e.validate;"
+        "print(before == os.environ.get('NP_SENDER_WAREHOUSE_REF'))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=os.getcwd(),
+        env={**os.environ, "PYTHONPATH": os.getcwd()},
+    )
+    assert out.stdout.strip().endswith("True"), out.stdout + out.stderr

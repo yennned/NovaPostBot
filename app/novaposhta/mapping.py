@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from typing import Any
 
@@ -53,6 +54,102 @@ def money(value: Decimal | int | str) -> str:
 def weight(value: Decimal | int | str) -> str:
     """Вес (кг) → строку для НП (через `str()` — защита от float-шума)."""
     return f"{Decimal(str(value)):f}"
+
+
+# Что НП принимает в `Description`. Снято живым перебором по
+# `InternetDocument.save` 2026-08-03: пробник создавал и тут же удалял документ на
+# каждый символ. НП валидирует поле по закрытому белому списку и на всё вне него
+# отвечает `Description is not valid`, не называя виновника.
+#
+# Принято:   латиница ASCII, цифры, кириллица (рус.+укр., включая їґё), пробел,
+#            пунктуация ниже — и, неожиданно, эмодзи (☕ ✅ прошли).
+# Отвергнуто: % { } ~ ^ @ $ ° × – — … € ₴ ™ © § ± ≥ · •  и любая буква вне
+#            ASCII/кириллицы: é ü ß ў ² ½ α 中.
+#
+# Список именно разрешённого, а не запрещённого: перечень НП закрытый, и любой
+# неучтённый символ обязан отсеяться сам, а не уронить создание ТТН у клиента.
+#
+# Апостроф `ʼ` (U+02BC) здесь не для красоты: это украинский апостроф из
+# «м'ясо», и вырезать его из названия товара нельзя. `&` и `#` тоже приняты —
+# сверка с боевым листом показала 7 названий с амперсандом, которые первый
+# вариант этого списка резал зря.
+NP_DESCRIPTION_PUNCTUATION = "()[]/\\+*=<>|`'\";:,.!?№_-«»’‘“”&#ʼ´ʹ‑"
+
+# Кириллица, которую НП принимает: основной блок (А-я покрывает и Ъъ Ыы Ээ) плюс
+# буквы, лежащие вне него.
+NP_DESCRIPTION_CYRILLIC_EXTRA = "ЁёІіЇїЄєҐґ"
+
+# Замены для отвергнутого, у чего есть внятный эквивалент: молча выбросить тире из
+# «Кава – 250 г» значит склеить слова, а `×` в «10×20» несёт смысл. Дробная черта
+# нужна для `½`, которая ниже разложится в «1 ⁄ 2».
+NP_DESCRIPTION_REPLACEMENTS = {
+    "–": "-",
+    "—": "-",
+    "−": "-",
+    "…": "...",
+    "×": "x",
+    "·": "-",
+    "•": "-",
+    "⁄": "/",
+    "₴": " грн",
+    "€": " EUR",
+    "$": " USD",
+    "°": " град",
+    "±": "+-",
+    "ß": "ss",
+    "%": " відс.",
+}
+
+# Максимум, который принимает НП. Совпадает с прежним срезом в хендлере ТТН.
+NP_DESCRIPTION_LIMIT = 100
+
+# Что подставить, если после чистки не осталось ничего (описание из одних 中).
+NP_DESCRIPTION_FALLBACK = "Товари"
+
+
+def _np_allows(char: str) -> bool:
+    """Символ входит в белый список НП."""
+    return (
+        "a" <= char <= "z"
+        or "A" <= char <= "Z"
+        or "0" <= char <= "9"
+        or "А" <= char <= "я"
+        or char in NP_DESCRIPTION_CYRILLIC_EXTRA
+        or char in NP_DESCRIPTION_PUNCTUATION
+        or char.isspace()
+    )
+
+
+def description(value: str) -> str:
+    """Описание вкладення → строку, которую примет НП.
+
+    НП отбраковывает поле целиком из-за одного постороннего символа, её ответ
+    (`Description is not valid`) клиенту ничего не объясняет и приходит уже после
+    того, как он прошёл всю форму. Названия товаров с `100%`, `–` или `₴`
+    встречаются сплошь, поэтому чистка — не косметика: без неё такой SKU нельзя
+    отправить вовсе. Живой прогон 2026-08-03: 3 ТТН из 60 умерли ровно так.
+
+    Буквы с диакритикой не выбрасываем, а разлагаем: `Café` → `Cafe` читается,
+    `Caf` — нет. Разложение применяется **только** к тому, что НП не приняла:
+    `ї`, `ё`, `ґ` в белом списке есть, а канонически они раскладываются на базовую
+    букву со знаком, и безусловный NFD молча превратил бы украинский текст в
+    русский.
+    """
+    cleaned: list[str] = []
+    for char in value:
+        if _np_allows(char):
+            cleaned.append(char)
+        elif char in NP_DESCRIPTION_REPLACEMENTS:
+            cleaned.append(NP_DESCRIPTION_REPLACEMENTS[char])
+        else:
+            for part in unicodedata.normalize("NFD", char):
+                if _np_allows(part):
+                    cleaned.append(part)
+                elif part in NP_DESCRIPTION_REPLACEMENTS:
+                    cleaned.append(NP_DESCRIPTION_REPLACEMENTS[part])
+    # Пробелы схлопываем после замен: выброшенный символ мог оставить двойной.
+    text = " ".join("".join(cleaned).split())[:NP_DESCRIPTION_LIMIT].strip()
+    return text or NP_DESCRIPTION_FALLBACK
 
 
 def _positive_decimal(value: Decimal | int | str, *, field: str) -> Decimal:
@@ -177,7 +274,9 @@ def to_save_props(draft: TTNDraft) -> dict[str, Any]:
         "SeatsAmount": str(seats_amount),
         "Weight": weight(draft.parcel.weight),
         "OptionsSeat": options_seat,
-        "Description": draft.description,
+        # Чистим здесь, а не только в хендлере: это последняя точка перед НП, и
+        # она прикрывает любого вызывающего — воркер, скрипты, будущий код.
+        "Description": description(draft.description),
         "Cost": money(draft.cost),
         # Отправитель (наш склад, контрагент = ФОП).
         "CitySender": draft.sender.city_ref,

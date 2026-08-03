@@ -1933,3 +1933,43 @@ async def test_negative_index_rejected_warehouse():
     await h.cb_wh(cb, _ctx(_CLIENT), None, object(), state)
     assert "recipient_warehouse_ref" not in state._data
     assert cb.acks[-1]["show_alert"] is True
+
+
+async def test_card_description_is_np_safe(monkeypatch):
+    """Автоопис из названий товаров уже очищен от того, что НП не принимает.
+
+    Клиент подтверждает карточку, и то же описание печатается на ярлыке. Если
+    чистить только на границе с НП, на карточке будет одно, а в документе другое.
+    Живой прогон 2026-08-03: SKU «Кава Ferarra 100% Arabica» убил ТТН на сабмите.
+    """
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(
+        cart={"SKU1": {"qty": 2, "name": "Кава Ferarra 100% Arabica – 250 г", "price": "150"}}
+    )
+    await h.cb_wh(FakeCallback("cab:ttn:wh:0"), _ctx(_CLIENT), None, object(), state)
+
+    assert state._data["description"] == "Кава Ferarra 100 відс. Arabica - 250 г"
+
+
+async def test_manual_description_is_cleaned_and_client_told(monkeypatch):
+    """Введённое руками чистим, но не молча: человек видит, что уйдёт в НП."""
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="descr")
+    state.state = CreateTtnState.editing_field
+    message = FakeMessage("Кава 100% арабіка")
+    await h.receive_edit(message, None, state, _ctx(_CLIENT), None, object())
+
+    assert state._data["description"] == "Кава 100 відс. арабіка"
+    assert any("не приймає деякі символи" in a["text"] for a in message.answers)
+
+
+async def test_clean_description_does_not_nag(monkeypatch):
+    """Описание без посторонних символов не должно вызывать лишнее сообщение."""
+    _patch_pricing(monkeypatch, quote=_quote())
+    state = _card_state(edit_field="descr")
+    state.state = CreateTtnState.editing_field
+    message = FakeMessage("Кава арабіка 250 г")
+    await h.receive_edit(message, None, state, _ctx(_CLIENT), None, object())
+
+    assert state._data["description"] == "Кава арабіка 250 г"
+    assert not any("не приймає деякі символи" in a["text"] for a in message.answers)
