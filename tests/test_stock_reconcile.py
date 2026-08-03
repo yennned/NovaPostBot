@@ -165,6 +165,34 @@ async def test_sheet_only_sku_is_reported_but_never_imported(db_session: AsyncSe
     assert "не імпортуємо" in (stock_reconcile.report_text(result) or "")
 
 
+async def test_pg_only_sku_is_reported_as_invisible_to_the_operator(db_session: AsyncSession):
+    """Позиция есть в боте, но не в листе — сверка обязана об этом сказать.
+
+    Считалась она всегда, а в сообщение не попадала: сверка молча знала, что часть
+    ассортимента оператор не видит вовсе — ни остатка, ни самой позиции, — и
+    рапортовала «розбіжностей немає». Это ровно та жалоба «в таблиці не всі товари»,
+    ради которой сверка и нужна.
+
+    Мутация: убрать ветку `pg_only` из `report_text` — тест покраснеет.
+    """
+    stock_reconcile.reset_seen()
+    account = await _account(db_session, 1805)
+    await StockBalanceRepository(db_session).apply_movement(
+        account_id=account.id,
+        sku="НЕВИДИМИЙ",
+        delta=7,
+        movement_type=StockMovementType.intake,
+    )
+    await db_session.flush()
+    mirror, _ = _mirror([])
+
+    result = await stock_reconcile.reconcile_account(db_session, account, mirror=mirror)
+
+    assert result.pg_only == ("НЕВИДИМИЙ",)
+    report = stock_reconcile.report_text(result) or ""
+    assert "НЕВИДИМИЙ" in report and "не бачить" in report
+
+
 async def test_ledger_drift_is_reported_as_our_bug(db_session: AsyncSession):
     """Расхождение PG с собственным журналом — единственная проверка, которую
     сравнение с Google дать не может в принципе."""

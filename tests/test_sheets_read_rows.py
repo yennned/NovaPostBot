@@ -171,6 +171,29 @@ def test_read_stock_skips_side_panel_phantom_rows():
     assert str(stock[0].price) == "100"
 
 
+def test_read_stock_keeps_a_row_whose_name_is_blank():
+    """Позиция с артикулом, но без «Назви», читается — а не исчезает молча.
+
+    Ключ строки — артикул; название описательное. Пока оно было обязательным, такая
+    позиция выпадала из backfill и из сверки: её остатка не существовало нигде, а
+    сверка при этом рапортовала «розбіжностей немає». Зеркало же
+    (`StockSheetMirror.read_snapshot`) эту строку видело всегда — два читателя
+    одного листа расходились в том, какие строки на нём есть.
+
+    Мутация: вернуть `if not sku or not name: continue` — строка снова пропадёт.
+    """
+
+    class _Client:
+        def read_rows(self, client_key):
+            return [
+                {"Артикул": "NO-NAME", "Назва": "", "Категорія": "", "Кількість": "9", "Ціна": ""},
+            ]
+
+    stock = GoogleSheetsStockSource(client=_Client()).read_stock("Вася")
+
+    assert [(r.sku, r.name, r.quantity) for r in stock] == [("NO-NAME", "NO-NAME", 9)]
+
+
 def test_side_summary_cells_structure_and_formulas():
     cells = side_summary_cells()
     assert len(cells) == 19
