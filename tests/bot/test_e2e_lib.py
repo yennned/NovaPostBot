@@ -735,3 +735,90 @@ async def test_open_stepper_reports_when_nothing_opens() -> None:
     persona = _P()
     assert await open_stepper(persona) is False
     assert persona.defects == [], "перебор не должен выдумывать отсутствующие позиции"
+
+
+def _empty_state(**over):
+    base = {"shipments": [], "movements": [], "users": [], "holds": []}
+    base.update(over)
+    return base
+
+
+def test_attached_hold_that_is_not_released_is_critical() -> None:
+    """Бронь привязана к ТТН, но не снята — остаток вычтен дважды.
+
+    `attach` проставляет `shipment_id` и `released_at` одним `update`, поэтому
+    строка с первым и без второго означает: количество держит и статус
+    отправления, и бронь поверх него. Клиент недосчитается товара, которого у
+    него на складе достаточно.
+
+    Мутация: убрать ветку — находка исчезнет.
+    """
+    from scripts.e2e.validate import _check_invariants
+
+    findings = _check_invariants(
+        {},
+        _empty_state(
+            holds=[
+                {
+                    "sku": "SKU1",
+                    "quantity": 3,
+                    "submit_key": "k1",
+                    "shipment_id": "ship-1",
+                    "expires_at": "2026-08-03T10:00:00",
+                    "expired": False,
+                }
+            ]
+        ),
+    )
+
+    assert [(f["rule"], f["severity"]) for f in findings] == [("hold_released_on_attach", "high")]
+
+
+def test_hold_that_outlived_its_ttl_is_critical() -> None:
+    """Бронь пережила TTL — дворник до неё не дошёл, остаток занижен."""
+    from scripts.e2e.validate import _check_invariants
+
+    findings = _check_invariants(
+        {},
+        _empty_state(
+            holds=[
+                {
+                    "sku": "SKU1",
+                    "quantity": 2,
+                    "submit_key": "k2",
+                    "shipment_id": None,
+                    "expires_at": "2026-08-03T10:00:00",
+                    "expired": True,
+                }
+            ]
+        ),
+    )
+
+    assert [f["rule"] for f in findings] == ["hold_swept"]
+
+
+def test_fresh_hold_in_flight_is_not_a_finding() -> None:
+    """Живая бронь в пределах TTL — не дефект: сабмит мог быть в полёте.
+
+    Иначе прогон, снятый в момент чужого сабмита, краснел бы на ровном месте — а
+    поток ложных тревог обесценивает вердикт быстрее, чем их отсутствие.
+    """
+    from scripts.e2e.validate import _check_invariants
+
+    findings = _check_invariants(
+        {},
+        _empty_state(
+            holds=[
+                {
+                    "sku": "SKU1",
+                    "quantity": 1,
+                    "submit_key": "k3",
+                    "shipment_id": None,
+                    "expires_at": "2099-01-01T00:00:00",
+                    "expired": False,
+                }
+            ]
+        ),
+    )
+
+    assert findings == []
