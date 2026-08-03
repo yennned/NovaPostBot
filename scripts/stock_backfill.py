@@ -62,6 +62,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill остатка из «Склад» в Postgres")
     parser.add_argument("--dry-run", action="store_true", help="показать план и выйти")
     parser.add_argument("--yes", action="store_true", help="не спрашивать подтверждения")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="файл окружения стенда (напр. .env.prod) — перенести боевой остаток",
+    )
     return parser.parse_args()
 
 
@@ -197,9 +202,18 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    args = _parse_args()
+    # Окружение стенда — до первого `get_settings()` (кеширован) и до создания
+    # движка. Через dotenv, а не `source .env.prod`: `GOOGLE_SA_JSON` там лежит
+    # инлайн-JSON, и шелл срезает кавычки.
+    if args.env_file:
+        from scripts.e2e.env import load_stand_env
+
+        print(f"Окружение: {load_stand_env(args.env_file)}")
+
     async def _wrap() -> int:
         try:
-            return await _run(_parse_args())
+            return await _run(args)
         finally:
             # Движок кэшируется на уровне модуля, а asyncpg-соединения привязаны к
             # циклу событий: без dispose следующий `asyncio.run` получил бы
